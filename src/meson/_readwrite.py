@@ -34,11 +34,8 @@ def read_HnE():
 def read_mIF():
     pass
 
-class SpatialData(sd.SpatialData):
-    def __init__(self, **kwargs):
-        super().__init__(self, **kwargs)
-    
-    def write(self, file_path: str, **kwargs):
+class SpatialData(sd.SpatialData): 
+    def write(self, file_path: str, *args, **kwargs):
         sdata_copy = copy.copy(self)  # Shallow copy of the main object
         
         sdata_copy.tables = copy.copy(self.tables)  
@@ -50,11 +47,11 @@ class SpatialData(sd.SpatialData):
                 patch_arr = sdata_copy[table_name].obsm['patch']
                 sdata_copy[table_name].obsm['patch'] = da.zeros((len(patch_arr)))
 
-        sdata_copy.write(file_path, **kwargs)
+        sdata_copy.write(file_path, *args, **kwargs)
 
 
-def from_zarr(store, **kwargs):
-    sdata = sd.read_zarr(store, **kwargs)
+def from_zarr(store, *args, **kwargs):
+    sdata = sd.read_zarr(store, *args, **kwargs)
     for table_name, table in sdata.tables.items():
         if 'patch' not in table.obsm:
             continue

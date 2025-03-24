@@ -4,4 +4,4 @@ from . import tools as tl
 
 from ._readwrite import read, read_HnE, read_mIF, SpatialData
 from ._settings import settings
-from ._wsi import wsi
+from ._wsi import add_wsi, read_wsi

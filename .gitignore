@@ -5,3 +5,4 @@
 *.egg-info
 src_old/
 build/
+notebooks/

@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any, Literal, Tuple
 
 import xarray
+from spatialdata.transformations import set_transformation, Identity
 from spatialdata import SpatialData
 from spatialdata.models import Image2DModel
 from spatialdata.transformations import Identity, Scale
@@ -12,12 +13,13 @@ def add_wsi(sdata: SpatialData,
             path: str | Path, 
             backend: Literal["tiffslide", "openslide"] = "tiffslide",
             image_name: str | None = None, 
-            **kwargs):
-    wsi_img, slide_name, slide_metadata = read_wsi(path=path, backend=backend, **kwargs)
+            *args, **kwargs):
+    wsi_img, slide_name, slide_metadata = read_wsi(path=path, backend=backend, *args, **kwargs)
     if image_name is None:
         image_name = slide_name
-    sdata = SpatialData(images={image_name: wsi_img})
-                        #attrs={SopaAttrs.TISSUE_SEGMENTATION: image_name})
+     # design choice: each image gets their own coordinate system besides the global one
+    set_transformation(wsi_img, Identity(), image_name) 
+    sdata[image_name] = wsi_img
     sdata[image_name].attrs["metadata"] = slide_metadata
     sdata[image_name].attrs["backend"] = backend
     sdata[image_name].name = image_name
@@ -39,10 +41,16 @@ def read_wsi(
     Returns:
         A `SpatialData` object with a multiscale 2D-image of shape `(C, Y, X)`, or just the DataTree if `as_image=True`
     """
-    _image_name, img, slide, slide_metadata = _open_wsi(path, backend=backend)
-    if image_name is None:
-        image_name = _image_name
-    print(img, img.keys())
+    if not as_image:
+        import meson
+        sdata = meson.SpatialData()
+        add_wsi(sdata, path=path, backend=backend)
+        return sdata 
+    
+    image_name, img, slide, slide_metadata = _open_wsi(path, backend=backend)
+    # img = img.rename_dims({"S": "C", "Y": "Y", "X": "X"})
+    img = img.rename_dims({"S": "C"})
+
     images = {}
     for level, key in enumerate(sorted(list(img.keys()), key=int)):
         suffix = key if key != "0" else ""
@@ -65,15 +73,7 @@ def read_wsi(
         images[f"scale{key}"] = Dataset({"image": scale_image})
 
     multiscale_image = DataTree.from_dict(images)
-    if as_image:
-        return multiscale_image, image_name, slide_metadata
-    else:
-        sdata = SpatialData(images={image_name: multiscale_image})
-                        #attrs={SopaAttrs.TISSUE_SEGMENTATION: image_name})
-        sdata[image_name].attrs["metadata"] = slide_metadata
-        sdata[image_name].attrs["backend"] = backend
-        sdata[image_name].name = image_name
-        return sdata
+    return multiscale_image, image_name, slide_metadata
 
 
 
