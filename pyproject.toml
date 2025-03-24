@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "meson"
+version = "1.0.0"
+description = "A package for mesoscale tissue analysis using multiomics data"
+authors = [{ name = "Ziyuan Zhao", email = "ziyuanzhao@fas.harvard.edu" }]
+readme = "README.md"
+license = { text = "MIT" }
+dependencies = [
+    "openslide-python",
+    "shapely",
+    "scikit-image",
+    "matplotlib",
+    "seaborn",
+    "zarr",
+    "dask",
+    "opencv-python",
+    "spatialdata[extra]",
+    "tiffslide",
+    "torchvision",
+    "timm",
+    "huggingface_hub"
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

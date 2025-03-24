@@ -1,0 +1,6 @@
+**/*.zarr/
+.DS_Store
+*.bin
+*.pyc
+*.egg-info
+src_old/
