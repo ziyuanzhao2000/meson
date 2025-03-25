@@ -5,36 +5,45 @@ import xarray as xr
 import numpy as np
 from spatialdata import SpatialData, bounding_box_query, polygon_query, to_polygons
 from spatialdata.models import TableModel, PointsModel
-from spatialdata.transformations import set_transformation, Affine
+from spatialdata.transformations import set_transformation, Affine, Identity
 from ._make_bbox import make_bbox
 from .._readwrite import get_base_level, get_scaling_factor
 from shapely.affinity import affine_transform
 
+from spatialdata.transformations._utils import (
+    _get_transformations,
+    _set_transformations,
+    compute_coordinates,
+)
+
 def _filter_points(sdata, image_name, point_name, size):
     img_obj = sdata[image_name]
+    cs = image_name.split('_')[0]
     points = sdata[f'{image_name}_{point_name}']
     tissue_mask = sdata[f'{image_name}_tissue']
-    size = np.array(size)
-    xmin, ymin = size/2
-    ymax, xmax = get_base_level(img_obj).shape[1:] - size/2
-    print(len(points))
-    filtered_points = bounding_box_query(points, 
-                                         axes=['x', 'y'],
-                                         min_coordinate=[xmin, ymin], 
-                                         max_coordinate=[xmax, ymax], 
-                                         target_coordinate_system=image_name)
-    print(len(filtered_points))
     mask_polygon = to_polygons(tissue_mask)
     scaling_factors = get_scaling_factor(img_obj)
     affine = Affine(np.eye(3) * [*scaling_factors, 1], 
-                    input_axes=['x', 'y'], output_axes=['x', 'y'])
-    set_transformation(mask_polygon, affine, image_name)
+                    input_axes=['x', 'y'], 
+                    output_axes=['x', 'y'])
+    set_transformation(mask_polygon, affine, cs)
+    filtered_points = points.copy()
+    filtered_points['ID'] = points.index
     for polygon in mask_polygon['geometry']:
         transformed_polygon = affine_transform(polygon, [scaling_factors[0], 0, 0, scaling_factors[1], 0, 0])
         filtered_points = polygon_query(filtered_points, 
                                         polygon=transformed_polygon,
-                                        target_coordinate_system=image_name)
-    print(len(filtered_points))
+                                        target_coordinate_system=cs)
+    xmin, ymin = size/2, size/2
+    ymax, xmax = np.array(get_base_level(img_obj).shape[1:]) - size/2
+    filtered_points = PointsModel.parse(filtered_points.compute())
+    set_transformation(filtered_points, Identity(), cs)
+    filtered_points = bounding_box_query(filtered_points, 
+                                         axes=['x', 'y'],
+                                         min_coordinate=[xmin, ymin], 
+                                         max_coordinate=[xmax, ymax], 
+                                         target_coordinate_system=cs)
+    filtered_points = filtered_points.set_index('ID')
     return filtered_points
 
 
@@ -53,35 +62,29 @@ def make_patch(sdata: SpatialData,
                       size=100, shape_name='bbox', cs=cs)
     shape_name = f"{image_name}_{point_name}_bbox"
     image = sdata[image_name]
-    print(image_name, image.shape)
     half_size = size // 2
-    _, height, width = image.shape
-    valid_points = []
-    valid_patches = []
+    points_idx = []
+    patches = []
 
     for idx, point in points.iterrows():
         x, y = point.astype(int)
         # Check if patch would be fully within image bounds
-        if (x >= half_size and x < width - half_size and 
-            y >= half_size and y < height - half_size):
-            valid_points.append(idx)
-            patch = image[
-                :,  # All channels
-                y - half_size:y + half_size,
-                x - half_size:x + half_size
-            ]
-            valid_patches.append(patch)
-
-    patches_array = da.stack(valid_patches)
+        patch = image[
+            :,  # All channels
+            y - half_size:y + half_size,
+            x - half_size:x + half_size
+        ]
+        points_idx.append(idx)
+        patches.append(patch)
+    patches_array = da.stack(patches)
     obs = pd.DataFrame()
-    obs["instance_id"] = valid_points
+    obs["instance_id"] = points_idx
     obs["region"] = shape_name
     obs["image"] = image_name
     obs["is_tissue"] = True
     obs["region"].astype("category")
     adata = ad.AnnData(
-        X=np.zeros((len(valid_points), 1)),  # Empty data matrix
-        # X = np.array(()),
+        X=np.zeros((len(points_idx), 1)),  # Empty data matrix
         obs=obs,
         obsm={'patch': patches_array}  # Store patches in obsm
     )
