@@ -7,6 +7,8 @@ import copy
 from xarray.core.dataarray import DataArray
 from xarray.core.datatree import DataTree
 from ._settings import settings
+from spatialdata._io.io_raster import _read_multiscale
+from spatialdata.models import Image2DModel
 
 img_exts = {
     "tif",
@@ -55,9 +57,17 @@ def get_scaling_factor(image: DataTree | DataArray):
     return np.array(base_shape[1:]) / np.array(top_shape[1:])
 
 class SpatialData(sd.SpatialData): 
-    def write(self, file_path: str, *args, **kwargs):
+    def write(self, file_path: str, **kwargs):
         sdata_copy = copy.copy(self)  # Shallow copy of the main object
-        
+        # save image name and loc to metadata then drop all images before saving
+        sdata_copy.attrs['images'] = [{'name': image_name, 
+                                    'path': sd.get_dask_backing_files(self[image_name])}\
+                                        for image_name in self.images]
+        image_names = list(sdata_copy.images.keys())
+        sdata_copy.images = copy.copy(self.images)  
+        for image_name in image_names:
+            sdata_copy[image_name] = Image2DModel.parse(np.zeros((1,1,1)))
+        # wipe all patch arrays to 1D zero arrays before saving
         sdata_copy.tables = copy.copy(self.tables)  
         for table_name in sdata_copy.tables:
             sdata_copy[table_name] = copy.copy(self[table_name])  # Copy table object
@@ -67,11 +77,14 @@ class SpatialData(sd.SpatialData):
                 patch_arr = sdata_copy[table_name].obsm['patch']
                 sdata_copy[table_name].obsm['patch'] = da.zeros((len(patch_arr)))
 
-        sdata_copy.write(file_path, *args, **kwargs)
+        sdata_copy.write(file_path, **kwargs)
 
 
-def from_zarr(store, *args, **kwargs):
-    sdata = sd.read_zarr(store, *args, **kwargs)
+def from_zarr(store, **kwargs):
+    sdata = sd.read_zarr(store, **kwargs)
+    for image_info in sdata.attrs['images']:
+        sdata[image_info['name']] = _read_multiscale(image_info['path'][0], raster_type="image")
+    
     for table_name, table in sdata.tables.items():
         if 'patch' not in table.obsm:
             continue
