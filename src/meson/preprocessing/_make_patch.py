@@ -8,6 +8,7 @@ from spatialdata.models import TableModel, PointsModel
 from spatialdata.transformations import set_transformation, Affine
 from ._make_bbox import make_bbox
 from .._readwrite import get_base_level, get_scaling_factor
+from shapely.affinity import affine_transform
 
 def _filter_points(sdata, image_name, point_name, size):
     img_obj = sdata[image_name]
@@ -15,25 +16,27 @@ def _filter_points(sdata, image_name, point_name, size):
     tissue_mask = sdata[f'{image_name}_tissue']
     size = np.array(size)
     xmin, ymin = size/2
-    xmax, ymax = get_base_level(img_obj).shape[1:] - size/2
-
-    print(xmin, xmax, ymin, ymax, size)
+    ymax, xmax = get_base_level(img_obj).shape[1:] - size/2
+    print(len(points))
     filtered_points = bounding_box_query(points, 
                                          axes=['x', 'y'],
                                          min_coordinate=[xmin, ymin], 
                                          max_coordinate=[xmax, ymax], 
                                          target_coordinate_system=image_name)
-
+    print(len(filtered_points))
     mask_polygon = to_polygons(tissue_mask)
     scaling_factors = get_scaling_factor(img_obj)
     affine = Affine(np.eye(3) * [*scaling_factors, 1], 
                     input_axes=['x', 'y'], output_axes=['x', 'y'])
     set_transformation(mask_polygon, affine, image_name)
-    filtered_points = polygon_query(points, 
-                                    polygon=mask_polygon,
-                                    target_coordinate_system=image_name)
-    
+    for polygon in mask_polygon['geometry']:
+        transformed_polygon = affine_transform(polygon, [scaling_factors[0], 0, 0, scaling_factors[1], 0, 0])
+        filtered_points = polygon_query(filtered_points, 
+                                        polygon=transformed_polygon,
+                                        target_coordinate_system=image_name)
+    print(len(filtered_points))
     return filtered_points
+
 
 def make_patch(sdata: SpatialData, 
                image_name: str,
