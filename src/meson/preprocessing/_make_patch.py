@@ -8,6 +8,7 @@ from spatialdata.models import TableModel, PointsModel
 from spatialdata.transformations import set_transformation, Affine, Identity
 from ._make_bbox import make_bbox
 from .._readwrite import get_base_level, get_scaling_factor
+from .._utils import get_optimal_chunk_size
 from shapely.affinity import affine_transform
 from tqdm import tqdm
 
@@ -57,14 +58,6 @@ def make_patch(sdata: SpatialData,
                       size=size, shape_name='bbox', cs=cs)
     shape_name = f"{image_name}_{point_name}_bbox"
     image = get_base_level(sdata[image_name])
-    def get_optimal_chunk_size(image, patch_chunk_size=256, target_size=500*1024*1024):
-        n_channels = len(image['c'])
-        element_size = np.dtype(image.dtype).itemsize
-        patch_size = element_size * patch_chunk_size * patch_chunk_size * n_channels
-        num_patches = max(1, int(target_size/patch_size))
-        chunk_size = patch_chunk_size * int(num_patches**0.5)
-        print("new chunk size", [n_channels, chunk_size, chunk_size])
-        return [n_channels, chunk_size, chunk_size]
     image = image.chunk(chunks=get_optimal_chunk_size(image)) # via xarray
     
     half_size = size // 2

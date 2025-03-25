@@ -9,6 +9,8 @@ from xarray.core.datatree import DataTree
 from ._settings import settings
 from spatialdata._io.io_raster import _read_multiscale
 from spatialdata.models import Image2DModel
+from tqdm import tqdm
+from ._utils import get_optimal_chunk_size
 
 img_exts = {
     "tif",
@@ -61,49 +63,61 @@ class SpatialData(sd.SpatialData):
         super().__init__(*args, **kwargs)
         if 'images' not in self.attrs:
             self.attrs['images'] = []
-            
+
     def write(self, file_path: str, **kwargs):
         sdata_copy = copy.copy(self)  # Shallow copy of the main object
         # save image name and loc to metadata then drop all images before saving
-        sdata_copy.attrs['images'] = [{'name': image_name, 
-                                    'type': 'spatialdata_img',
-                                    'path': sd.get_dask_backing_files(self[image_name])}\
-                                        for image_name in self.images]
+        preloaded_images = [info['name'] for info in sdata_copy.attrs['images']]
+        for image_name in self.images:
+            if image_name not in preloaded_images:
+                sdata_copy.attrs['images'].append({'name': image_name, 
+                                            'type': 'spatialdata_img',
+                                            'path': sd.get_dask_backing_files(self[image_name])})
         image_names = list(sdata_copy.images.keys())
         sdata_copy.images = copy.copy(self.images)  
-        for image_name in image_names:
+        for image_name in tqdm(image_names):
             sdata_copy[image_name] = Image2DModel.parse(np.zeros((1,1,1)))
         # wipe all patch arrays to 1D zero arrays before saving
         sdata_copy.tables = copy.copy(self.tables)  
-        for table_name in sdata_copy.tables:
+        for table_name in tqdm(sdata_copy.tables):
             sdata_copy[table_name] = copy.copy(self[table_name])  # Copy table object
             sdata_copy[table_name].obsm = self[table_name].obsm.copy()  # Copy `obsm` dict
 
             if 'patch' in sdata_copy[table_name].obsm:
                 patch_arr = sdata_copy[table_name].obsm['patch']
                 sdata_copy[table_name].obsm['patch'] = da.zeros((len(patch_arr)))
+        print("Writing data to", file_path)
+        sd.SpatialData.write(sdata_copy, file_path, **kwargs)
 
-        sdata_copy.write(file_path, **kwargs)
 
-
-def from_zarr(store, **kwargs):
+def read_zarr(store, **kwargs):
     from meson import add_wsi
     sdata = sd.read_zarr(store, **kwargs)
-    for image_info in sdata.attrs['images']:
-        image_path = image_info['path'][0]
+    image_infos = copy.copy(sdata.attrs['images'])
+    for image_info in image_infos:
+        if isinstance(image_info['path'], list):
+            image_path = image_info['path'][0]
+        else:
+            image_path = image_info['path']
         image_name = image_info['name']
         if image_info['type'] == 'spatialdata_image':
             sdata[image_name] = _read_multiscale(image_path, raster_type="image")
         elif image_info['type'] == 'wsi':
             add_wsi(sdata, path=image_path, image_name=image_name)
 
+    images = {}
     for table_name, table in sdata.tables.items():
         if 'patch' not in table.obsm:
             continue
         patches = []
-        for idx, row in table.obs.iterrows():
-            image = sdata[row['image']]
-            
+        for idx, row in tqdm(table.obs.iterrows()):
+            image_name = row['image']
+            if image_name not in images:
+                image = get_base_level(sdata[row['image']])
+                image = image.chunk(chunks=get_optimal_chunk_size(image)) # via xarray
+                images[image_name] = image
+            else:
+                image = images[image_name]
             shape_element = sdata[row['region']]
             instance_id = row['instance_id']
             polygon = shape_element.loc[instance_id].geometry

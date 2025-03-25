@@ -23,7 +23,7 @@ def add_wsi(sdata: SpatialData,
     sdata[image_name].attrs["metadata"] = slide_metadata
     sdata[image_name].attrs["backend"] = backend
     sdata[image_name].name = image_name
-    sdata.attrs['images'].append({'name': image_name, 'type': 'wsi', path: path})
+    sdata.attrs['images'].append({'name': image_name, 'type': 'wsi', 'path': path})
 
 def read_wsi(
     path: str | Path,
