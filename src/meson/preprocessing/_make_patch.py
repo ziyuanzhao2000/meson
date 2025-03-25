@@ -3,31 +3,37 @@ import anndata as ad
 import pandas as pd
 import xarray as xr
 import numpy as np
-from spatialdata import SpatialData
+from spatialdata import SpatialData, bounding_box_query, polygon_query, to_polygons
 from spatialdata.models import TableModel, PointsModel
+from spatialdata.transformations import set_transformation, Affine
 from ._make_bbox import make_bbox
+from .._readwrite import get_base_level, get_scaling_factor
 
 def _filter_points(sdata, image_name, point_name, size):
-    points = sdata[f'{image_name}_{point_name}'].compute()
+    img_obj = sdata[image_name]
+    points = sdata[f'{image_name}_{point_name}']
     tissue_mask = sdata[f'{image_name}_tissue']
+    size = np.array(size)
+    xmin, ymin = size/2
+    xmax, ymax = get_base_level(img_obj).shape[1:] - size/2
 
-    height, width = tissue_mask.shape
-    half_size = size // 2
+    print(xmin, xmax, ymin, ymax, size)
+    filtered_points = bounding_box_query(points, 
+                                         axes=['x', 'y'],
+                                         min_coordinate=[xmin, ymin], 
+                                         max_coordinate=[xmax, ymax], 
+                                         target_coordinate_system=image_name)
+
+    mask_polygon = to_polygons(tissue_mask)
+    scaling_factors = get_scaling_factor(img_obj)
+    affine = Affine(np.eye(3) * [*scaling_factors, 1], 
+                    input_axes=['x', 'y'], output_axes=['x', 'y'])
+    set_transformation(mask_polygon, affine, image_name)
+    filtered_points = polygon_query(points, 
+                                    polygon=mask_polygon,
+                                    target_coordinate_system=image_name)
     
-    y_coords = points['y'].to_numpy().astype(int)
-    x_coords = points['x'].to_numpy().astype(int)
-
-    boundary_mask = (
-        (x_coords >= half_size) & 
-        (x_coords < width - half_size) &
-        (y_coords >= half_size) & 
-        (y_coords < height - half_size)
-    )
-    filtered_points = points[boundary_mask]
-    y_coords = xr.DataArray(y_coords[boundary_mask])
-    x_coords = xr.DataArray(x_coords[boundary_mask])
-    mask_values = tissue_mask.sel(y=y_coords, x=x_coords, method="nearest").astype(bool)
-    return PointsModel.parse(filtered_points[np.bool(mask_values)])
+    return filtered_points
 
 def make_patch(sdata: SpatialData, 
                image_name: str,

@@ -1,8 +1,11 @@
 import openslide
 import spatialdata as sd
 import dask.array as da
+import numpy as np
 import copy
 
+from xarray.core.dataarray import DataArray
+from xarray.core.datatree import DataTree
 from ._settings import settings
 
 img_exts = {
@@ -33,6 +36,23 @@ def read_HnE():
 
 def read_mIF():
     pass
+
+def get_base_level(image: DataTree | DataArray):
+    if isinstance(image, DataTree):
+        return sd.get_pyramid_levels(image, n=0)
+    else:
+        return image
+    
+def get_top_level(image: DataTree | DataArray):
+    if isinstance(image, DataTree):
+        return sd.get_pyramid_levels(image, n=len(image)-1)
+    else:
+        return image
+    
+def get_scaling_factor(image: DataTree | DataArray):
+    base_shape = get_base_level(image).shape
+    top_shape = get_top_level(image).shape
+    return np.array(base_shape[1:]) / np.array(top_shape[1:])
 
 class SpatialData(sd.SpatialData): 
     def write(self, file_path: str, *args, **kwargs):
