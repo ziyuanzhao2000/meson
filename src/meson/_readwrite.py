@@ -57,10 +57,16 @@ def get_scaling_factor(image: DataTree | DataArray):
     return np.array(base_shape[1:]) / np.array(top_shape[1:])
 
 class SpatialData(sd.SpatialData): 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if 'images' not in self.attrs:
+            self.attrs['images'] = []
+            
     def write(self, file_path: str, **kwargs):
         sdata_copy = copy.copy(self)  # Shallow copy of the main object
         # save image name and loc to metadata then drop all images before saving
         sdata_copy.attrs['images'] = [{'name': image_name, 
+                                    'type': 'spatialdata_img',
                                     'path': sd.get_dask_backing_files(self[image_name])}\
                                         for image_name in self.images]
         image_names = list(sdata_copy.images.keys())
@@ -81,10 +87,16 @@ class SpatialData(sd.SpatialData):
 
 
 def from_zarr(store, **kwargs):
+    from meson import add_wsi
     sdata = sd.read_zarr(store, **kwargs)
     for image_info in sdata.attrs['images']:
-        sdata[image_info['name']] = _read_multiscale(image_info['path'][0], raster_type="image")
-    
+        image_path = image_info['path'][0]
+        image_name = image_info['name']
+        if image_info['type'] == 'spatialdata_image':
+            sdata[image_name] = _read_multiscale(image_path, raster_type="image")
+        elif image_info['type'] == 'wsi':
+            add_wsi(sdata, path=image_path, image_name=image_name)
+
     for table_name, table in sdata.tables.items():
         if 'patch' not in table.obsm:
             continue

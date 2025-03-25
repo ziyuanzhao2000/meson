@@ -9,12 +9,7 @@ from spatialdata.transformations import set_transformation, Affine, Identity
 from ._make_bbox import make_bbox
 from .._readwrite import get_base_level, get_scaling_factor
 from shapely.affinity import affine_transform
-
-from spatialdata.transformations._utils import (
-    _get_transformations,
-    _set_transformations,
-    compute_coordinates,
-)
+from tqdm import tqdm
 
 def _filter_points(sdata, image_name, point_name, size):
     img_obj = sdata[image_name]
@@ -59,16 +54,25 @@ def make_patch(sdata: SpatialData,
 
     points = _filter_points(sdata, image_name, point_name, size)
     sdata = make_bbox(sdata, image_name=image_name, point_name=point_name, 
-                      size=100, shape_name='bbox', cs=cs)
+                      size=size, shape_name='bbox', cs=cs)
     shape_name = f"{image_name}_{point_name}_bbox"
-    image = sdata[image_name]
+    image = get_base_level(sdata[image_name])
+    def get_optimal_chunk_size(image, patch_chunk_size=256, target_size=500*1024*1024):
+        n_channels = len(image['c'])
+        element_size = np.dtype(image.dtype).itemsize
+        patch_size = element_size * patch_chunk_size * patch_chunk_size * n_channels
+        num_patches = max(1, int(target_size/patch_size))
+        chunk_size = patch_chunk_size * int(num_patches**0.5)
+        print("new chunk size", [n_channels, chunk_size, chunk_size])
+        return [n_channels, chunk_size, chunk_size]
+    image = image.chunk(chunks=get_optimal_chunk_size(image)) # via xarray
+    
     half_size = size // 2
     points_idx = []
     patches = []
 
-    for idx, point in points.iterrows():
+    for idx, point in tqdm(points.iterrows()):
         x, y = point.astype(int)
-        # Check if patch would be fully within image bounds
         patch = image[
             :,  # All channels
             y - half_size:y + half_size,
@@ -76,7 +80,8 @@ def make_patch(sdata: SpatialData,
         ]
         points_idx.append(idx)
         patches.append(patch)
-    patches_array = da.stack(patches)
+    patches_array = da.stack(patches, axis=0)
+
     obs = pd.DataFrame()
     obs["instance_id"] = points_idx
     obs["region"] = shape_name
