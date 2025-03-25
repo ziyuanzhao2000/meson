@@ -11,6 +11,7 @@ from spatialdata._io.io_raster import _read_multiscale
 from spatialdata.models import Image2DModel
 from tqdm import tqdm
 from ._utils import get_optimal_chunk_size
+import pandas as pd
 
 img_exts = {
     "tif",
@@ -138,3 +139,37 @@ def read_zarr(store, **kwargs):
         print(table)
         
     return sdata
+
+
+def _add_bbox_coordinates(sdata, image_name, point_name='grid_point'):
+    bbox_df = sdata[f'{image_name}_{point_name}_bbox'].copy() 
+    
+    coords_df = pd.DataFrame({
+        'instance_id': range(len(bbox_df)),  
+        'xmin': bbox_df['geometry'].apply(lambda x: int(x.exterior.coords[0][0])),
+        'ymin': bbox_df['geometry'].apply(lambda x: int(x.exterior.coords[0][1])),
+        'xmax': bbox_df['geometry'].apply(lambda x: int(x.exterior.coords[2][0])),
+        'ymax': bbox_df['geometry'].apply(lambda x: int(x.exterior.coords[2][1]))
+    })
+    
+    patch_obs = sdata[f'{image_name}_{point_name}_patch'].obs
+    return patch_obs.merge(coords_df, on='instance_id', how='left')
+
+def export_patch(sdata, 
+                file_path: str,
+                image_name: str | list = 'all'):
+    all_patch_dfs = []
+    if isinstance(image_name, str):
+        if image_name == 'all':
+            image_names = sdata.images
+        else:
+            image_names = [image_name]
+    else:
+        image_names = image_name
+    for image_name in image_names:
+        coords_df = _add_bbox_coordinates(sdata, image_name)
+        all_patch_dfs.append(coords_df)
+    combined = pd.concat(all_patch_dfs, axis=0, ignore_index=True)
+    combined = combined[['image', 'xmin', 'ymin', 'xmax', 'ymax']]
+    combined.to_csv(file_path)
+    return combined
