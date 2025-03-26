@@ -47,9 +47,11 @@ class UNI2ModelManager(ModelManager):
         cls.transform = transform
 
 class UNI2Embedder():
-    def __init__(self):
+    def __init__(self, token=None):
         self.name = 'UNI2'
         self.embed_dim = 1536
+        if token is not None:
+            UNI2ModelManager.set_token(token)
         self.manager = UNI2ModelManager.initialize()
         self.model = self.manager.model
         self.transform = self.manager.transform

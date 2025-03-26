@@ -6,7 +6,7 @@ from .._readwrite import get_base_level
 from .._utils import get_optimal_chunk_size
 from tqdm import tqdm
 
-def _get_embedder(embedder_name: str):
+def _get_embedder(embedder_name: str, token=None):
     """Convert embedder name to embedder instance"""
     embedder_name = embedder_name.lower()
     if embedder_name == "test":
@@ -14,10 +14,10 @@ def _get_embedder(embedder_name: str):
         return TestEmbedder()
     elif embedder_name in ["uni", "UNI"]:
         from .embedders import UNIEmbedder
-        return UNIEmbedder()
+        return UNIEmbedder(token=token)
     elif embedder_name in ["uni2", "UNI2", "uni2-h", "UNI2-h"]:
         from .embedders import UNI2Embedder
-        return UNI2Embedder()
+        return UNI2Embedder(token=token)
     else:
         raise ValueError(f"Unknown embedder: {embedder_name}")
 
@@ -54,9 +54,21 @@ def embed_patch(sdata: SpatialData,
                 patch_name: str | None = 'patch',
                 batch_size: int = 32, 
                 num_workers: int = 1,
-                device: str = 'cpu'):
+                token: str | None = None,
+                device: str = 'cpu',
+                overwrite: bool = False):
+    if image_name is not None:
+        patch_name_full = f'{image_name}_{point_name}_{patch_name}'
+    else:
+        patch_name_full = patch_name
+
     if isinstance(embedder, str):
-        embedder = _get_embedder(embedder)
+        embedder = _get_embedder(embedder, token=token)
+        
+    embedding_name = f'{embedder.name}_embedding'
+    if overwrite is False and embedding_name in sdata.tables[patch_name_full].obsm:
+        return sdata
+    
     embedder.model.to(device)
     # patch_array = sdata.tables[patch_name].obsm['patch']
     # patch_dataset = TensorDataset(torch.tensor(patch_array.compute()))
@@ -70,7 +82,5 @@ def embed_patch(sdata: SpatialData,
         for idx, batch in tqdm(enumerate(patch_dataloader)):
             batch_embedding = embedder(batch.to(device)).cpu().numpy()
             embedding_array[idx*batch_size:idx*batch_size+len(batch_embedding), :] = batch_embedding
-    if image_name is not None:
-        patch_name = f'{image_name}_{point_name}_{patch_name}'
-    sdata.tables[patch_name].obsm[f'{embedder.name}_embedding'] = embedding_array
+    sdata.tables[patch_name_full].obsm[embedding_name] = embedding_array
     return sdata
