@@ -26,7 +26,7 @@ def segment_tissue(sdata, image_name,
                         cv2.THRESH_OTSU+cv2.THRESH_BINARY)
     img_filled = binary_fill_holes(img_thres).astype(np.uint8)
     img_dilated = cv2.dilate(img_filled, footprint_rectangle((dilation_ksize, dilation_ksize)))
-    label = Labels2DModel.parse(img_dilated)
+    label = Labels2DModel.parse(img_dilated, dims=['y', 'x'])
 
     # ensure tissue mask transforms to the base layer of image pyramid
     scaling_factors = get_scaling_factor(img_obj)

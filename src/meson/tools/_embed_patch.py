@@ -4,6 +4,7 @@ import numpy as np
 from torch.utils.data import TensorDataset, DataLoader, Dataset
 from .._readwrite import get_base_level
 from .._utils import get_optimal_chunk_size
+from tqdm import tqdm
 
 def _get_embedder(embedder_name: str):
     """Convert embedder name to embedder instance"""
@@ -51,19 +52,23 @@ def embed_patch(sdata: SpatialData,
                 image_name: str | None = None,
                 point_name: str | None = 'grid_point',
                 patch_name: str | None = 'patch',
-                batch_size: int = 32):
+                batch_size: int = 32, 
+                num_workers: int = 1,
+                device: str = 'cpu'):
     if isinstance(embedder, str):
         embedder = _get_embedder(embedder)
+    embedder.model.to(device)
     # patch_array = sdata.tables[patch_name].obsm['patch']
     # patch_dataset = TensorDataset(torch.tensor(patch_array.compute()))
     patch_dataset = PatchDataset(sdata, image_name, point_name, patch_name)
     embedding_array = np.zeros((len(patch_dataset), embedder.embed_dim))
-    
-    with torch.no_grad():
-        for idx, batch in enumerate(DataLoader(patch_dataset, 
+    patch_dataloader = DataLoader(patch_dataset, 
                                 batch_size=batch_size,
-                                shuffle=False)):
-            batch_embedding = embedder(batch).cpu().numpy()
+                                num_workers=num_workers,
+                                shuffle=False)
+    with torch.no_grad():
+        for idx, batch in tqdm(enumerate(patch_dataloader)):
+            batch_embedding = embedder(batch.to(device)).cpu().numpy()
             embedding_array[idx*batch_size:idx*batch_size+len(batch_embedding), :] = batch_embedding
     if image_name is not None:
         patch_name = f'{image_name}_{point_name}_{patch_name}'

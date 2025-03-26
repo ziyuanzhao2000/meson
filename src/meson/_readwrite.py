@@ -77,7 +77,7 @@ class SpatialData(sd.SpatialData):
         image_names = list(sdata_copy.images.keys())
         sdata_copy.images = copy.copy(self.images)  
         for image_name in tqdm(image_names):
-            sdata_copy[image_name] = Image2DModel.parse(np.zeros((1,1,1)))
+            sdata_copy[image_name] = Image2DModel.parse(np.zeros((1,1,1)), dims=['c', 'y', 'x'])
         # wipe all patch arrays to 1D zero arrays before saving
         sdata_copy.tables = copy.copy(self.tables)  
         for table_name in tqdm(sdata_copy.tables):

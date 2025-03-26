@@ -27,7 +27,7 @@ def add_wsi(sdata: SpatialData,
 
 def read_wsi(
     path: str | Path,
-    chunks: tuple[int, int, int] | str = None,
+    chunks: tuple[int, int, int] | dict = {},
     as_image: bool = True,
     backend: Literal["tiffslide", "openslide"] = "tiffslide",
 ) -> SpatialData | Tuple[DataTree, str, dict]:
