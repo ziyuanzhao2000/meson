@@ -68,8 +68,8 @@ def embed_patch(sdata: SpatialData,
     embedding_name = f'{embedder.name}_embedding'
     if overwrite is False and embedding_name in sdata.tables[patch_name_full].obsm:
         return sdata
-    
-    embedder.model.to(device)
+    if hasattr(embedder, 'model'):
+        embedder.model.to(device)
     # patch_array = sdata.tables[patch_name].obsm['patch']
     # patch_dataset = TensorDataset(torch.tensor(patch_array.compute()))
     patch_dataset = PatchDataset(sdata, image_name, point_name, patch_name)
