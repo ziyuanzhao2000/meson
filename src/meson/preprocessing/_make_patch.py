@@ -59,30 +59,28 @@ def make_patch(sdata: SpatialData,
     shape_name = f"{image_name}_{point_name}_bbox"
     image = get_base_level(sdata[image_name])
     image = image.chunk(chunks=get_optimal_chunk_size(image)) # via xarray
-    
+    # might want to reset this
     half_size = size // 2
-    points_idx = []
     patches = []
 
-    for idx, point in tqdm(points.iterrows()):
+    for _, point in tqdm(points.iterrows()):
         x, y = point.astype(int)
         patch = image[
             :,  # All channels
             y - half_size:y + half_size,
             x - half_size:x + half_size
         ]
-        points_idx.append(idx)
         patches.append(patch)
     patches_array = da.stack(patches, axis=0)
 
     obs = pd.DataFrame()
-    obs["instance_id"] = points_idx
+    obs["instance_id"] = points.index
     obs["region"] = shape_name
     obs["image"] = image_name
     obs["is_tissue"] = True
     obs["region"].astype("category")
     adata = ad.AnnData(
-        X=np.zeros((len(points_idx), 1)),  # Empty data matrix
+        X=np.zeros((len(points), 1)),  # Empty data matrix
         obs=obs,
         obsm={'patch': patches_array}  # Store patches in obsm
     )
