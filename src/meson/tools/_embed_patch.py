@@ -1,7 +1,9 @@
 from spatialdata import SpatialData
 import torch
 import numpy as np
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, Dataset
+from .._readwrite import get_base_level
+from .._utils import get_optimal_chunk_size
 
 def _get_embedder(embedder_name: str):
     """Convert embedder name to embedder instance"""
@@ -17,7 +19,32 @@ def _get_embedder(embedder_name: str):
         return UNI2Embedder()
     else:
         raise ValueError(f"Unknown embedder: {embedder_name}")
+
+class PatchDataset(Dataset):
+    def __init__(self, sdata: SpatialData, 
+                        image_name: str | None = None,
+                        point_name: str | None = 'grid_point',
+                        patch_name: str | None = 'patch'):
+        if image_name is not None:
+            patch_name = f'{image_name}_{point_name}_{patch_name}'
+        image = get_base_level(sdata[image_name])
+        self.image = image.chunk(chunks=get_optimal_chunk_size(image))
+        print(self.image.chunksizes)
+        self.patch_df = sdata[patch_name].obs
+
+    def __getitem__(self, index):
+        row = self.patch_df.iloc[index]
+        patch = self.image[
+            :,  # All channels
+            row['ymin']:row['ymax'],
+            row['xmin']:row['xmax']
+        ]
+        return patch.compute().data
     
+    def __len__(self):
+        return len(self.patch_df)
+    
+
 def embed_patch(sdata: SpatialData,
                 embedder,
                 *,
@@ -25,20 +52,20 @@ def embed_patch(sdata: SpatialData,
                 point_name: str | None = 'grid_point',
                 patch_name: str | None = 'patch',
                 batch_size: int = 32):
-    if image_name is not None:
-        patch_name = f'{image_name}_{point_name}_{patch_name}'
     if isinstance(embedder, str):
         embedder = _get_embedder(embedder)
-    patch_array = sdata.tables[patch_name].obsm['patch']
-    patch_dataset = TensorDataset(torch.tensor(patch_array.compute()))
-    embedding_array = np.zeros((len(patch_array), embedder.embed_dim))
+    # patch_array = sdata.tables[patch_name].obsm['patch']
+    # patch_dataset = TensorDataset(torch.tensor(patch_array.compute()))
+    patch_dataset = PatchDataset(sdata, image_name, point_name, patch_name)
+    embedding_array = np.zeros((len(patch_dataset), embedder.embed_dim))
     
     with torch.no_grad():
         for idx, batch in enumerate(DataLoader(patch_dataset, 
                                 batch_size=batch_size,
                                 shuffle=False)):
-            batch_embedding = embedder(batch[0]).cpu().numpy()
+            batch_embedding = embedder(batch).cpu().numpy()
             embedding_array[idx*batch_size:idx*batch_size+len(batch_embedding), :] = batch_embedding
-    
+    if image_name is not None:
+        patch_name = f'{image_name}_{point_name}_{patch_name}'
     sdata.tables[patch_name].obsm[f'{embedder.name}_embedding'] = embedding_array
     return sdata

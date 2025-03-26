@@ -105,55 +105,7 @@ def read_zarr(store, **kwargs):
             sdata[image_name] = _read_multiscale(image_path, raster_type="image")
         elif image_info['type'] == 'wsi':
             add_wsi(sdata, path=image_path, image_name=image_name)
-
-    images = {}
-    for table_name, table in sdata.tables.items():
-        if 'patch' not in table.obsm:
-            continue
-        patches = []
-        for idx, row in tqdm(table.obs.iterrows()):
-            image_name = row['image']
-            if image_name not in images:
-                image = get_base_level(sdata[row['image']])
-                image = image.chunk(chunks=get_optimal_chunk_size(image)) # via xarray
-                images[image_name] = image
-            else:
-                image = images[image_name]
-            shape_element = sdata[row['region']]
-            instance_id = row['instance_id']
-            polygon = shape_element.loc[instance_id].geometry
-            
-            coords = np.array(polygon.exterior.coords)[:-1]  
-            min_x, min_y = coords[0]  # Top-left corner
-            size_x = int(coords[1][0] - coords[0][0])
-            size_y = int(coords[2][1] - coords[0][1])
-            patch = image[
-                    :,  
-                    int(min_y):int(min_y + size_y),
-                    int(min_x):int(min_x + size_x)
-            ]
-            patches.append(patch)
-            
-        patches_array = da.stack(patches)
-        table.obsm['patch'] = patches_array
-        print(table)
-        
     return sdata
-
-
-def _add_bbox_coordinates(sdata, image_name, point_name='grid_point'):
-    bbox_df = sdata[f'{image_name}_{point_name}_bbox'].copy() 
-    
-    coords_df = pd.DataFrame({
-        'instance_id': range(len(bbox_df)),  
-        'xmin': bbox_df['geometry'].apply(lambda x: int(x.exterior.coords[0][0])),
-        'ymin': bbox_df['geometry'].apply(lambda x: int(x.exterior.coords[0][1])),
-        'xmax': bbox_df['geometry'].apply(lambda x: int(x.exterior.coords[2][0])),
-        'ymax': bbox_df['geometry'].apply(lambda x: int(x.exterior.coords[2][1]))
-    })
-    
-    patch_obs = sdata[f'{image_name}_{point_name}_patch'].obs
-    return patch_obs.merge(coords_df, on='instance_id', how='left')
 
 def export_patch(sdata, 
                 file_path: str,
@@ -167,8 +119,7 @@ def export_patch(sdata,
     else:
         image_names = image_name
     for image_name in image_names:
-        coords_df = _add_bbox_coordinates(sdata, image_name)
-        all_patch_dfs.append(coords_df)
+        all_patch_dfs.append(sdata[f'{image_name}_grid_point_patch'].obs)
     combined = pd.concat(all_patch_dfs, axis=0, ignore_index=True)
     combined = combined[['image', 'xmin', 'ymin', 'xmax', 'ymax']]
     combined.to_csv(file_path)

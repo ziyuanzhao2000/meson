@@ -57,32 +57,37 @@ def make_patch(sdata: SpatialData,
     sdata = make_bbox(sdata, image_name=image_name, point_name=point_name, 
                       size=size, shape_name='bbox', cs=cs)
     shape_name = f"{image_name}_{point_name}_bbox"
-    image = get_base_level(sdata[image_name])
-    image = image.chunk(chunks=get_optimal_chunk_size(image)) # via xarray
-    # might want to reset this
+    # image = get_base_level(sdata[image_name])
+    # image = image.chunk(chunks=get_optimal_chunk_size(image)) # via xarray
+    # # might want to reset this
     half_size = size // 2
-    patches = []
+    # patches = []
 
-    for _, point in tqdm(points.iterrows()):
-        x, y = point.astype(int)
-        patch = image[
-            :,  # All channels
-            y - half_size:y + half_size,
-            x - half_size:x + half_size
-        ]
-        patches.append(patch)
-    patches_array = da.stack(patches, axis=0)
+    # for _, point in tqdm(points.iterrows()):
+    #     x, y = point.astype(int)
+    #     patch = image[
+    #         :,  # All channels
+    #         y - half_size:y + half_size,
+    #         x - half_size:x + half_size
+    #     ]
+    #     patches.append(patch)
+    # patches_array = da.stack(patches, axis=0)
 
     obs = pd.DataFrame()
     obs["instance_id"] = points.index
     obs["region"] = shape_name
+    obs["region"].astype("category")
     obs["image"] = image_name
     obs["is_tissue"] = True
-    obs["region"].astype("category")
+    obs["ymin"] = (points['y'] - half_size).astype(int)
+    obs["ymax"] = (points['y'] + half_size).astype(int)
+    obs["xmin"] = (points['x'] - half_size).astype(int)
+    obs["xmax"] = (points['x'] + half_size).astype(int)
+
     adata = ad.AnnData(
         X=np.zeros((len(points), 1)),  # Empty data matrix
         obs=obs,
-        obsm={'patch': patches_array}  # Store patches in obsm
+        # obsm={'patch': patches_array}  # Store patches in obsm
     )
     table = TableModel.parse(adata, 
                              region=shape_name, 
