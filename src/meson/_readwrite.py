@@ -68,7 +68,11 @@ class SpatialData(sd.SpatialData):
     def write(self, file_path: str, **kwargs):
         sdata_copy = copy.copy(self)  # Shallow copy of the main object
         # save image name and loc to metadata then drop all images before saving
-        preloaded_images = [info['name'] for info in sdata_copy.attrs['images']]
+        if 'images' in sdata_copy.attrs:
+            preloaded_images = [info['name'] for info in sdata_copy.attrs['images']]
+        else:
+            preloaded_images = []
+            self.attrs['images'] = []
         for image_name in self.images:
             if image_name not in preloaded_images:
                 sdata_copy.attrs['images'].append({'name': image_name, 
@@ -101,7 +105,7 @@ def read_zarr(store, **kwargs):
         else:
             image_path = image_info['path']
         image_name = image_info['name']
-        if image_info['type'] == 'spatialdata_image':
+        if image_info['type'] == 'spatialdata_img':
             sdata[image_name] = _read_multiscale(image_path, raster_type="image")
         elif image_info['type'] == 'wsi':
             add_wsi(sdata, path=image_path, image_name=image_name)

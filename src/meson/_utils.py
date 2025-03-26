@@ -13,3 +13,15 @@ def get_optimal_chunk_size(image):
     # assumes C x W x H
     chunksize = image.data.chunksize
     return (chunksize[0], chunksize[1]*2, chunksize[2]*2)
+
+
+# a. write a backup copy of the data
+def overwrite_element(sdata, name, new_name='_temp'):
+    sdata[new_name] = sdata[name]
+    sdata.write_element(new_name)
+    # b. rewrite the original data
+    sdata.delete_element_from_disk(name)
+    sdata.write_element(name)
+    # c. remove the backup copy
+    del sdata[new_name]
+    sdata.delete_element_from_disk(new_name)

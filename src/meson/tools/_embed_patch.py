@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from torch.utils.data import TensorDataset, DataLoader, Dataset
 from .._readwrite import get_base_level
-from .._utils import get_optimal_chunk_size
+from .._utils import get_optimal_chunk_size, overwrite_element
 from tqdm import tqdm
 
 def _get_embedder(embedder_name: str, token=None):
@@ -56,17 +56,18 @@ def embed_patch(sdata: SpatialData,
                 num_workers: int = 1,
                 token: str | None = None,
                 device: str = 'cpu',
+                save: bool = True,
                 overwrite: bool = False):
     if image_name is not None:
         patch_name_full = f'{image_name}_{point_name}_{patch_name}'
     else:
         patch_name_full = patch_name
-
+    patch_table = sdata.tables[patch_name_full]
     if isinstance(embedder, str):
         embedder = _get_embedder(embedder, token=token)
         
     embedding_name = f'{embedder.name}_embedding'
-    if overwrite is False and embedding_name in sdata.tables[patch_name_full].obsm:
+    if overwrite is False and embedding_name in patch_table.obsm:
         return sdata
     if hasattr(embedder, 'model'):
         embedder.model.to(device)
@@ -82,5 +83,7 @@ def embed_patch(sdata: SpatialData,
         for idx, batch in tqdm(enumerate(patch_dataloader)):
             batch_embedding = embedder(batch.to(device)).cpu().numpy()
             embedding_array[idx*batch_size:idx*batch_size+len(batch_embedding), :] = batch_embedding
-    sdata.tables[patch_name_full].obsm[embedding_name] = embedding_array
+    patch_table.obsm[embedding_name] = embedding_array
+    if save:
+        overwrite_element(sdata, patch_name_full)
     return sdata
