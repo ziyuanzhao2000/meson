@@ -3,6 +3,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
 from tqdm import tqdm
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.utils.validation import check_is_fitted
+from sklearn.utils import check_random_state
+import joblib, pickle
 
 class SimpleAutoencoder(nn.Module):
     def __init__(self, input_dim, expansion_factor=64):
@@ -46,11 +50,13 @@ def train_simple_sae(model, embeddings, device='cpu',
               initial_lambda=1e-5,  # Start very small
               final_lambda=5.0,
               epsilon=0.05,
-              target_sparsity=0.01):  # Target 1% activation
+              target_sparsity=0.01,
+              verbose=100):  # Target 1% activation
     """
     Train the SAE with modified sparsity control
     """
     # Scale dataset
+    print(embeddings.shape)
     embeddings_tensor = torch.tensor(embeddings, dtype=torch.float32)
     n = embeddings_tensor.shape[1]
     current_norm = torch.mean(torch.sum(embeddings_tensor**2, dim=1))
@@ -64,7 +70,7 @@ def train_simple_sae(model, embeddings, device='cpu',
         dataset, 
         batch_size=batch_size,
         shuffle=True,
-        drop_last=True
+        drop_last=False
     )
     
     model = model.to(device)
@@ -143,7 +149,7 @@ def train_simple_sae(model, embeddings, device='cpu',
             recon_losses.append(recon_loss.item())
             sparsity_losses.append(sparsity_loss.item())
             
-            if step % 100 == 0:
+            if verbose and step % verbose == 0:
                 print(f"\nStep {step}")
                 print(f"Total Loss: {losses[-1]:.4f}")
                 print(f"Recon Loss: {recon_losses[-1]:.4f}")
@@ -163,3 +169,58 @@ def train_simple_sae(model, embeddings, device='cpu',
         'recon_losses': recon_losses,
         'sparsity_losses': sparsity_losses
     }
+
+class SparseAutoencoder(TransformerMixin, BaseEstimator):
+    def __init__(self, 
+                 expansion_factor: int = 64,
+                 batch_size: int = 2048,
+                 num_steps: int = 200000,
+                 initial_lambda: float = 1e-5,  # Start very small
+                 final_lambda: int = 5.0,
+                 epsilon: float = 0.05,
+                 target_sparsity: float = 0.01,
+                 random_state=None):
+        self.expansion_factor = expansion_factor
+        self.batch_size = batch_size
+        self.num_steps = num_steps
+        self.initial_lambda = initial_lambda
+        self.final_lambda = final_lambda
+        self.epsilon = epsilon
+        self.target_sparsity = target_sparsity
+        self.random_state = random_state
+
+    def fit(self, X, y=None, 
+            verbose: int | bool = False):
+        import torch
+        self.random_state_ = check_random_state(self.random_state)
+        X = self._validate_data(X, accept_sparse=False)
+        assert len(X.shape) == 2 # expect X shape = B x d_emb 
+        self.model_ = SimpleAutoencoder(input_dim=X.shape[1], 
+                                        expansion_factor=self.expansion_factor)
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        torch.manual_seed(self.random_state_.random(1))
+        self._training_log = train_simple_sae(
+            model=self.model_,
+            embeddings=X,
+            device=device,
+            batch_size=self.batch_size,
+            num_steps=self.num_steps,
+            initial_lambda=self.initial_lambda,
+            final_lambda=self.final_lambda,
+            epsilon=self.epsilon,
+            target_sparsity=self.target_sparsity,
+            verbose=verbose
+        )
+        return self
+    
+    def transform(self, X):
+        check_is_fitted(self)
+        X = self._validate_data(X, accept_sparse=False, reset=False)
+        with torch.no_grad():
+            _, X_sparse = self.model_.forward(torch.tensor(X, dtype=torch.float32))
+        return X_sparse.cpu().numpy().astype(X.dtype)
+    
+    # def load(self, file_path):
+    #     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    #     self.model_.load_state_dict(torch.load(file_path),
+    #                                 map_location=torch.device(device))
