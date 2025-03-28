@@ -12,6 +12,7 @@ from spatialdata.models import Image2DModel
 from tqdm import tqdm
 from ._utils import get_optimal_chunk_size
 import pandas as pd
+import joblib
 
 img_exts = {
     "tif",
@@ -91,6 +92,9 @@ class SpatialData(sd.SpatialData):
             if 'patch' in sdata_copy[table_name].obsm:
                 patch_arr = sdata_copy[table_name].obsm['patch']
                 sdata_copy[table_name].obsm['patch'] = da.zeros((len(patch_arr)))
+        # sdata uses json that cannot serialize model params
+        for model_info in sdata_copy.attrs['models_metadata']:
+            del sdata_copy.attrs['models'][model_info['name']]
         print("Writing data to", file_path)
         sd.SpatialData.write(sdata_copy, file_path, **kwargs)
 
@@ -109,6 +113,10 @@ def read_zarr(store, **kwargs):
             sdata[image_name] = _read_multiscale(image_path, raster_type="image")
         elif image_info['type'] == 'wsi':
             add_wsi(sdata, path=image_path, image_name=image_name)
+    sdata.attrs['models'] = {}
+    for model_info in sdata.attrs['models_metadata']:
+        if model_info['serializer'] == 'joblib':
+            sdata.attrs['models'][model_info['name']] = joblib.load(model_info['path'])
     return sdata
 
 def export_patch(sdata, 
