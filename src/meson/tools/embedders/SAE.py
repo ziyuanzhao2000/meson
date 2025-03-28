@@ -1,12 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import TensorDataset, DataLoader
+
 from torch.optim import Adam
 from tqdm import tqdm
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 from sklearn.utils import check_random_state
 import joblib, pickle
+import numpy as np
+import scipy.sparse as sp
+
 
 class SimpleAutoencoder(nn.Module):
     def __init__(self, input_dim, expansion_factor=64):
@@ -163,12 +168,13 @@ def train_simple_sae(model, embeddings, device='cpu',
             pbar.update(1)
             
     pbar.close()
-    return {
+    logs = {
         'losses': losses,
         'sparsities': sparsities,
         'recon_losses': recon_losses,
         'sparsity_losses': sparsity_losses
     }
+    return scale_factor, logs
 
 class SparseAutoencoder(TransformerMixin, BaseEstimator):
     def __init__(self, 
@@ -195,11 +201,12 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
         self.random_state_ = check_random_state(self.random_state)
         X = self._validate_data(X, accept_sparse=False)
         assert len(X.shape) == 2 # expect X shape = B x d_emb 
+        self.embed_dim_ = X.shape[1] * self.expansion_factor
         self.model_ = SimpleAutoencoder(input_dim=X.shape[1], 
                                         expansion_factor=self.expansion_factor)
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         torch.manual_seed(self.random_state_.random(1))
-        self._training_log = train_simple_sae(
+        self.scale_factor_, self._training_log = train_simple_sae(
             model=self.model_,
             embeddings=X,
             device=device,
@@ -216,10 +223,28 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
     def transform(self, X):
         check_is_fitted(self)
         X = self._validate_data(X, accept_sparse=False, reset=False)
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.model_.to(device)
+        # X may be large so we need to use dataloader
+        dataset = TensorDataset(torch.tensor(X, dtype=torch.float32) * self.scale_factor_)
+        dataloader = DataLoader(dataset, batch_size=self.batch_size)
+        rows = []
+        cols = []
+        vals = []
         with torch.no_grad():
-            _, X_sparse = self.model_.forward(torch.tensor(X, dtype=torch.float32))
-        return X_sparse.cpu().numpy().astype(X.dtype)
-    
+            for batch in tqdm(dataloader):
+                _, X_ = self.model_.forward(batch[0].to(device))
+                arr = X_.to_sparse().cpu()
+                row_ind, col_ind = arr.indices().numpy()
+                value = arr.values().numpy()
+                rows.append(row_ind)
+                cols.append(col_ind)
+                vals.append(value)
+        data = np.concat(vals)
+        row_ind, col_ind = np.concat(rows), np.concat(cols)
+        X_sparse = sp.csr_matrix((data, (row_ind, col_ind)),
+                                    shape=(X.shape[0], self.embed_dim_))
+        return X_sparse
     # def load(self, file_path):
     #     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     #     self.model_.load_state_dict(torch.load(file_path),
