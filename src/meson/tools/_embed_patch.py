@@ -1,13 +1,15 @@
-from spatialdata import SpatialData
+from typing import TYPE_CHECKING
 import torch
 import numpy as np
 from torch.utils.data import TensorDataset, DataLoader, Dataset
 from meson._readwrite import get_base_level
 from meson._utils import get_optimal_chunk_size, overwrite_element
 from tqdm import tqdm
-import joblib
 from scipy.sparse import csc_array, hstack
 import pandas as pd
+
+if TYPE_CHECKING:
+    from spatialdata import SpatialData
 
 def _get_embedder(sdata, embedder_name: str, token=None):
     """Convert embedder name to embedder instance"""
@@ -28,7 +30,7 @@ def _get_embedder(sdata, embedder_name: str, token=None):
         raise ValueError(f"Unknown embedder: {embedder_name}")
 
 class PatchDataset(Dataset):
-    def __init__(self, sdata: SpatialData, 
+    def __init__(self, sdata: "SpatialData", 
                         image_name: str | None = None,
                         point_name: str | None = 'grid_point',
                         patch_name: str | None = 'patch', 
@@ -60,7 +62,7 @@ class PatchDataset(Dataset):
         return len(self.patch_df)
     
 
-def embed_patch(sdata: SpatialData,
+def embed_patch(sdata: "SpatialData",
                 embedder,
                 *,
                 image_name: str | None = None,
