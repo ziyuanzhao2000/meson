@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-from skimage.morphology import footprint_rectangle
+from skimage.morphology import square
 from skimage.filters.rank import entropy
 from scipy.ndimage import binary_fill_holes
 from spatialdata.models import Labels2DModel
@@ -18,14 +18,14 @@ def segment_tissue(sdata, image_name,
     img = get_top_level(img_obj)
     img_hsv = cv2.cvtColor(img.transpose('y', 'x', 'c').compute().to_numpy(), cv2.COLOR_RGB2HSV) 
     img_sat = img_hsv[:, :, 1] # measures saturation of some sort...
-    img_ent = entropy(img_sat, footprint_rectangle((entropy_ksize, entropy_ksize)))
+    img_ent = entropy(img_sat, square(entropy_ksize))
     img_ent_rescaled = ((img_ent - img_ent.min()) / \
                         (img_ent.max() - img_ent.min()) * 255).astype('uint8')
     img_med = cv2.medianBlur(img_ent_rescaled, median_ksize) 
     _, img_thres = cv2.threshold(img_med, 0, 255, 
                         cv2.THRESH_OTSU+cv2.THRESH_BINARY)
     img_filled = binary_fill_holes(img_thres).astype(np.uint8)
-    img_dilated = cv2.dilate(img_filled, footprint_rectangle((dilation_ksize, dilation_ksize)))
+    img_dilated = cv2.dilate(img_filled, square(dilation_ksize))
     label = Labels2DModel.parse(img_dilated, dims=['y', 'x'])
 
     # ensure tissue mask transforms to the base layer of image pyramid

@@ -50,7 +50,10 @@ def read_wsi(
     
     image_name, img, slide, slide_metadata = _open_wsi(path, backend=backend)
     # img = img.rename_dims({"S": "C", "Y": "Y", "X": "X"})
-    img = img.rename_dims({"S": "C"})
+    try:
+        img = img.rename_dims({"S": "C"})
+    except:
+        pass
 
     images = {}
     for level, key in enumerate(sorted(list(img.keys()), key=int)):

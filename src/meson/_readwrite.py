@@ -65,6 +65,8 @@ class SpatialData(sd.SpatialData):
         super().__init__(*args, **kwargs)
         if 'images' not in self.attrs:
             self.attrs['images'] = []
+        if 'models_metadata' not in self.attrs:
+            self.attrs['models_metadata'] = {}
 
     def write(self, file_path: str, **kwargs):
         sdata_copy = copy.copy(self)  # Shallow copy of the main object
