@@ -31,12 +31,17 @@ class PatchDataset(Dataset):
     def __init__(self, sdata: SpatialData, 
                         image_name: str | None = None,
                         point_name: str | None = 'grid_point',
-                        patch_name: str | None = 'patch'):
+                        patch_name: str | None = 'patch', 
+                        precache: bool = False):
+        self.precache = precache
         if image_name is not None:
             patch_name = f'{image_name}_{point_name}_{patch_name}'
         image = get_base_level(sdata[image_name])
-        self.image = image.chunk(chunks=get_optimal_chunk_size(image))
-        print(self.image.chunksizes)
+        if self.precache:
+            self.image = image.compute().data
+        else:
+            self.image = image.chunk(chunks=get_optimal_chunk_size(image))
+        print("Initialized patch dataset for image with shape", self.image.shape)
         self.patch_df = sdata[patch_name].obs
 
     def __getitem__(self, index):
@@ -46,7 +51,10 @@ class PatchDataset(Dataset):
             row['ymin']:row['ymax'],
             row['xmin']:row['xmax']
         ]
-        return patch.compute().data
+        if self.precache:
+            return patch
+        else:
+            return patch.compute().data
     
     def __len__(self):
         return len(self.patch_df)
@@ -64,7 +72,8 @@ def embed_patch(sdata: SpatialData,
                 obsm_key: str | None = None,
                 device: str = 'cpu',
                 save: bool = True,
-                overwrite: bool = False):
+                overwrite: bool = False,
+                precache: bool = False):
     if image_name is not None:
         patch_name_full = f'{image_name}_{point_name}_{patch_name}'
     else:
@@ -84,7 +93,7 @@ def embed_patch(sdata: SpatialData,
             embedder.model.to(device)
         # patch_array = sdata.tables[patch_name].obsm['patch']
         # patch_dataset = TensorDataset(torch.tensor(patch_array.compute()))
-        patch_dataset = PatchDataset(sdata, image_name, point_name, patch_name)
+        patch_dataset = PatchDataset(sdata, image_name, point_name, patch_name, precache=precache)
         embedding_array = np.zeros((len(patch_dataset), embedder.embed_dim))
         patch_dataloader = DataLoader(patch_dataset, 
                                     batch_size=batch_size,
@@ -95,8 +104,12 @@ def embed_patch(sdata: SpatialData,
                 batch_embedding = embedder(batch.to(device)).cpu().numpy()
                 embedding_array[idx*batch_size:idx*batch_size+len(batch_embedding), :] = batch_embedding
         patch_table.obsm[embedding_name] = embedding_array
+        if precache:
+            del patch_dataset.image
+            del patch_dataset
+            del patch_dataloader
     elif model_type == "SAE":
-        sae_embedding = embedder.transform(patch_table.obsm[obsm_key])
+        sae_embedding = embedder.transform(patch_table.obsm[obsm_key], device=device)
         new_vars = [f'{embedder_name}_{i}' for i in range(sae_embedding.shape[1])]
         existing_vars = list(patch_table.var.index)
         # slice columns of the table to remove these columns that are redundant with embedding
@@ -105,11 +118,9 @@ def embed_patch(sdata: SpatialData,
             return sdata
         if len(diff_vars) < len(existing_vars) or overwrite:
             patch_table = patch_table[:, diff_vars].copy() # may be slow with large table?
-        print(patch_table.X.shape)
-        print(patch_table.var.index, pd.Index(diff_vars + new_vars))
         patch_table.var.index = pd.Index(diff_vars + new_vars)
         patch_table.X = hstack((csc_array(patch_table.X), sae_embedding.tocsc())).tocsr()
-    
+        sdata[patch_name_full] = patch_table
     if save:
         overwrite_element(sdata, patch_name_full)
     return sdata
