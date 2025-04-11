@@ -1,13 +1,13 @@
-from .test import TestEmbedder
-from .UNI import UNIEmbedder
-from .UNI2 import UNI2Embedder
-from .SAE import SparseAutoencoder
+import lazy_loader as lazy
+__getattr__, __dir__, __all__ = lazy.attach(
+    __name__,
+    submod_attrs={
+    'test': ['TestEmbedder'],
+    'UNI': ['UNIEmbedder'],
+    'UNI2': ['UNI2Embedder'],
+    'SAE': ['SparseAutoencoder']
+    }
+)
 
-__all__ = [TestEmbedder, UNIEmbedder, UNI2Embedder, SparseAutoencoder]
 
-available_embedders = {
-    "test": TestEmbedder,
-    "UNI": UNIEmbedder,
-    "UNI2": UNI2Embedder,
-    "SAE": SparseAutoencoder
-}
+

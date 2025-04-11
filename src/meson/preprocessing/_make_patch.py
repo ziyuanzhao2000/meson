@@ -1,16 +1,12 @@
-import dask.array as da
 import anndata as ad
 import pandas as pd
-import xarray as xr
 import numpy as np
 from spatialdata import SpatialData, bounding_box_query, polygon_query, to_polygons
 from spatialdata.models import TableModel, PointsModel
 from spatialdata.transformations import set_transformation, Affine, Identity
 from ._make_bbox import make_bbox
 from .._readwrite import get_base_level, get_scaling_factor
-from .._utils import get_optimal_chunk_size
 from shapely.affinity import affine_transform
-from tqdm import tqdm
 
 def _filter_points(sdata, image_name, point_name, size):
     img_obj = sdata[image_name]

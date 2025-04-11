@@ -1,7 +1,8 @@
 from typing import TYPE_CHECKING
+
 import torch
 import numpy as np
-from torch.utils.data import TensorDataset, DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset
 from meson._readwrite import get_base_level
 from meson._utils import get_optimal_chunk_size, overwrite_element
 from tqdm import tqdm

@@ -1,14 +1,13 @@
 from .model_manager import ModelManager
+import timm
+import torch
+from huggingface_hub import login, hf_hub_download
+from torchvision.transforms import v2
 import os
 
 class UNIModelManager(ModelManager):
     @classmethod
     def _load_model_and_transform(cls):
-        # lazy import
-        import timm
-        import torch
-        from huggingface_hub import login, hf_hub_download
-        from torchvision.transforms import v2
 
         login(token=cls.get_token()) 
         print(f"Loading UNI model and transform, parameters are from {cls.download_dir}")

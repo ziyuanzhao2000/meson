@@ -1,4 +1,8 @@
-from ._embed_patch import embed_patch
-from .embedders.SAE import SparseAutoencoder
-
-__all__ = [embed_patch, SparseAutoencoder]
+import lazy_loader as lazy
+__getattr__, __dir__, __all__ = lazy.attach(
+    __name__,
+    submod_attrs={
+    'embedders': ['TestEmbedder', 'UNIEmbedder', 'UNI2Embedder', 'SparseAutoencoder'],
+    '_embed_patch': ['embed_patch']
+    }
+)

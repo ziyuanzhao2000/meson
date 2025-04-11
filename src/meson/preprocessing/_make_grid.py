@@ -1,7 +1,6 @@
 import numpy as np
 from spatialdata.models import PointsModel
 from spatialdata.transformations import set_transformation, Identity
-from xarray.core.datatree import DataTree
 from typing import Tuple
 from meson._readwrite import get_base_level
 

@@ -1,6 +1,10 @@
-from ._make_bbox import make_bbox
-from ._make_grid import make_grid
-from ._make_patch import make_patch
-from ._segment_tissue import segment_tissue
-
-__all__ = [make_bbox, make_grid, make_patch, segment_tissue]
+import lazy_loader as lazy
+__getattr__, __dir__, __all__ = lazy.attach(
+    __name__,
+    submod_attrs={
+    '_make_bbox': ['make_bbox'],
+    '_make_grid': ['make_grid'],
+    '_make_patch': ['make_patch'],
+    '_segment_tissue': ['segment_tissue']
+    }
+)

@@ -1,4 +1,3 @@
-import openslide
 import spatialdata as sd
 import dask.array as da
 import numpy as np
@@ -10,7 +9,6 @@ from ._settings import settings
 from spatialdata._io.io_raster import _read_multiscale
 from spatialdata.models import Image2DModel
 from tqdm import tqdm
-from ._utils import get_optimal_chunk_size
 import pandas as pd
 import joblib
 

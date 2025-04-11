@@ -8,7 +8,6 @@ from tqdm import tqdm
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 from sklearn.utils import check_random_state
-import joblib, pickle
 import numpy as np
 import scipy.sparse as sp
 
@@ -212,7 +211,6 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
 
     def fit(self, X, y=None, 
             verbose: int | bool = False):
-        import torch
         self.random_state_ = check_random_state(self.random_state)
         X = self._validate_data(X, accept_sparse=False)
         assert len(X.shape) == 2 # expect X shape = B x d_emb 
