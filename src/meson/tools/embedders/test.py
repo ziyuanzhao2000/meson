@@ -1,11 +1,9 @@
 from torch import nn
+from torchvision.transforms import v2
+import torch
 
 class TestEmbedder(nn.Module):
     def __init__(self, embed_dim=1024):
-        # lazy import
-        from torchvision.transforms import v2
-        import torch
-        
         super().__init__()
         self.name = 'test'
         self.embed_dim = embed_dim

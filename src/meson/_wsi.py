@@ -1,15 +1,15 @@
 from pathlib import Path
-from typing import Any, Literal, Tuple, TYPE_CHECKING
+from typing import Any, Literal, Tuple
 
-from spatialdata.transformations import set_transformation, Identity, Scale
+import xarray
+from spatialdata.transformations import set_transformation, Identity
+from spatialdata import SpatialData
 from spatialdata.models import Image2DModel
-
-if TYPE_CHECKING:
-    from spatialdata import SpatialData
-    from xarray import Dataset, DataTree
+from spatialdata.transformations import Identity, Scale
+from xarray import DataArray, Dataset, DataTree
 
 
-def add_wsi(sdata: "SpatialData", 
+def add_wsi(sdata: SpatialData, 
             path: str | Path, 
             backend: Literal["tiffslide", "openslide"] = "tiffslide",
             image_name: str | None = None, 
@@ -30,7 +30,7 @@ def read_wsi(
     chunks: tuple[int, int, int] | dict = {},
     as_image: bool = True,
     backend: Literal["tiffslide", "openslide"] = "tiffslide",
-) -> "SpatialData" | Tuple["DataTree", str, dict]:
+) -> SpatialData | Tuple[DataTree, str, dict]:
     """Read a WSI into a `SpatialData` object
 
     Args:
@@ -42,7 +42,6 @@ def read_wsi(
     Returns:
         A `SpatialData` object with a multiscale 2D-image of shape `(C, Y, X)`, or just the DataTree if `as_image=True`
     """
-    from xarray import DataArray, Dataset, DataTree
     if not as_image:
         import meson
         sdata = meson.SpatialData()
@@ -92,7 +91,7 @@ def wsi_autoscale(
     path: str | Path,
     image_model_kwargs: dict | None = None,
     backend: Literal["tiffslide", "openslide"] = "tiffslide",
-) -> "SpatialData":
+) -> SpatialData:
     """Read a WSI into a `SpatialData` object.
 
     Scales are generated automatically by `spatialdata` instead of using
@@ -106,7 +105,6 @@ def wsi_autoscale(
     Returns:
         A `SpatialData` object with a 2D-image of shape `(C, Y, X)`
     """
-    from spatialdata import SpatialData
     image_model_kwargs = _default_image_models_kwargs(image_model_kwargs)
 
     image_name, img, _, tiff_metadata = _open_wsi(path, backend=backend)
@@ -140,7 +138,7 @@ def _default_image_models_kwargs(image_models_kwargs: dict | None) -> dict:
 
 def _open_wsi(
     path: str | Path, backend: Literal["tiffslide", "openslide"] = "openslide"
-) -> tuple[str, "Dataset", Any, dict]:
+) -> tuple[str, xarray.Dataset, Any, dict]:
     image_name = Path(path).stem
 
     if backend == "tiffslide":

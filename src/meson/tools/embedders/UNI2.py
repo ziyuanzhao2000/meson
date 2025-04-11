@@ -1,16 +1,14 @@
 from .model_manager import ModelManager
 import os
-
+import torch
+from torch import nn
+import timm
+from huggingface_hub import login, hf_hub_download
+from torchvision.transforms import v2
 
 class UNI2ModelManager(ModelManager):
     @classmethod
     def _load_model_and_transform(cls):
-        # lazy import
-        import timm
-        import torch
-        from huggingface_hub import login, hf_hub_download
-        from torchvision.transforms import v2
-
         login(token=cls.get_token()) 
         print(f"Loading UNI2 model and transform, parameters are from {cls.download_dir}")
         local_dir = os.path.join(cls.download_dir, 'ckpts/uni2-h')
