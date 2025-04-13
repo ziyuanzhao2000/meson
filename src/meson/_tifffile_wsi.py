@@ -4,6 +4,142 @@ import numpy as np
 import uuid
 import os
 import shutil
+import tifffile
+from fractions import Fraction
+import re
+import ome_types
+
+tag_registries = [tifffile.TIFF.TAGS,
+                  tifffile.TIFF.GPS_TAGS,
+                  tifffile.TIFF.IOP_TAGS,
+                  tifffile.TIFF.UIC_TAGS,
+                  tifffile.TIFF.EXIF_TAGS,
+                  tifffile.TIFF.NDPI_TAGS]
+
+# tifffile_accepted_metadata = [
+#     # Plane level
+#     'DeltaT',
+#     'DeltaTUnit',
+#     'ExposureTime',
+#     'ExposureTimeUnit',
+#     'PositionX',
+#     'PositionXUnit',
+#     'PositionY',
+#     'PositionYUnit',
+#     'PositionZ',
+#     'PositionZUnit'
+#     # Channel level
+#     'Name',
+#     'AcquisitionMode',
+#     'Color',
+#     'ContrastMethod',
+#     'EmissionWavelength',
+#     'EmissionWavelengthUnit',
+#     'ExcitationWavelength',
+#     'ExcitationWavelengthUnit',
+#     'Fluor',
+#     'IlluminationType',
+#     'NDFilter',
+#     'PinholeSize',
+#     'PinholeSizeUnit',
+#     'PockelCellSetting',
+#     # Image level
+#     'Name', ?
+#     'SignificantBits',
+#     'PhysicalSizeX',
+#     'PhysicalSizeXUnit',
+#     'PhysicalSizeY',
+#     'PhysicalSizeYUnit',
+#     'PhysicalSizeZ',
+#     'PhysicalSizeZUnit',
+#     'TimeIncrement',
+#     'TimeIncrementUnit',
+# ]
+
+def get_tag_name(tag_code):
+    for tag_registry in tag_registries:
+        if tag_code in tag_registry:
+            return tag_registry[tag_code]
+    return tag_code
+
+
+def merge_dicts(dicts, names):
+    if len(dicts) != len(names):
+        raise ValueError("Number of dictionaries and names must match")
+    
+    if not dicts:
+        return {}
+    
+    all_keys = set()
+    for d in dicts:
+        all_keys.update(d.keys())
+    
+    result = {}
+    
+    for key in all_keys:
+        values = [d.get(key) for d in dicts if key in d]
+        
+        if len(values) == len(dicts):
+            are_equal = True
+            first_val = values[0]
+            
+            for v in values[1:]:
+                if isinstance(first_val, np.ndarray) or isinstance(v, np.ndarray):
+                    if not np.array_equal(first_val, v, equal_nan=True):
+                        are_equal = False
+                        break
+                elif first_val != v:
+                    are_equal = False
+                    break
+            
+            if are_equal:
+                result[key] = values[0]
+                continue
+        
+        for i, d in enumerate(dicts):
+            if key in d:
+                result[f"{names[i]}{key}"] = d[key]
+    
+    return result
+
+# copied from tiffslides: https://github.com/Bayer-Group/tiffslide/blob/main/tiffslide/tiffslide.py#L758
+def recover_mpp(metadata):
+    """recover mpp from tiff tags"""
+    parsed = {}
+
+    try:
+        resolution_unit = metadata["ResolutionUnit"]
+        x_resolution = Fraction(*metadata["XResolution"])
+        y_resolution = Fraction(*metadata["YResolution"])
+    except KeyError:
+        pass
+    else:
+        RESUNIT = tifffile.RESUNIT
+        scale = {
+            RESUNIT.INCH: 25400.0,
+            RESUNIT.CENTIMETER: 10000.0,
+            RESUNIT.MILLIMETER: 1000.0,
+            RESUNIT.MICROMETER: 1.0,
+            RESUNIT.NONE: None,
+        }.get(resolution_unit, None)
+        if scale is not None:
+            try:
+                mpp_x = scale / x_resolution
+                mpp_y = scale / y_resolution
+            except ArithmeticError:
+                pass
+            else:
+                parsed['PhysicalSizeX'] = mpp_x
+                parsed['PhysicalSizeY'] = mpp_y
+                parsed['PhysicalSizeXUnit'] = 'µm'
+                parsed['PhysicalSizeYUnit'] = 'µm'
+    return parsed
+
+def TIFFParser(metadata):
+    return recover_mpp(metadata)
+
+def NDPIParser(metadata):
+    return metadata
 
 class WriteableZarrArray:
     def __init__(self, original_array, axes=None):
@@ -112,7 +248,7 @@ class WriteableZarrArray:
         y_ax, x_ax = self.axes.index('Y'), self.axes.index('X')
         y_size, x_size = self.original.shape[y_ax], self.original.shape[x_ax]
         if tile_size is None:
-            y_step, x_step = self.chunks[y_ax], self.chunls[x_ax]
+            y_step, x_step = self.chunks[y_ax], self.chunks[x_ax]
         else:
             y_step, x_step = tile_size
         shape = self.shape
@@ -135,7 +271,7 @@ class TiffPage:
         self._page = tiffpage
 
         base_store = self._page.aszarr()
-        max_bytes = 1e12 #tbd later
+        max_bytes = 1e8 #tbd later
         cached_store = zarr.storage.LRUStoreCache(base_store, max_bytes)
         initial_array = zarr.open(cached_store)
         self._data = WriteableZarrArray(initial_array, axes=self.axes)
@@ -176,26 +312,50 @@ class TiffLevel():
         self._pages = [TiffPage(page) for page in tifflevel.pages]
         
         base_store = self._level.aszarr()
-        max_bytes = 1e12 #tbd later
+        max_bytes = 1e8 #tbd later
         cached_store = zarr.storage.LRUStoreCache(base_store, max_bytes)
         initial_array = zarr.open(cached_store)
         if isinstance(initial_array, zarr.hierarchy.Group): # this occurs at level 0
             initial_array = initial_array[0] 
         self._data = WriteableZarrArray(initial_array, axes=self.axes)
 
+        self._metadata = dict([
+            (get_tag_name(tag.code), tag.value) for tag in self._level.pages[0].tags
+        ])
+        self._parsed_metadata = {}
+
+    @property
+    def metadata(self):
+        metadata = {}
+        metadata.update(self._parsed_metadata)
+        metadata.update(self._metadata)
+        return metadata
+
     @property
     def pages(self):
         return self._pages
     
     def __getattr__(self, name):
+        if name in ['name']:
+            attr = self.metadata.get(name)
+            if attr is not None:
+                return attr
         return getattr(self._level, name)
-    
+
+    # alias
+    @property
+    def is_multiscale(self):
+        return self.is_pyramidal
+
     @property
     def data(self):
         return self._data.data
     
     def _repr_html_(self):
-        return f"<h3>Pyramid level {self.level_id},\n</h3>" + self._data._repr_html_()
+        if self.is_pyramidal:
+            return f"<h3>Pyramid level {self.level_id},\n</h3>" + self._data._repr_html_()
+        else:
+            return self._data._repr_html_()
 
     def __repr__(self):
         return f"Pyramid level {self.level_id},\n" + self.data.__repr__()
@@ -212,6 +372,15 @@ class TiffLevel():
     def tiles(self, tile_size):
         return self._data.tiles(tile_size)
     
+    def parse_metadata(self, kind):
+        metadata = {}
+        metadata.update(TIFFParser(self._metadata))
+        if kind == 'ndpi':
+            parser = NDPIParser
+        else:
+            parser = lambda x: x
+        self._parsed_metadata = parser(metadata)
+
     def cleanup(self):
         for page in self._pages:
             page.cleanup()
@@ -225,28 +394,47 @@ class TiffSeries():
                         for level_id, level in enumerate(tiffseries.levels)]
 
     @property
+    def metadata(self):
+        if len(self._levels) == 1:
+            return self._levels[0].metadata
+        else:
+            return merge_dicts(dicts=[level.metadata for level in self._levels],
+                               names=[f'level_{i}.' for i in range(len(self._levels))])
+
+    @property
     def levels(self):
         return self._levels
+    
+    @property
+    def name(self):
+        if hasattr(self._series, 'name'):
+            return self._series.name
+        else:
+            return self._levels[0].name
     
     def __getattr__(self, name):
         return getattr(self._series, name)
 
+    # alias
+    @property
+    def is_multiscale(self):
+        return self.is_pyramidal
+    
+
     def __repr__(self):
-        s = ' \n'.join(
-            s
-            for s in (
-                f'{self.name!r}' if self.name else '',
-                'x'.join(str(i) for i in self.shape),
-                str(self.dtype),
+        lines = [
+                f'Image {self.name!r}' if self.name else 'Image' + f'of type {self.kind}',
+                f'Data type: {str(self.dtype)}',
                 f"Axes order: {self.axes}",
-                f"Image type: {self.kind}",
-                (f'{len(self.levels)} Levels') if self.is_pyramidal else '',
-                f'{len(self)} Pages',
-                (f'@{self.dataoffset}') if self.dataoffset else '',
-            )
-            if s
-        )
-        return f'TiffPageSeries {self._index}  {s}'
+                f'Pyramidal with {len(self.levels)} levels:' if self.is_pyramidal else '',
+            ]
+        if self.is_pyramidal:
+            for level_id, level in enumerate(self.levels):
+                lines.append(f'  Level {level_id}, data shape: {level.shape}')
+        else:
+            lines.append(f'Data shape: {self.levels[0].shape}')
+
+        return ' \n'.join(s for s in lines if s)
     
     def __getitem__(self, key):
         if isinstance(key, int) or len(key) == 0:
@@ -260,10 +448,104 @@ class TiffSeries():
         else:
             self.levels[key[0]][key[1:]] = value
 
+    def parse_metadata(self, kind):
+        for level in self._levels:
+            level.parse_metadata(kind)
+
     def cleanup(self):
         for level in self._levels:
             level.cleanup()
 
 
-class Slide():
-    pass 
+class TiffFile():
+    def __init__(self, file, kind=None, *args, **kwargs):
+        self._file = file
+        self._tifffile = tifffile.TiffFile(file, *args, **kwargs)
+        self._series = [TiffSeries(series) for series in self._tifffile.series]
+        self._kind = kind if kind else self.series[0].kind 
+
+        for series in self._series:
+            series.parse_metadata(self._kind)
+
+    @property
+    def series(self):
+        return self._series
+
+    @property
+    def kind(self):
+        return self._kind 
+
+    def __getattr__(self, name):
+        return getattr(self._tifffile, name)
+
+    def __repr__(self):
+        lines = [f'TiffFile ({self.kind}) from {self._file} with {len(self.series)} image series: ']
+        for series in self._series:
+            lines.append(f'  Series {series.name!r} with {len(series.levels)} levels')
+        return ' \n'.join(s for s in lines if s)
+
+    def __getitem__(self, key):
+        if isinstance(key, int):
+            return self._series[key]
+        elif isinstance(key, str):
+            for series in self.series:
+                if series.name == key:
+                    return series
+
+    def __setitem__(self, key, value):
+        if isinstance(key, int):
+            self._series[key] = value
+        elif isinstance(key, str):
+            for id, series in enumerate(self.series):
+                if series.name == key:
+                    self._series[id] = value
+                    break
+
+    def close(self):
+        for series in self.series:
+            series.cleanup()
+        self._tifffile.close()
+
+def remove_invalid_xml_chars(text):
+    xml_compliant_text = re.sub(r'[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]+', '', text)
+    return xml_compliant_text
+
+class TiffWriter(tifffile.TiffWriter):
+    def __init__(self, file, *args, **kwargs):
+        self.file = file
+        super().__init__(file, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._tifffile, name)
+    
+    def write(self, 
+            level: TiffLevel, 
+            metadata={}, 
+            write_tiles=True, 
+            *args, **kwargs):
+        serialized = dict([(remove_invalid_xml_chars(str(key)), 
+                            remove_invalid_xml_chars(str(val))) for key, val in level.metadata.items()])
+        metadata.update(serialized)
+        metadata.update({'MapAnnotation': serialized})
+        tile_size = kwargs.get("tile", (1024, 1024))
+        kwargs['tile']=tile_size
+        shape = level.data.shape
+        if write_tiles:
+            data = level._data.tiles(tile_size)  
+            if level.axes == 'YXS':
+                shape = tuple([shape[i] for i  in [2, 0, 1]])
+        else:
+            data = level.data[:]
+        # print(data.shape, level.data.shape)
+        super().write(data, 
+                      metadata=metadata, 
+                      shape=shape,
+                      dtype=level.data.dtype,
+                      *args, **kwargs)
+        super().close()
+        ome = ome_types.from_tiff(self.file)
+        ome.images[-1].name = level.name
+        tifffile.tiffcomment(self.file, ome_types.to_xml(ome).encode())
+
+
+    
