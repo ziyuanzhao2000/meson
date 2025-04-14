@@ -7,7 +7,6 @@ import shutil
 import tifffile
 from fractions import Fraction
 import re
-import ome_types
 
 tag_registries = [tifffile.TIFF.TAGS,
                   tifffile.TIFF.GPS_TAGS,
@@ -157,11 +156,9 @@ class WriteableZarrArray:
             isinstance(original_array, zarr.storage.LRUStoreCache):
             self.original_da = da.from_zarr(original_array)
         self.uuid = str(uuid.uuid4())
-        self.temp_dir = f".{self.uuid}"
+        self.temp_dir = f".temp_{self.uuid}"
         os.makedirs(self.temp_dir, exist_ok=True)
         self._dirty = False
-        self.data_array = None
-        self.mask_array = None
 
     def _create_temp_arrays(self):
         # Create temp arrays on disk with same properties as original
@@ -180,16 +177,8 @@ class WriteableZarrArray:
                                     mode='w')
 
     @property
-    def data(self):
-        if self.dirty:
-            return self
-        else:
-            return self.original
-
-    @property
     def dirty(self):
         return self._dirty
-
 
     @dirty.setter
     def dirty(self, value):
@@ -210,15 +199,15 @@ class WriteableZarrArray:
     
     def __str__(self):
         return self.original.__str__()
-    
+
     def __getitem__(self, key):
         if self.dirty:
-            mask_slice = self.mask_array[key]
-            original_data = self.original[key]
-            temp_data = self.data_array[key]
-            return np.where(mask_slice, temp_data, original_data)
+            mask_slice = da.array(self.mask_array)[key]
+            original_data = da.array(self.original)[key]
+            temp_data = da.array(self.data_array)[key]
+            return da.where(mask_slice, temp_data, original_data)
         else:
-            return self.original[key]
+            return da.array(self.original)[key]
 
     def __setitem__(self, key, value):
         self.dirty = True
@@ -264,7 +253,10 @@ class WriteableZarrArray:
                     else:
                         full_index.insert(y_ax, slice(y, y+y_step, 1))
                         full_index.insert(x_ax, slice(x, x+x_step, 1))
-                    yield self[tuple(full_index)]
+                    if self.dirty:
+                        yield self[tuple(full_index)].compute()
+                    else:
+                        yield self.original[tuple(full_index)]
 
 class TiffPage:
     def __init__(self, tiffpage):
@@ -274,17 +266,14 @@ class TiffPage:
         max_bytes = 1e8 #tbd later
         cached_store = zarr.storage.LRUStoreCache(base_store, max_bytes)
         initial_array = zarr.open(cached_store)
-        self._data = WriteableZarrArray(initial_array, axes=self.axes)
+        self.data = WriteableZarrArray(initial_array, axes=self.axes)
 
     def __getattr__(self, name):
         return getattr(self._page, name)
 
-    @property
-    def data(self):
-        return self._data.data
-    
+
     def _repr_html_(self):
-        return self._data._repr_html_()
+        return self.data._repr_html_()
         
     def __repr__(self):
         return self.data.__repr__()
@@ -299,11 +288,11 @@ class TiffPage:
         self.data[key] = value
 
     def tiles(self, tile_size):
-        return self._data.tiles(tile_size)
+        return self.data.tiles(tile_size)
     
     def cleanup(self):
-        if self._data is not None:
-            self._data.cleanup()
+        if self.data is not None:
+            self.data.cleanup()
 
 class TiffLevel():
     def __init__(self, tifflevel, level_id):
@@ -317,7 +306,7 @@ class TiffLevel():
         initial_array = zarr.open(cached_store)
         if isinstance(initial_array, zarr.hierarchy.Group): # this occurs at level 0
             initial_array = initial_array[0] 
-        self._data = WriteableZarrArray(initial_array, axes=self.axes)
+        self.data = WriteableZarrArray(initial_array, axes=self.axes)
 
         self._metadata = dict([
             (get_tag_name(tag.code), tag.value) for tag in self._level.pages[0].tags
@@ -342,20 +331,15 @@ class TiffLevel():
                 return attr
         return getattr(self._level, name)
 
-    # alias
     @property
     def is_multiscale(self):
-        return self.is_pyramidal
-
-    @property
-    def data(self):
-        return self._data.data
+        return (self.is_pyramidal or self.level_id > 0)
     
     def _repr_html_(self):
-        if self.is_pyramidal:
-            return f"<h3>Pyramid level {self.level_id},\n</h3>" + self._data._repr_html_()
+        if self.is_multiscale:
+            return f"<h3>Pyramid level {self.level_id},\n</h3>" + self.data._repr_html_()
         else:
-            return self._data._repr_html_()
+            return self.data._repr_html_()
 
     def __repr__(self):
         return f"Pyramid level {self.level_id},\n" + self.data.__repr__()
@@ -370,7 +354,7 @@ class TiffLevel():
         self.data[key] = value
 
     def tiles(self, tile_size):
-        return self._data.tiles(tile_size)
+        return self.data.tiles(tile_size)
     
     def parse_metadata(self, kind):
         metadata = {}
@@ -384,8 +368,8 @@ class TiffLevel():
     def cleanup(self):
         for page in self._pages:
             page.cleanup()
-        if self._data is not None:
-            self._data.cleanup()
+        if self.data is not None:
+            self.data.cleanup()
 
 class TiffSeries():
     def __init__(self, tiffseries):
@@ -426,11 +410,11 @@ class TiffSeries():
                 f'Image {self.name!r}' if self.name else 'Image' + f'of type {self.kind}',
                 f'Data type: {str(self.dtype)}',
                 f"Axes order: {self.axes}",
-                f'Pyramidal with {len(self.levels)} levels:' if self.is_pyramidal else '',
+                f'Pyramidal with {len(self.levels)} levels:' if self.is_multiscale else '',
             ]
-        if self.is_pyramidal:
+        if self.is_multiscale:
             for level_id, level in enumerate(self.levels):
-                lines.append(f'  Level {level_id}, data shape: {level.shape}')
+                lines.append(f'  Level {level_id}, data shape: {level.shape}, chunk shape: {level.data.chunks}')
         else:
             lines.append(f'Data shape: {self.levels[0].shape}')
 
@@ -519,33 +503,64 @@ class TiffWriter(tifffile.TiffWriter):
         return getattr(self._tifffile, name)
     
     def write(self, 
-            level: TiffLevel, 
-            metadata={}, 
+            tiff_obj, 
+            metadata={},
             write_tiles=True, 
             *args, **kwargs):
-        serialized = dict([(remove_invalid_xml_chars(str(key)), 
-                            remove_invalid_xml_chars(str(val))) for key, val in level.metadata.items()])
-        metadata.update(serialized)
-        metadata.update({'MapAnnotation': serialized})
-        tile_size = kwargs.get("tile", (1024, 1024))
-        kwargs['tile']=tile_size
-        shape = level.data.shape
-        if write_tiles:
-            data = level._data.tiles(tile_size)  
-            if level.axes == 'YXS':
-                shape = tuple([shape[i] for i  in [2, 0, 1]])
-        else:
-            data = level.data[:]
-        # print(data.shape, level.data.shape)
-        super().write(data, 
-                      metadata=metadata, 
-                      shape=shape,
-                      dtype=level.data.dtype,
-                      *args, **kwargs)
-        super().close()
-        ome = ome_types.from_tiff(self.file)
-        ome.images[-1].name = level.name
-        tifffile.tiffcomment(self.file, ome_types.to_xml(ome).encode())
-
-
-    
+        
+        if isinstance(tiff_obj, TiffLevel):
+            level = tiff_obj
+            serialized = dict([(remove_invalid_xml_chars(str(key)), 
+                                remove_invalid_xml_chars(str(val))) for key, val in level.metadata.items()])
+            metadata.update(serialized)
+            metadata.update({'MapAnnotation': serialized,})
+            tile_size = kwargs.get("tile", (1024, 1024))
+            kwargs['tile']=tile_size
+            shape = level.data.shape
+            if write_tiles:
+                data = level.data.tiles(tile_size)  
+                if level.axes == 'YXS':
+                    shape = tuple([shape[i] for i  in [2, 0, 1]])
+            else:
+                if level.data.dirty:
+                    data = level.data.compute()
+                else:
+                    data = level.data.original[:]
+            if level.level_id == 0: # base level
+                metadata.update({'Name': level.name})
+            super().write(data, 
+                        metadata=metadata, 
+                        shape=shape,
+                        dtype=level.data.dtype,
+                        *args, **kwargs)
+        elif isinstance(tiff_obj, TiffSeries):
+            series = tiff_obj
+            subresolutions = len(series.levels) - 1
+            if subresolutions == 0:
+                self.write(series.levels[0], 
+                        metadata=metadata, 
+                        write_tiles=write_tiles,
+                        *args,
+                        **kwargs)
+            else:
+                self.write(series.levels[0], 
+                        metadata=metadata, 
+                        write_tiles=write_tiles,
+                        subifds=subresolutions,
+                        *args,
+                        **kwargs)
+                for level in series.levels[1:]:
+                    self.write(level, 
+                        metadata=metadata, 
+                        write_tiles=write_tiles,
+                        subfiletype=1,
+                        *args,
+                        **kwargs)
+        elif isinstance(tiff_obj, TiffFile):
+            file = tiff_obj
+            for series in file.series:
+                self.write(series, 
+                           metadata=metadata,
+                           write_tiles=write_tiles,
+                           *args,
+                           **kwargs)
