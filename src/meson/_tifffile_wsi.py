@@ -7,6 +7,9 @@ import shutil
 import tifffile
 from fractions import Fraction
 import re
+from math import log
+from functools import cached_property
+from PIL import Image
 
 tag_registries = [tifffile.TIFF.TAGS,
                   tifffile.TIFF.GPS_TAGS,
@@ -323,7 +326,23 @@ class TiffLevel():
     @property
     def pages(self):
         return self._pages
+
+    @property
+    def x_ax(self):
+        return self.axes.index('X') 
+
+    @property
+    def y_ax(self):
+        return self.axes.index('Y')
+
+    @property
+    def width(self):
+        return self.shape[self.x_ax]
     
+    @property
+    def height(self):
+        return self.shape[self.y_ax]
+
     def __getattr__(self, name):
         if name in ['name']:
             attr = self.metadata.get(name)
@@ -376,6 +395,9 @@ class TiffSeries():
         self._series = tiffseries
         self._levels = [TiffLevel(level, level_id) \
                         for level_id, level in enumerate(tiffseries.levels)]
+    
+    def __getattr__(self, name):
+        return getattr(self._series, name)
 
     @property
     def metadata(self):
@@ -395,15 +417,23 @@ class TiffSeries():
             return self._series.name
         else:
             return self._levels[0].name
-    
-    def __getattr__(self, name):
-        return getattr(self._series, name)
-
+        
     # alias
     @property
     def is_multiscale(self):
         return self.is_pyramidal
     
+    @property
+    def thumbnail(self):
+        img = self._levels[-1].data.original[:]
+        if len(self.axes) == 2:
+            return Image.fromarray(img) # MINISBLACK
+        elif len(self.axes) == 3:
+            if self.axes[:2] == 'YX' and img.shape[2] == 3:
+                return Image.fromarray(img) # RGB
+            elif self.axes[1:] == 'YX' and img.shape[0] == 3:
+                return Image.fromarray(img.transpose(1,2,0)) # RGB
+
 
     def __repr__(self):
         lines = [
@@ -514,7 +544,15 @@ class TiffWriter(tifffile.TiffWriter):
                                 remove_invalid_xml_chars(str(val))) for key, val in level.metadata.items()])
             metadata.update(serialized)
             metadata.update({'MapAnnotation': serialized,})
-            tile_size = kwargs.get("tile", (1024, 1024))
+            tile_size = kwargs.get("tile", None)
+            if tile_size is None:
+                min_size = min(level.width, level.height)
+                if min_size > 1024:
+                    tile_size = (1024, 1024)
+                else:
+                    s = 2**(int(log(min_size, 2)))
+                    tile_size = (s, s)
+            print(tile_size)
             kwargs['tile']=tile_size
             shape = level.data.shape
             if write_tiles:
@@ -528,6 +566,15 @@ class TiffWriter(tifffile.TiffWriter):
                     data = level.data.original[:]
             if level.level_id == 0: # base level
                 metadata.update({'Name': level.name})
+            if not 'photometric' in kwargs:
+                if isinstance(level.metadata['BitsPerSample'], int):
+                    photometric = 'MINISBLACK'
+                elif isinstance(level.metadata['BitsPerSample'], tuple):
+                    if len(level.metadata['BitsPerSample']) == 3:
+                        photometric = 'RGB'
+                    else:
+                        photometric = 'MINISBLACK'
+                kwargs['photometric'] = photometric
             super().write(data, 
                         metadata=metadata, 
                         shape=shape,
