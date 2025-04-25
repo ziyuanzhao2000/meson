@@ -10,22 +10,45 @@ from meson._readwrite import get_top_level, get_scaling_factor
 def segment_tissue(sdata, image_name, 
                    entropy_ksize=7,
                   median_ksize=51,
+                  closing_ksize=0,
+                  opening_ksize=0,
                   dilation_ksize=0, 
+                  remove_holes=True,
+                  remove_light_regions=0,
                   cs: str | None = None):
     if cs is None:
         cs = image_name.split('_')[0]
     img_obj = sdata[image_name]
     img = get_top_level(img_obj)
-    img_hsv = cv2.cvtColor(img.transpose('y', 'x', 'c').compute().to_numpy(), cv2.COLOR_RGB2HSV) 
+    img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV) 
     img_sat = img_hsv[:, :, 1] # measures saturation of some sort...
-    img_ent = entropy(img_sat, square(entropy_ksize))
+    ent_kernel = disk(entropy_ksize)
+    img_ent = entropy(img_sat, ent_kernel)
     img_ent_rescaled = ((img_ent - img_ent.min()) / \
                         (img_ent.max() - img_ent.min()) * 255).astype('uint8')
     img_med = cv2.medianBlur(img_ent_rescaled, median_ksize) 
-    _, img_thres = cv2.threshold(img_med, 0, 255, 
-                        cv2.THRESH_OTSU+cv2.THRESH_BINARY)
-    img_filled = binary_fill_holes(img_thres).astype(np.uint8)
-    img_dilated = cv2.dilate(img_filled, square(dilation_ksize))
+    img_thres = cv2.threshold(img_med, 0, 255, 
+                        cv2.THRESH_OTSU+cv2.THRESH_BINARY)[1]
+    if remove_holes:
+        img_filled = binary_fill_holes(img_thres).astype(np.uint8)
+    else:
+        img_filled = img_thres.astype(np.uint8)
+    if remove_light_regions:
+        img_pct = percentile(img_hsv[:, :, 1], 
+            footprint=ent_kernel, 
+            p0=remove_light_regions)
+        img_keep = cv2.threshold(img_pct, 0, 255, 
+                        cv2.THRESH_OTSU+cv2.THRESH_BINARY)[1]
+        img_filled = np.bitwise_and(img_filled, img_keep)
+    
+    if closing_ksize:
+        img_clopened = cv2.morphologyEx(img_filled, cv2.MORPH_CLOSE, 
+                                        disk(closing_ksize))
+    if opening_ksize:
+        img_clopened = cv2.morphologyEx(img_filled, cv2.MORPH_CLOSE, 
+                                        disk(opening_ksize))
+    img_dilated = cv2.dilate(img_clopened, disk(dilation_ksize))
+
     label = Labels2DModel.parse(img_dilated, dims=['y', 'x'])
 
     # ensure tissue mask transforms to the base layer of image pyramid
