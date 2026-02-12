@@ -1,4 +1,5 @@
 import os
+import io
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Union, Optional
@@ -8,8 +9,12 @@ import matplotlib.image as mpimg
 from matplotlib.colors import LinearSegmentedColormap
 import spatialdata
 from tqdm import tqdm
+from PIL import Image
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+from reportlab.lib.units import inch
 
-from ._utils import get_transparent_colormap
+from ._utils import get_transparent_colormap, resize_image_to_fit
 
 if TYPE_CHECKING:
     from spatialdata import SpatialData
@@ -245,3 +250,126 @@ def plot_feature_spatial_distribution(
                 os.remove(path)
         if os.path.exists(temp_dir):
             os.rmdir(temp_dir)
+
+
+def create_feature_pdf(
+    top_image_path: str,
+    bottom_image_path: str,
+    output_pdf_path: str,
+    feature_name: Optional[str] = None,
+    page_width_inches: float = 13.33,
+    page_height_inches: float = 7.5,
+    image_dpi: int = 300,
+    margin_dots: int = 150
+) -> None:
+    """
+    Create a PDF with two images arranged vertically on a landscape slide.
+    
+    Designed for feature reports with spatial distribution (top) and
+    patch gallery (bottom) images. Uses 16:9 aspect ratio by default.
+    
+    Parameters
+    ----------
+    top_image_path : str
+        Path to image for top of PDF (e.g., spatial distribution).
+    bottom_image_path : str
+        Path to image for bottom of PDF (e.g., patch gallery).
+    output_pdf_path : str
+        Path where PDF will be saved.
+    feature_name : str, optional
+        Feature name to display as title at top of page.
+    page_width_inches : float, default=13.33
+        Page width in inches (13.33 = 16:9 aspect ratio).
+    page_height_inches : float, default=7.5
+        Page height in inches (7.5 = 16:9 aspect ratio).
+    image_dpi : int, default=300
+        DPI of the images being embedded.
+    margin_dots : int, default=150
+        Margin size in dots/pixels.
+        
+    Examples
+    --------
+    >>> from meson.plotting import create_feature_pdf
+    >>> 
+    >>> create_feature_pdf(
+    ...     'feature_00017_samples_1-20.png',
+    ...     'feature_00017_spatial_distribution.png',
+    ...     'feature_00017_report.pdf',
+    ...     feature_name='Necrotic Core'
+    ... )
+    
+    Notes
+    -----
+    Images are automatically resized to fit within the page while
+    maintaining aspect ratio. The scaling accounts for conversion
+    between points (PDF units) and dots (image units).
+    """
+    # Set up page dimensions
+    page_width = page_width_inches * inch  # Convert to points
+    page_height = page_height_inches * inch
+    
+    # Create PDF canvas
+    c = canvas.Canvas(output_pdf_path, pagesize=(page_width, page_height))
+    
+    # Scale factor: 72 points per inch / image_dpi dots per inch
+    scale_factor = 72 / image_dpi
+    c.scale(scale_factor, scale_factor)
+    
+    # Convert page dimensions to dots
+    page_width_dots = page_width / scale_factor
+    page_height_dots = page_height / scale_factor
+    
+    # Define margins and available space
+    available_width = page_width_dots - 2 * margin_dots
+    available_height = page_height_dots - 3 * margin_dots  # Extra margin for spacing
+    max_image_height = available_height
+    
+    try:
+        # Load and process top image
+        top_img = Image.open(top_image_path)
+        top_img_resized, top_width, top_height = resize_image_to_fit(
+            top_img, int(available_width), int(max_image_height)
+        )
+        
+        # Load and process bottom image
+        bottom_img = Image.open(bottom_image_path)
+        bottom_img_resized, bottom_width, bottom_height = resize_image_to_fit(
+            bottom_img, int(available_width), int(max_image_height)
+        )
+        
+        # Calculate positions (center images horizontally)
+        top_x = margin_dots + (available_width - top_width) / 2
+        top_y = page_height_dots - margin_dots - top_height
+        
+        bottom_x = margin_dots + (available_width - bottom_width) / 2
+        bottom_y = margin_dots
+        
+        # Convert PIL images to ImageReader objects
+        top_img_buffer = io.BytesIO()
+        top_img_resized.save(top_img_buffer, format='PNG')
+        top_img_buffer.seek(0)
+        top_img_reader = ImageReader(top_img_buffer)
+        
+        bottom_img_buffer = io.BytesIO()
+        bottom_img_resized.save(bottom_img_buffer, format='PNG')
+        bottom_img_buffer.seek(0)
+        bottom_img_reader = ImageReader(bottom_img_buffer)
+        
+        # Draw images on PDF
+        c.drawImage(top_img_reader, top_x, top_y, width=top_width, height=top_height)
+        c.drawImage(bottom_img_reader, bottom_x, bottom_y, width=bottom_width, height=bottom_height)
+        
+        # Add feature name as title
+        if feature_name is not None:
+            c.setFont("Helvetica-Bold", 16)
+            title_x = page_width_dots / 2
+            title_y = page_height_dots - 100
+            c.drawCentredString(title_x, title_y, f"Feature: {feature_name}")
+        
+        # Save PDF
+        c.save()
+        print(f"Created PDF: {output_pdf_path}")
+        
+    except Exception as e:
+        print(f"Error creating PDF for {feature_name}: {str(e)}")
+        raise

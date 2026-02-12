@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 from typing import Union, Tuple
+from PIL import Image
 
 
 def get_transparent_colormap(
@@ -122,3 +123,50 @@ def make_transparent_to_color_colormaps(N, base_cmap, show_plot=True, final_alph
         plt.show()
     
     return colormaps
+
+
+def resize_image_to_fit(image: Image.Image, max_width: int, max_height: int) -> Tuple[Image.Image, int, int]:
+    """
+    Resize image to fit within max dimensions while maintaining aspect ratio.
+    
+    Parameters
+    ----------
+    image : PIL.Image.Image
+        Input image to resize.
+    max_width : int
+        Maximum width in pixels.
+    max_height : int
+        Maximum height in pixels.
+        
+    Returns
+    -------
+    resized_image : PIL.Image.Image
+        Resized image.
+    new_width : int
+        Width of resized image.
+    new_height : int
+        Height of resized image.
+        
+    Examples
+    --------
+    >>> from PIL import Image
+    >>> from meson.plotting import resize_image_to_fit
+    >>> 
+    >>> img = Image.open('large_image.png')
+    >>> resized, w, h = resize_image_to_fit(img, 1920, 1080)
+    >>> print(f"Resized to {w}x{h}")
+    """
+    img_width, img_height = image.size
+    
+    # Calculate scaling factor
+    width_ratio = max_width / img_width
+    height_ratio = max_height / img_height
+    scale_ratio = min(width_ratio, height_ratio)
+    
+    # Calculate new dimensions
+    new_width = int(img_width * scale_ratio)
+    new_height = int(img_height * scale_ratio)
+    
+    # Resize image
+    resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    return resized_image, new_width, new_height
