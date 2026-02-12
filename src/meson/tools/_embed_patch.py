@@ -3,11 +3,13 @@ from typing import TYPE_CHECKING
 import torch
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
-from meson._readwrite import get_base_level
-from meson._utils import get_optimal_chunk_size, overwrite_element
+from meson._readwrite import get_base_level, overwrite_element
+from meson._utils import get_optimal_chunk_size
 from tqdm import tqdm
 from scipy.sparse import csc_array, hstack
 import pandas as pd
+from PIL import Image
+
 
 if TYPE_CHECKING:
     from spatialdata import SpatialData
@@ -23,6 +25,13 @@ def _get_embedder(sdata, embedder_name: str, token=None):
     elif embedder_name in ["uni2", "UNI2", "uni2-h", "UNI2-h"]:
         from meson.tools.embedders import UNI2Embedder
         return UNI2Embedder(token=token), "Vision"
+    elif embedder_name in ["kmeans", "KMeans", "FrequencyRankedKMeans"]:
+        from meson.tools.embedders import FrequencyRankedKMeans
+        for model_info in sdata.attrs['models_metadata']:
+            model_name = model_info['name']
+            if embedder_name == model_name:
+                return sdata.attrs['models'][model_name], "KMeans"
+        raise ValueError(f"KMeans model '{embedder_name}' not found in sdata.attrs['models']")
     else:
         for model_info in sdata.attrs['models_metadata']:
             model_name = model_info['name']
@@ -35,7 +44,8 @@ class PatchDataset(Dataset):
                         image_name: str | None = None,
                         point_name: str | None = 'grid_point',
                         patch_name: str | None = 'patch', 
-                        precache: bool = False):
+                        precache: bool = False,
+                        color_transform = None):
         self.precache = precache
         if image_name is not None:
             patch_name = f'{image_name}_{point_name}_{patch_name}'
@@ -47,6 +57,8 @@ class PatchDataset(Dataset):
         print("Initialized patch dataset for image with shape", self.image.shape)
         self.patch_df = sdata[patch_name].obs
 
+        self.color_transform = color_transform
+
     def __getitem__(self, index):
         row = self.patch_df.iloc[index]
         patch = self.image[
@@ -54,11 +66,14 @@ class PatchDataset(Dataset):
             row['ymin']:row['ymax'],
             row['xmin']:row['xmax']
         ]
-        if self.precache:
-            return patch
-        else:
-            return patch.compute().data
+        if not self.precache:
+            patch = patch.compute().data
     
+        if not self.color_transform is None:
+            patch = Image.fromarray(patch.transpose(1,2,0))
+            return np.array(self.color_transform(patch)).transpose(2, 0, 1)
+        else:
+            return patch
     def __len__(self):
         return len(self.patch_df)
     
@@ -76,7 +91,9 @@ def embed_patch(sdata: "SpatialData",
                 device: str = 'cpu',
                 save: bool = True,
                 overwrite: bool = False,
-                precache: bool = False):
+                precache: bool = False, 
+                color_transform = None,
+                column_keep_indices: list[int] | None = None):
     if image_name is not None:
         patch_name_full = f'{image_name}_{point_name}_{patch_name}'
     else:
@@ -96,7 +113,9 @@ def embed_patch(sdata: "SpatialData",
             embedder.model.to(device)
         # patch_array = sdata.tables[patch_name].obsm['patch']
         # patch_dataset = TensorDataset(torch.tensor(patch_array.compute()))
-        patch_dataset = PatchDataset(sdata, image_name, point_name, patch_name, precache=precache)
+        patch_dataset = PatchDataset(sdata, image_name, point_name, patch_name, 
+                                    precache=precache,
+                                    color_transform=color_transform)
         embedding_array = np.zeros((len(patch_dataset), embedder.embed_dim))
         patch_dataloader = DataLoader(patch_dataset, 
                                     batch_size=batch_size,
@@ -112,8 +131,12 @@ def embed_patch(sdata: "SpatialData",
             del patch_dataset
             del patch_dataloader
     elif model_type == "SAE":
-        sae_embedding = embedder.transform(patch_table.obsm[obsm_key], device=device)
-        new_vars = [f'{embedder_name}_{i}' for i in range(sae_embedding.shape[1])]
+        sae_embedding = embedder.transform(patch_table.obsm[obsm_key], device=device, 
+                                           column_keep_indices=column_keep_indices)
+        if column_keep_indices is not None:
+            new_vars = [f'{embedder_name}_{i}' for i in column_keep_indices]
+        else:
+            new_vars = [f'{embedder_name}_{i}' for i in range(sae_embedding.shape[1])]
         existing_vars = list(patch_table.var.index)
         # slice columns of the table to remove these columns that are redundant with embedding
         diff_vars = [item for item in existing_vars if item not in new_vars]
@@ -124,6 +147,14 @@ def embed_patch(sdata: "SpatialData",
         patch_table.var.index = pd.Index(diff_vars + new_vars)
         patch_table.X = hstack((csc_array(patch_table.X), sae_embedding.tocsc())).tocsr()
         sdata[patch_name_full] = patch_table
+    elif model_type == "KMeans":
+        base_embeddings = patch_table.obsm[obsm_key]
+        kmeans_labels = embedder.transform(base_embeddings)
+        label_col_name = f'{embedder_name}_label'
+        patch_table.obs[label_col_name] = kmeans_labels
+        for i in range(embedder.n_clusters):
+            patch_table.obs[f'{embedder_name}_label_{i}'] = (kmeans_labels == i).astype(int)
+        
     if save:
         overwrite_element(sdata, patch_name_full)
     return sdata

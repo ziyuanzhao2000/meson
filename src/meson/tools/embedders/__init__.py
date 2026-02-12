@@ -1,3 +1,4 @@
+# Modify the __init__.py to add FrequencyRankedKMeans
 import lazy_loader as lazy
 __getattr__, __dir__, __all__ = lazy.attach(
     __name__,
@@ -5,9 +6,8 @@ __getattr__, __dir__, __all__ = lazy.attach(
     'test': ['TestEmbedder'],
     'UNI': ['UNIEmbedder'],
     'UNI2': ['UNI2Embedder'],
-    'SAE': ['SparseAutoencoder']
+    'Virchow2': ['Virchow2Embedder'],
+    'SAE': ['SparseAutoencoder'],
+    'KMeans': ['FrequencyRankedKMeans']
     }
 )
-
-
-
