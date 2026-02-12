@@ -195,7 +195,6 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
                  num_steps: int = 200000,
                  initial_lambda: float = 1e-6,  # Start very small
                  final_lambda: int = 1,
-                #  epsilon: float = 0.05,
                  target_sparsity: float = 0.001,
                  learning_rate=5e-5,
                  random_state=None):
@@ -233,8 +232,8 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
             verbose=verbose
         )
         return self
-    
-    def transform(self, X, device=None):
+        
+    def transform(self, X, column_keep_indices=None, device=None):
         check_is_fitted(self)
         X = self._validate_data(X, accept_sparse=False, reset=False)
         if device is None:
@@ -249,6 +248,8 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
         with torch.no_grad():
             for idx, batch in enumerate(tqdm(dataloader)):
                 _, X_ = self.model_.forward(batch[0].to(device))
+                if column_keep_indices is not None:
+                    X_ = X_[:, column_keep_indices]
                 arr = X_.to_sparse().cpu()
                 row_ind, col_ind = arr.indices().numpy()
                 value = arr.values().numpy()
@@ -257,8 +258,9 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
                 vals.append(value)
         data = np.concatenate(vals)
         row_ind, col_ind = np.concatenate(rows), np.concatenate(cols)
+        n_features = self.embed_dim_ if column_keep_indices is None else len(column_keep_indices)
         X_sparse = sp.csr_matrix((data, (row_ind, col_ind)),
-                                    shape=(X.shape[0], self.embed_dim_))
+                                    shape=(X.shape[0], n_features))
         return X_sparse
     
     # def load(self, file_path):

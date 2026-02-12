@@ -37,6 +37,7 @@ class UNIModelManager(ModelManager):
 
         cls.model = model
         cls.transform = transform
+        cls.loaded = True
 
 class UNIEmbedder():
     def __init__(self, token=None):

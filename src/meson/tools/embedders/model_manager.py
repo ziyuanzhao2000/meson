@@ -28,14 +28,19 @@ class ModelManager:
     
     @classmethod
     def initialize(cls, download_dir: Optional[str] = None):
-        if cls._instance is None:
-            cls._instance = cls()
-            cls.download_dir = download_dir or os.getcwd()
-            cls._load_model_and_transform()
-        return cls._instance
+        # try:
+            if cls._instance is None or not cls.loaded:
+                cls.loaded = False
+                cls._instance = cls()
+                cls.download_dir = download_dir or os.getcwd()
+                cls._load_model_and_transform()
+            return cls._instance
+        # except:
+        #     print("Failed to initialize the model manager! Please try again")
 
     @classmethod
     def _load_model_and_transform(cls):
         print(f"Loading model and transform, parameters are from {cls.download_dir}")
         cls.model = "Pretrained Model"
         cls.transform = "Input Transform"
+        cls.loaded = True
