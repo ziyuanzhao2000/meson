@@ -3,24 +3,32 @@ import pandas as pd
 import numpy as np
 from spatialdata import SpatialData, bounding_box_query, polygon_query, to_polygons
 from spatialdata.models import TableModel, PointsModel
-from spatialdata.transformations import set_transformation, Affine, Identity
+from spatialdata.transformations import set_transformation, Affine, Identity, get_transformation
 from ._make_bbox import make_bbox
 from .._readwrite import get_base_level, get_scaling_factor
 from shapely.affinity import affine_transform
 
-def _filter_points(sdata, image_name, point_name, size):
+def _filter_points(sdata, image_name, size, 
+                    point_name='grid_point',
+                    mask_name=None):
     img_obj = sdata[image_name]
     cs = image_name.split('_')[0]
     points = sdata[f'{image_name}_{point_name}']
-    tissue_mask = sdata[f'{image_name}_tissue']
+    if mask_name is None:
+        mask_name = f'{image_name}_tissue'
+    tissue_mask = sdata[mask_name]
+
     mask_polygon = to_polygons(tissue_mask)
-    scaling_factors = get_scaling_factor(img_obj)
-    affine = Affine(np.eye(3) * [*scaling_factors, 1], 
-                    input_axes=['x', 'y'], 
-                    output_axes=['x', 'y'])
+    affine = get_transformation(
+        tissue_mask, 
+        to_coordinate_system=cs, 
+        get_all=False
+    )
     set_transformation(mask_polygon, affine, cs)
     filtered_points = points.copy()
     filtered_points['ID'] = points.index
+    i1, i2 = affine.matrix.nonzero()
+    scaling_factors = affine.matrix[i1, i2]
     for polygon in mask_polygon['geometry']:
         transformed_polygon = affine_transform(polygon, [scaling_factors[0], 0, 0, scaling_factors[1], 0, 0])
         filtered_points = polygon_query(filtered_points, 
@@ -49,7 +57,7 @@ def make_patch(sdata: SpatialData,
     if cs is None:
         cs = image_name.split('_')[0]
 
-    points = _filter_points(sdata, image_name, point_name, size)
+    points = _filter_points(sdata, image_name, size, point_name)
     sdata = make_bbox(sdata, image_name=image_name, point_name=point_name, 
                       size=size, shape_name='bbox', cs=cs)
     shape_name = f"{image_name}_{point_name}_bbox"
