@@ -3,6 +3,7 @@ from typing import Any, Literal, Tuple, TYPE_CHECKING
 
 from spatialdata.transformations import set_transformation, Identity, Scale
 from spatialdata.models import Image2DModel
+import xarray
 
 if TYPE_CHECKING:
     from spatialdata import SpatialData
@@ -29,7 +30,8 @@ def read_wsi(
     path: str | Path,
     chunks: tuple[int, int, int] | dict = {},
     as_image: bool = True,
-    backend: Literal["tiffslide", "openslide"] = "tiffslide",
+    backend: Literal["tiffslide", "openslide", "default"] = "tiffslide",
+    type: Literal["HnE", "mIF", "mono"] = "HnE",
 ) -> "SpatialData" | Tuple["DataTree", str, dict]:
     """Read a WSI into a `SpatialData` object
 
@@ -49,7 +51,7 @@ def read_wsi(
         add_wsi(sdata, path=path, backend=backend)
         return sdata 
     
-    image_name, img, slide, slide_metadata = _open_wsi(path, backend=backend)
+    image_name, img, slide_metadata = _open_wsi(path, backend=backend)
     # img = img.rename_dims({"S": "C", "Y": "Y", "X": "X"})
     try:
         img = img.rename_dims({"S": "C"})
@@ -58,20 +60,42 @@ def read_wsi(
 
     images = {}
     for level, key in enumerate(sorted(list(img.keys()), key=int)):
-        suffix = key if key != "0" else ""
+        suffix = key if int(key) != 0 else ""
+        if type == "HnE" or type == "mIF":
+            scale_image = DataArray(
+                img[key].transpose("C", f"Y{suffix}", f"X{suffix}"),
+                dims=("c", "y", "x"),
+            ).chunk(chunks)
+        elif type == "mono":
+            scale_image = DataArray(
+                img[key].expand_dims("C", axis=0).transpose("C", f"Y{suffix}", f"X{suffix}"),
+                dims=("c", "y", "x"),
+            ).chunk(chunks)
+        else:
+            raise ValueError(f"Invalid {type:=}. Supported options are 'HnE', 'mIF', and 'mono'")
 
-        scale_image = DataArray(
-            img[key].transpose("C", f"Y{suffix}", f"X{suffix}"),
-            dims=("c", "y", "x"),
-        ).chunk(chunks)
+        scale_factor = slide_metadata['level_downsamples'][level]
 
-        scale_factor = slide.level_downsamples[level]
-
-        scale_image = Image2DModel.parse(
-            scale_image[:3, :, :],
-            transformations={"global": _get_scale_transformation(scale_factor)},
-            c_coords=("r", "g", "b"),
-        )
+        if type == "HnE":
+            scale_image = Image2DModel.parse(
+                scale_image[:3, :, :],
+                transformations={"global": _get_scale_transformation(scale_factor)},
+                c_coords=("r", "g", "b"),
+            )
+        elif type == "mIF":
+            scale_image = Image2DModel.parse(
+                scale_image,
+                transformations={"global": _get_scale_transformation(scale_factor)},
+                c_coords=tuple(f"c{i}" for i in range(scale_image.shape[0])),
+            )
+        elif type == "mono":
+            scale_image = Image2DModel.parse(
+                scale_image,
+                transformations={"global": _get_scale_transformation(scale_factor)},
+                c_coords=("c"),
+            )
+        else:
+            raise ValueError(f"Invalid {type:=}. Supported options are 'HnE', 'mIF', and 'mono'")
         scale_image.coords["y"] = scale_factor * scale_image.coords["y"]
         scale_image.coords["x"] = scale_factor * scale_image.coords["x"]
 
@@ -109,7 +133,7 @@ def wsi_autoscale(
     from spatialdata import SpatialData
     image_model_kwargs = _default_image_models_kwargs(image_model_kwargs)
 
-    image_name, img, _, tiff_metadata = _open_wsi(path, backend=backend)
+    image_name, img, tiff_metadata = _open_wsi(path, backend=backend)
 
     img = img.rename_dims({"S": "c", "Y": "y", "X": "x"})
 
@@ -139,37 +163,62 @@ def _default_image_models_kwargs(image_models_kwargs: dict | None) -> dict:
 
 
 def _open_wsi(
-    path: str | Path, backend: Literal["tiffslide", "openslide"] = "openslide"
+    path: str | Path, backend: Literal["tiffslide", "openslide", "custom-multiseries", "default"] = "tiffslide"
 ) -> tuple[str, "Dataset", Any, dict]:
     image_name = Path(path).stem
 
-    if backend == "tiffslide":
-        import tiffslide
-
-        slide = tiffslide.open_slide(path)
-        zarr_store = slide.zarr_group.store
-        zarr_img = xarray.open_zarr(
-            zarr_store,
-            consolidated=False,
-            mask_and_scale=False,
-        )
-    elif backend == "openslide":
-        import openslide
-
-        from ._openslide import OpenSlideStore
-
-        slide = openslide.open_slide(path)
-        zarr_store = OpenSlideStore(path).store
+    if backend == "custom-multiseries":
+        from meson._tifffile_wsi import TiffFile
+        import numpy as np
+        wsi = TiffFile(path)
+        img_ds = {}
+        metadata = {}
+        y0, x0 = wsi[0].shape[1:]
+        downsamples = []
+        for i in range(len(wsi.series)):
+            dim_y = f'Y{i}' if i > 0 else 'Y'
+            dim_x = f'X{i}' if i > 0 else 'X'
+            y, x = wsi[i].shape[1:]
+            #print(y0, x0, y, x, type(y0), type(x0), type(y), type(x))
+            scale_y = np.round(y0 / y)
+            scale_x = np.round(x0 / x)
+            assert scale_y == scale_x, "Scale factors must be equal in both dimensions"
+            downsamples.append(scale_y)
+            img_arr = xarray.DataArray(wsi[i][0].data[:], 
+                                    dims=['C', dim_y, dim_x])
+            img_ds[i] = img_arr
+            metadata[f'scale{i}'] = wsi[i].metadata
+        metadata['level_downsamples'] = downsamples
+        zarr_img = xarray.Dataset(img_ds)
+        wsi.close()
     else:
-        raise ValueError(f"Invalid {backend:=}. Supported options are 'openslide' and 'tiffslide'")
+        if backend == "tiffslide":
+            import tiffslide
+            slide = tiffslide.open_slide(path)
+            zarr_store = slide.zarr_group.store
+        elif backend == "openslide":
+            import openslide
+            from ._openslide import OpenSlideStore
+            slide = openslide.open_slide(path)
+            zarr_store = OpenSlideStore(path).store
+        elif backend == "custom-multiseries":
+            from meson._tifffile_wsi import TiffFile
+            wsi = TiffFile(path)
 
-    zarr_img = xarray.open_zarr(zarr_store, consolidated=False, mask_and_scale=False)
+            wsi.close()
+        elif backend == "default":
+            zarr_store = None
+        else:
+            raise ValueError(f"Invalid {backend:=}. Supported options are 'openslide' and 'tiffslide'")
+        if slide is not None:
+            metadata = {
+                "properties": slide.properties,
+                "dimensions": slide.dimensions,
+                "level_count": slide.level_count,
+                "level_dimensions": slide.level_dimensions,
+                "level_downsamples": slide.level_downsamples,
+            }
+        zarr_img = xarray.open_zarr(zarr_store, consolidated=False, mask_and_scale=False)
 
-    metadata = {
-        "properties": slide.properties,
-        "dimensions": slide.dimensions,
-        "level_count": slide.level_count,
-        "level_dimensions": slide.level_dimensions,
-        "level_downsamples": slide.level_downsamples,
-    }
-    return image_name, zarr_img, slide, metadata
+        
+    return image_name, zarr_img, metadata
