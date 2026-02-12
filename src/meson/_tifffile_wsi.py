@@ -206,11 +206,14 @@ class WriteableZarrArray:
     def __getitem__(self, key):
         if self.dirty:
             mask_slice = da.array(self.mask_array)[key]
-            original_data = da.array(self.original)[key]
-            temp_data = da.array(self.data_array)[key]
+            original_data = da.from_array(self.original,
+                                          chunks=self.original.chunks)[key]
+            temp_data = da.from_array(self.data_array,
+                                      chunks=self.data_array.chunks)[key]
             return da.where(mask_slice, temp_data, original_data)
         else:
-            return da.array(self.original)[key]
+            return da.from_array(self.original, 
+                                 chunks=self.original.chunks)[key]
 
     def __setitem__(self, key, value):
         self.dirty = True
@@ -310,7 +313,7 @@ class TiffLevel():
         if isinstance(initial_array, zarr.hierarchy.Group): # this occurs at level 0
             initial_array = initial_array[0] 
         self.data = WriteableZarrArray(initial_array, axes=self.axes)
-
+        self._store = cached_store
         self._metadata = dict([
             (get_tag_name(tag.code), tag.value) for tag in self._level.pages[0].tags
         ])
@@ -475,12 +478,16 @@ class TiffFile():
     def __init__(self, file, kind=None, *args, **kwargs):
         self._file = file
         self._tifffile = tifffile.TiffFile(file, *args, **kwargs)
+        self._zarr_store = tifffile.imread(file, *args, **kwargs, aszarr=True)
         self._series = [TiffSeries(series) for series in self._tifffile.series]
         self._kind = kind if kind else self.series[0].kind 
 
-        for series in self._series:
-            series.parse_metadata(self._kind)
-
+        try:
+            for series in self._series:
+                series.parse_metadata(self._kind)
+        except Exception as e:
+            print(f"Warning: could not parse metadata due to {e}")
+            
     @property
     def series(self):
         return self._series

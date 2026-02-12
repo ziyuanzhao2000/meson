@@ -12,6 +12,9 @@ from tqdm import tqdm
 import pandas as pd
 import joblib
 
+from pathlib import Path
+import shutil
+
 img_exts = {
     "tif",
     "tiff",
@@ -53,10 +56,15 @@ def get_top_level(image: DataTree | DataArray):
     else:
         return image
     
-def get_scaling_factor(image: DataTree | DataArray):
-    base_shape = get_base_level(image).shape
-    top_shape = get_top_level(image).shape
-    return np.array(base_shape[1:]) / np.array(top_shape[1:])
+def get_scaling_factor(image: DataTree | DataArray, level=-1):
+    if level==-1:
+        base_shape = get_base_level(image).shape
+        top_shape = get_top_level(image).shape
+        return np.array(base_shape[1:]) / np.array(top_shape[1:])
+    else:
+        base_shape = get_base_level(image).shape
+        level_shape = sd.get_pyramid_levels(image, n=level).shape
+        return np.array(base_shape[1:]) / np.array(level_shape[1:])
 
 class SpatialData(sd.SpatialData): 
     def __init__(self, *args, **kwargs):
@@ -99,12 +107,12 @@ class SpatialData(sd.SpatialData):
         sd.SpatialData.write(sdata_copy, file_path, **kwargs)
 
 
-def read_zarr(store, **kwargs):
+def read_zarr(store, backend='tiffslide', **kwargs):
     from meson import add_wsi
     sdata = sd.read_zarr(store, **kwargs)
     image_infos = copy.copy(sdata.attrs['images'])
     for image_info in image_infos:
-        if isinstance(image_info['path'], list):
+        if isinstance(image_info['path'], list) and len(image_info['path']):
             image_path = image_info['path'][0]
         else:
             image_path = image_info['path']
@@ -112,12 +120,32 @@ def read_zarr(store, **kwargs):
         if image_info['type'] == 'spatialdata_img':
             sdata[image_name] = _read_multiscale(image_path, raster_type="image")
         elif image_info['type'] == 'wsi':
-            add_wsi(sdata, path=image_path, image_name=image_name)
+            add_wsi(sdata, path=image_path, image_name=image_name, backend=backend)
     sdata.attrs['models'] = {}
     for model_info in sdata.attrs['models_metadata']:
-        if model_info['serializer'] == 'joblib':
+        if model_info['serializer'] == 'joblib': 
             sdata.attrs['models'][model_info['name']] = joblib.load(model_info['path'])
     return sdata
+
+def overwrite_element(sdata , name) -> None:
+    if sdata.path is None:
+        raise ValueError("sdata.path must be set (e.g., via sdata.write(path)) before overwriting.")
+    tmp_name = f"{name}__tmp_overwrite"
+    new_element = sdata[name]
+    sdata[tmp_name] = new_element
+    sdata.write_element(tmp_name)
+    group_path = Path(sdata.path) / sdata.locate_element(sdata[name])[0]
+    del sdata[name]
+    
+    if group_path.exists():
+        shutil.rmtree(group_path)
+    else:
+        raise FileNotFoundError(f"Expected Zarr group for element '{name}' not found at {group_path}")
+    
+    tmp_path = Path(sdata.path) / sdata.locate_element(sdata[tmp_name])[0]
+    shutil.move(str(tmp_path), str(group_path))
+    sdata[name] = new_element
+    del sdata[tmp_name]
 
 def export_patch(sdata, 
                 file_path: str,
