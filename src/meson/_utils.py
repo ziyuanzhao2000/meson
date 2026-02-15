@@ -1,12 +1,105 @@
-import numpy as np
 import os
 import csv
 import xml.etree.ElementTree as ET
+from tqdm import tqdm
+from typing import Optional, Union
+
+
+import numpy as np
 import pandas as pd
 from shapely.geometry import Polygon
 import cv2
-from tqdm import tqdm
 import tifffile 
+import anndata as ad
+
+def get_patch_scores(patch_table: ad.AnnData, feature_name: str) -> np.ndarray:
+    """
+    Extract feature scores from a patch table.
+    
+    Handles both sparse arrays (e.g., SAE scores stored in .X) and 
+    dense arrays stored in .obs columns.
+    
+    Parameters
+    ----------
+    patch_table : AnnData
+        Patch-level data containing feature scores.
+    feature_name : str
+        Name of the feature to extract.
+        
+    Returns
+    -------
+    scores : ndarray of shape (n_patches,)
+        Feature scores as a 1D array.
+        
+    Examples
+    --------
+    >>> scores = get_patch_scores(patches, 'UNI_SAE_12345')
+    """
+    # Try to get from .X (sparse matrix)
+    if feature_name in patch_table.var_names:
+        scores = patch_table[:, feature_name].X.toarray()[:, 0]
+    # Otherwise get from .obs (dense)
+    elif feature_name in patch_table.obs.columns:
+        scores = patch_table.obs[feature_name].to_numpy()
+    else:
+        raise KeyError(
+            f"Feature '{feature_name}' not found in patch table. "
+            f"Available in .var: {list(patch_table.var_names)}, "
+            f"Available in .obs: {list(patch_table.obs.columns)}"
+        )
+    return scores
+
+def select_top_patches(
+    patch_table: ad.AnnData, 
+    feature_name: str, 
+    n: Optional[int] = None,
+    min_score: Optional[float] = None
+) -> ad.AnnData:
+    """
+    Select top-scoring patches for a feature from a patch table.
+    
+    Parameters
+    ----------
+    patch_table : AnnData
+        Patch-level data with bounding boxes in .obs (xmin, xmax, ymin, ymax)
+        and feature scores in .X or .obs.
+    feature_name : str
+        Name of the feature to rank patches by.
+    n : int, optional
+        Number of top patches to return. If None, returns all patches with score > min_score.
+    min_score : float, optional
+        Minimum score threshold. Only used when n is None. Default is 0.
+        
+    Returns
+    -------
+    top_patches : AnnData
+        Subset of patch_table containing the top N (or all above threshold) patches,
+        sorted by score in descending order.
+        
+    Examples
+    --------
+    >>> # Get top 100 patches for a feature
+    >>> top_patches = select_top_patches(patches, 'UNI_SAE_12345', n=100)
+    
+    >>> # Get all patches with positive scores
+    >>> active_patches = select_top_patches(patches, 'UNI_SAE_12345', n=None, min_score=0)
+    """
+    # Extract scores
+    scores = get_patch_scores(patch_table, feature_name)
+    
+    # Select indices
+    if n is not None:
+        # Top N patches
+        sort_idx = np.argsort(-scores)[:n]
+    else:
+        # All patches above threshold
+        if min_score is None:
+            min_score = 0.0
+        keep_idx = np.where(scores > min_score)[0]
+        sort_idx = keep_idx[np.argsort(-scores[keep_idx])]
+    
+    # Return subset
+    return patch_table[sort_idx].copy()
 
 # def get_optimal_chunk_size(image, patch_chunk_size=256, target_size=500*1024*1024):
 #     n_channels = len(image['c'])
