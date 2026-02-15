@@ -3,9 +3,11 @@ Image registration utilities for transforming coordinates between modalities.
 """
 
 import math
-import numpy as np
 import joblib
+
+import numpy as np
 from scipy.ndimage import map_coordinates
+import anndata as ad
 from meson._tifffile_wsi import TiffFile
 
 
@@ -228,6 +230,78 @@ class ForwardTransform:
         
         return transformed
     
+    def transform_patch_table(
+            self,
+            patch_table: ad.AnnData,
+            new_patch_size: int
+        ) -> ad.AnnData:
+        """
+        Transform patch bounding boxes to target coordinate system.
+        
+        This function:
+        1. Extracts patch centroids from the source patch table
+        2. Transforms them using the forward transform
+        3. Creates new square bounding boxes centered on transformed centroids
+        
+        Parameters
+        ----------
+        patch_table : AnnData
+            Patch table with .obs containing xmin, xmax, ymin, ymax in source coordinates.
+        forward_transform : ForwardTransform
+            Transform object for mapping coordinates from source to target space.
+        new_patch_size : int
+            Size of square patches in target coordinate system.
+            
+        Returns
+        -------
+        transformed_table : AnnData
+            New patch table with updated bounding boxes in target coordinates.
+            
+        Examples
+        --------
+        >>> # Get top patches for a feature
+        >>> top_patches = select_top_patches(patches, 'UNI_SAE_12345', n=100)
+        
+        >>> # Load transform
+        >>> ft = ForwardTransform.from_file('transform.pkl', 'hne.tif', 'cycif.tif')
+        
+        >>> # Transform to CyCIF coordinate system with 377px patches
+        >>> cycif_patches = transform_patch_table(top_patches, ft, new_patch_size=377)
+        """
+        forward_transform = self  # For clarity
+        
+        # Extract centroids from source patches
+        xmin = patch_table.obs['xmin'].to_numpy()
+        xmax = patch_table.obs['xmax'].to_numpy()
+        ymin = patch_table.obs['ymin'].to_numpy()
+        ymax = patch_table.obs['ymax'].to_numpy()
+        
+        centroids = np.stack([
+            (xmin + xmax) / 2,
+            (ymin + ymax) / 2
+        ], axis=1)
+        
+        # Transform centroids to target space
+        transformed_centroids = forward_transform.transform_points(centroids)
+        
+        # Create new square bounding boxes
+        half_size = new_patch_size // 2
+        
+        new_obs = patch_table.obs.copy()
+        new_obs['xmin'] = transformed_centroids[:, 0] - half_size
+        new_obs['xmax'] = transformed_centroids[:, 0] + half_size
+        new_obs['ymin'] = transformed_centroids[:, 1] - half_size
+        new_obs['ymax'] = transformed_centroids[:, 1] + half_size
+        
+        # Create new AnnData with transformed coordinates
+        transformed_table = ad.AnnData(
+            X=patch_table.X.copy(),
+            obs=new_obs,
+            var=patch_table.var.copy()
+        )
+        
+        return transformed_table
+
     def __repr__(self):
         return (
             f"ForwardTransform(\n"
