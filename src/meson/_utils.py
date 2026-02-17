@@ -1,8 +1,10 @@
 import os
 import csv
+import heapq
 import xml.etree.ElementTree as ET
 from tqdm import tqdm
-from typing import Optional, Union
+from collections import defaultdict
+from typing import Optional, Sequence, Union
 
 
 import numpy as np
@@ -11,6 +13,8 @@ from shapely.geometry import Polygon
 import cv2
 import tifffile 
 import anndata as ad
+
+
 
 def get_patch_scores(patch_table: ad.AnnData, feature_name: str) -> np.ndarray:
     """
@@ -49,20 +53,63 @@ def get_patch_scores(patch_table: ad.AnnData, feature_name: str) -> np.ndarray:
         )
     return scores
 
+
+def copy_feature_score_to_obs(
+    patch_table: ad.AnnData,
+    feature_name: str,
+    obs_colname: Optional[str] = None,
+) -> ad.AnnData:
+    """
+    Copy one feature score from ``patch_table[:, feature_name].X`` into ``patch_table.obs``.
+
+    Parameters
+    ----------
+    patch_table : AnnData
+        Patch-level AnnData table.
+    feature_name : str
+        Feature name in ``patch_table.var_names``.
+    obs_colname : str, optional
+        Output column name in ``patch_table.obs``. Defaults to ``feature_name``.
+
+    Returns
+    -------
+    patch_table : AnnData
+        The same AnnData object, modified in place.
+    """
+    if feature_name not in patch_table.var_names:
+        raise KeyError(
+            f"Feature '{feature_name}' not found in patch_table.var_names."
+        )
+
+    if obs_colname is None:
+        obs_colname = feature_name
+
+    x = patch_table[:, feature_name].X
+    if hasattr(x, "toarray"):
+        scores = x.toarray()[:, 0]
+    else:
+        scores = np.asarray(x).reshape(-1)
+
+    patch_table.obs[obs_colname] = scores
+    return patch_table
+
 def select_top_patches(
-    patch_table: ad.AnnData, 
-    feature_name: str, 
+    sdata,
+    patch_table_names: Union[str, Sequence[str]],
+    feature_name: str,
     n: Optional[int] = None,
     min_score: Optional[float] = None
 ) -> ad.AnnData:
     """
-    Select top-scoring patches for a feature from a patch table.
+    Select top-scoring patches for a feature across one or more patch tables.
     
     Parameters
     ----------
-    patch_table : AnnData
-        Patch-level data with bounding boxes in .obs (xmin, xmax, ymin, ymax)
-        and feature scores in .X or .obs.
+    sdata : SpatialData-like
+        Container that stores patch tables addressable by name.
+    patch_table_names : str or sequence of str
+        One patch table name or multiple names. Selection is performed across
+        the union of all listed tables.
     feature_name : str
         Name of the feature to rank patches by.
     n : int, optional
@@ -73,33 +120,100 @@ def select_top_patches(
     Returns
     -------
     top_patches : AnnData
-        Subset of patch_table containing the top N (or all above threshold) patches,
-        sorted by score in descending order.
+        AnnData containing selected patches from all input tables, globally sorted
+        by score descending. Adds `.obs['_source_patch_table']`.
         
     Examples
     --------
     >>> # Get top 100 patches for a feature
-    >>> top_patches = select_top_patches(patches, 'UNI_SAE_12345', n=100)
+    >>> top_patches = select_top_patches(
+    ...     sdata, 'LSP24530_grid_point_patch', 'UNI_SAE_12345', n=100
+    ... )
     
     >>> # Get all patches with positive scores
-    >>> active_patches = select_top_patches(patches, 'UNI_SAE_12345', n=None, min_score=0)
+    >>> active_patches = select_top_patches(
+    ...     sdata,
+    ...     ['LSP24530_grid_point_patch', 'LSP24531_grid_point_patch'],
+    ...     'UNI_SAE_12345',
+    ...     n=None,
+    ...     min_score=0
+    ... )
     """
-    # Extract scores
-    scores = get_patch_scores(patch_table, feature_name)
-    
-    # Select indices
-    if n is not None:
-        # Top N patches
-        sort_idx = np.argsort(-scores)[:n]
+    if isinstance(patch_table_names, str):
+        table_names = [patch_table_names]
     else:
-        # All patches above threshold
+        table_names = list(patch_table_names)
+
+    if len(table_names) == 0:
+        raise ValueError("patch_table_names must contain at least one table name.")
+
+    if n is not None and n < 0:
+        raise ValueError("n must be >= 0 or None.")
+
+    selected_indices = defaultdict(list)
+    selected_scores = defaultdict(list)
+
+    if n == 0:
+        return sdata[table_names[0]][[]].copy()
+
+    if n is not None:
+        # Efficient global top-k: O(total_patches * log(n)) and O(n) memory.
+        heap = []  # (score, table_name, row_idx)
+        for table_name in table_names:
+            patch_table = sdata[table_name]
+            try:
+                scores = get_patch_scores(patch_table, feature_name)
+            except KeyError as e:
+                raise KeyError(f"{e} (table='{table_name}')") from e
+
+            for row_idx, score in enumerate(scores):
+                score = float(score)
+                if len(heap) < n:
+                    heapq.heappush(heap, (score, table_name, row_idx))
+                elif score > heap[0][0]:
+                    heapq.heapreplace(heap, (score, table_name, row_idx))
+
+        for score, table_name, row_idx in sorted(heap, key=lambda x: x[0], reverse=True):
+            selected_indices[table_name].append(row_idx)
+            selected_scores[table_name].append(score)
+    else:
+        # Threshold mode: collect all above threshold, then global sort.
         if min_score is None:
             min_score = 0.0
-        keep_idx = np.where(scores > min_score)[0]
-        sort_idx = keep_idx[np.argsort(-scores[keep_idx])]
-    
-    # Return subset
-    return patch_table[sort_idx].copy()
+
+        for table_name in table_names:
+            patch_table = sdata[table_name]
+            try:
+                scores = get_patch_scores(patch_table, feature_name)
+            except KeyError as e:
+                raise KeyError(f"{e} (table='{table_name}')") from e
+
+            keep_idx = np.where(scores > min_score)[0]
+            if keep_idx.size == 0:
+                continue
+
+            local_order = keep_idx[np.argsort(-scores[keep_idx])]
+            selected_indices[table_name].extend(local_order.tolist())
+            selected_scores[table_name].extend(scores[local_order].astype(float).tolist())
+
+    subsets = []
+    for table_name in table_names:
+        idx_list = selected_indices.get(table_name, [])
+        if len(idx_list) == 0:
+            continue
+        subset = sdata[table_name][np.asarray(idx_list, dtype=np.int64)].copy()
+        subset.obs['_source_patch_table'] = table_name
+        subset.obs['_selection_score'] = np.asarray(selected_scores[table_name], dtype=np.float32)
+        subsets.append(subset)
+
+    if len(subsets) == 0:
+        return sdata[table_names[0]][[]].copy()
+
+    out = ad.concat(subsets, join='outer', merge='same')
+    order = np.argsort(-out.obs['_selection_score'].to_numpy())
+    out = out[order].copy()
+    out.obs.drop(columns=['_selection_score'], inplace=True)
+    return out
 
 # def get_optimal_chunk_size(image, patch_chunk_size=256, target_size=500*1024*1024):
 #     n_channels = len(image['c'])
