@@ -56,6 +56,10 @@ class FrequencyRankedKMeans(TransformerMixin, BaseEstimator, ClusterMixin):
     >>> 
     >>> # Most common cluster is now labeled 0
     >>> print(f"Cluster 0 has {np.sum(labels == 0)} samples")
+    >>> 
+    >>> # Get frequency-ranked centroids
+    >>> centroids = model.get_sorted_centroids()
+    >>> print(f"Centroids shape: {centroids.shape}")  # (25, 128)
     """
     
     def __init__(
@@ -196,3 +200,33 @@ class FrequencyRankedKMeans(TransformerMixin, BaseEstimator, ClusterMixin):
     def predict(self, X):
         """Alias for transform (for compatibility with clustering API)."""
         return self.transform(X)
+    
+    def get_sorted_centroids(self):
+        """
+        Get cluster centroids sorted by frequency ranking.
+        
+        Returns frequency-ranked centroids where index 0 corresponds to the 
+        most common cluster, index 1 to the second most common, etc.
+        
+        Returns
+        -------
+        centroids : np.ndarray of shape (n_clusters, n_features)
+            Cluster centroids sorted by frequency (descending).
+            
+        Examples
+        --------
+        >>> model = FrequencyRankedKMeans(n_clusters=25)
+        >>> model.fit(X)
+        >>> centroids = model.get_sorted_centroids()
+        >>> # centroids[0] is the centroid of the most common cluster
+        >>> # centroids[1] is the centroid of the 2nd most common cluster, etc.
+        """
+        check_is_fitted(self)
+        
+        # Get original centroids from KMeans
+        original_centroids = self.kmeans_.cluster_centers_
+        
+        # Reorder centroids according to frequency ranking
+        sorted_centroids = original_centroids[self.sorted_cluster_ids_]
+        
+        return sorted_centroids
