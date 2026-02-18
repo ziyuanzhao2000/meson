@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm
 
 from meson._readwrite import get_base_level
+from meson.preprocessing._extract_patches import extract_patches
 
 if TYPE_CHECKING:
     from spatialdata import SpatialData
@@ -132,8 +133,23 @@ def plot_patch_gallery(
         end_idx = min(start_idx + samples_per_figure, n_patches)
         batch_df = patch_df.iloc[start_idx:end_idx]
         
-        # Calculate grid dimensions for this batch
-        n_samples = len(batch_df)
+        # Extract all patches for this page at once
+        import anndata as ad
+        batch_patches = ad.AnnData(obs=batch_df.reset_index(drop=True))
+        
+        if progress_bar and n_pages > 1:
+            print(f"Processing page {page_idx+1}/{n_pages}...")
+        
+        extracted_patches = extract_patches(
+            sdata,
+            batch_patches,
+            channel_first=False,  # (N, Y, X, C) for matplotlib
+            progress_bar=progress_bar,
+            skip_errors=True
+        )
+        
+        # Calculate grid dimensions
+        n_samples = len(extracted_patches)
         n_rows = int(np.ceil(n_samples / patches_per_row))
         n_cols = min(patches_per_row, n_samples)
         
@@ -151,31 +167,14 @@ def plot_patch_gallery(
         elif n_cols == 1:
             axes = axes.reshape(-1, 1)
         
-        # Render patches
-        iterator = enumerate(batch_df.iterrows())
-        if progress_bar:
-            iterator = tqdm(
-                iterator,
-                total=len(batch_df),
-                desc=f"Page {page_idx+1}/{n_pages}"
-            )
-        
-        for i, (_, patch) in iterator:
+        # Display patches
+        for i in range(n_samples):
             row = i // patches_per_row
             col = i % patches_per_row
             
-            # Extract patch from WSI
-            try:
-                image_data = get_base_level(sdata[patch.image])[
-                    :,
-                    patch.ymin:patch.ymax,
-                    patch.xmin:patch.xmax
-                ].transpose('y', 'x', 'c').compute()
-            except Exception as e:
-                print(f"Warning: Failed to load patch from {patch.image}: {e}")
-                axes[row, col].axis('off')
-                axes[row, col].set_visible(False)
-                continue
+            # Get patch data and metadata
+            image_data = extracted_patches[i]
+            patch = batch_df.iloc[i]
             
             # Build title
             title_parts = []
