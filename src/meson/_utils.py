@@ -93,12 +93,248 @@ def copy_feature_score_to_obs(
     patch_table.obs[obs_colname] = scores
     return patch_table
 
+
+def select_random_patches(
+    sdata,
+    patch_table_names: Union[str, Sequence[str]],
+    n: int,
+    random_state: Optional[int] = None,
+) -> ad.AnnData:
+    """
+    Randomly sample patches across one or more patch tables.
+    
+    Parameters
+    ----------
+    sdata : SpatialData-like
+        Container that stores patch tables addressable by name.
+    patch_table_names : str or sequence of str
+        One patch table name or multiple names. Sampling is performed across
+        the union of all listed tables.
+    n : int
+        Number of patches to randomly sample.
+    random_state : int, optional
+        Random seed for reproducibility.
+        
+    Returns
+    -------
+    sampled_patches : AnnData
+        AnnData containing randomly sampled patches from all input tables.
+        Adds `.obs['_source_patch_table']`.
+        
+    Examples
+    --------
+    >>> # Sample 100 random patches from one table
+    >>> random_patches = select_random_patches(
+    ...     sdata, 'LSP24530_grid_point_patch', n=100, random_state=42
+    ... )
+    
+    >>> # Sample 200 random patches across multiple tables
+    >>> random_patches = select_random_patches(
+    ...     sdata,
+    ...     ['LSP24530_grid_point_patch', 'LSP24531_grid_point_patch'],
+    ...     n=200,
+    ...     random_state=42
+    ... )
+    """
+    if isinstance(patch_table_names, str):
+        table_names = [patch_table_names]
+    else:
+        table_names = list(patch_table_names)
+
+    if len(table_names) == 0:
+        raise ValueError("patch_table_names must contain at least one table name.")
+
+    if n < 0:
+        raise ValueError("n must be >= 0.")
+
+    if n == 0:
+        return sdata[table_names[0]][[]].copy()
+
+    # Set random seed if provided
+    if random_state is not None:
+        np.random.seed(random_state)
+
+    # Collect all patch indices
+    all_candidates = []  # (table_name, row_idx)
+    
+    for table_name in table_names:
+        patch_table = sdata[table_name]
+        n_patches = len(patch_table)
+        
+        for row_idx in range(n_patches):
+            all_candidates.append((table_name, row_idx))
+    
+    if len(all_candidates) == 0:
+        return sdata[table_names[0]][[]].copy()
+    
+    # Randomly sample n patches
+    n_available = len(all_candidates)
+    n_to_sample = min(n, n_available)
+    
+    if n_available < n:
+        print(f"Warning: Only {n_available} patches available, sampling all.")
+    
+    sampled_idx = np.random.choice(n_available, size=n_to_sample, replace=False)
+    selected_candidates = [all_candidates[i] for i in sampled_idx]
+    
+    # Group by table
+    selected_indices = defaultdict(list)
+    
+    for table_name, row_idx in selected_candidates:
+        selected_indices[table_name].append(row_idx)
+    
+    # Build output
+    subsets = []
+    for table_name in table_names:
+        idx_list = selected_indices.get(table_name, [])
+        if len(idx_list) == 0:
+            continue
+        subset = sdata[table_name][np.asarray(idx_list, dtype=np.int64)].copy()
+        subset.obs['_source_patch_table'] = table_name
+        subsets.append(subset)
+
+    if len(subsets) == 0:
+        return sdata[table_names[0]][[]].copy()
+
+    return ad.concat(subsets, join='outer', merge='same')
+
+
+def select_patches_for_binary_feature(
+    sdata,
+    patch_table_names: Union[str, Sequence[str]],
+    feature_name: str,
+    n: Optional[int] = None,
+    random_state: Optional[int] = None,
+) -> ad.AnnData:
+    """
+    Sample patches where a binary feature is active (value == 1).
+    
+    Collects all patches where the feature column equals 1, then randomly
+    samples n patches from this set.
+    
+    Parameters
+    ----------
+    sdata : SpatialData-like
+        Container that stores patch tables addressable by name.
+    patch_table_names : str or sequence of str
+        One patch table name or multiple names. Selection is performed across
+        the union of all listed tables.
+    feature_name : str
+        Name of the binary feature column in .obs (e.g., 'kmeans_label_0').
+    n : int, optional
+        Number of patches to sample. If None, returns all active patches.
+    random_state : int, optional
+        Random seed for reproducibility.
+        
+    Returns
+    -------
+    sampled_patches : AnnData
+        AnnData containing sampled patches where feature == 1.
+        Adds `.obs['_source_patch_table']`.
+        
+    Examples
+    --------
+    >>> # Sample 20 patches where feature is active
+    >>> active_patches = select_patches_for_binary_feature(
+    ...     sdata,
+    ...     'LSP24530_grid_point_patch',
+    ...     'kmeans_label_0',
+    ...     n=20,
+    ...     random_state=42
+    ... )
+    
+    >>> # Get all active patches across multiple tables
+    >>> all_active = select_patches_for_binary_feature(
+    ...     sdata,
+    ...     ['LSP24530_grid_point_patch', 'LSP24531_grid_point_patch'],
+    ...     'UNI_SAE_12345',
+    ...     n=None
+    ... )
+    """
+    if isinstance(patch_table_names, str):
+        table_names = [patch_table_names]
+    else:
+        table_names = list(patch_table_names)
+
+    if len(table_names) == 0:
+        raise ValueError("patch_table_names must contain at least one table name.")
+
+    if n is not None and n < 0:
+        raise ValueError("n must be >= 0 or None.")
+
+    if n == 0:
+        return sdata[table_names[0]][[]].copy()
+
+    # Set random seed if provided
+    if random_state is not None:
+        np.random.seed(random_state)
+
+    # Collect all active patches (feature == 1)
+    all_active_candidates = []  # (table_name, row_idx)
+    
+    for table_name in table_names:
+        patch_table = sdata[table_name]
+        
+        # Check if feature exists in .obs
+        if feature_name not in patch_table.obs.columns:
+            print(f"Warning: Feature '{feature_name}' not found in table '{table_name}', skipping.")
+            continue
+        
+        # Get active indices (where feature == 1)
+        active_mask = patch_table.obs[feature_name] == 1
+        active_indices = np.where(active_mask)[0]
+        
+        for row_idx in active_indices:
+            all_active_candidates.append((table_name, row_idx))
+    
+    if len(all_active_candidates) == 0:
+        raise ValueError(
+            f"No active patches found for feature '{feature_name}' "
+            f"in tables: {table_names}"
+        )
+    
+    # Sample patches
+    n_available = len(all_active_candidates)
+    
+    if n is None:
+        selected_candidates = all_active_candidates
+    else:
+        n_to_sample = min(n, n_available)
+        
+        if n_available < n:
+            print(f"Warning: Only {n_available} active patches available, sampling all.")
+        
+        sampled_idx = np.random.choice(n_available, size=n_to_sample, replace=False)
+        selected_candidates = [all_active_candidates[i] for i in sampled_idx]
+    
+    # Group by table
+    selected_indices = defaultdict(list)
+    
+    for table_name, row_idx in selected_candidates:
+        selected_indices[table_name].append(row_idx)
+    
+    # Build output
+    subsets = []
+    for table_name in table_names:
+        idx_list = selected_indices.get(table_name, [])
+        if len(idx_list) == 0:
+            continue
+        subset = sdata[table_name][np.asarray(idx_list, dtype=np.int64)].copy()
+        subset.obs['_source_patch_table'] = table_name
+        subsets.append(subset)
+
+    if len(subsets) == 0:
+        return sdata[table_names[0]][[]].copy()
+
+    return ad.concat(subsets, join='outer', merge='same')
+
 def select_top_patches(
     sdata,
     patch_table_names: Union[str, Sequence[str]],
     feature_name: str,
     n: Optional[int] = None,
-    min_score: Optional[float] = None
+    min_score: Optional[float] = None,
+    take_every: Optional[int] = 1,
 ) -> ad.AnnData:
     """
     Select top-scoring patches for a feature across one or more patch tables.
@@ -116,6 +352,10 @@ def select_top_patches(
         Number of top patches to return. If None, returns all patches with score > min_score.
     min_score : float, optional
         Minimum score threshold. Only used when n is None. Default is 0.
+    take_every : int, optional
+        If provided, samples every Nth patch from the sorted results instead of taking
+        the strict top N. If n is also provided, samples n patches evenly spaced.
+        If n is None, take_every determines the stride through all eligible patches.
         
     Returns
     -------
@@ -138,6 +378,12 @@ def select_top_patches(
     ...     n=None,
     ...     min_score=0
     ... )
+    
+    >>> # Sample 100 patches evenly spaced from positive patches
+    >>> sampled_patches = select_top_patches(
+    ...     sdata, 'LSP24530_grid_point_patch', 'UNI_SAE_12345', 
+    ...     n=100, min_score=0, take_every=None
+    ... )  # take_every computed automatically
     """
     if isinstance(patch_table_names, str):
         table_names = [patch_table_names]
@@ -150,52 +396,58 @@ def select_top_patches(
     if n is not None and n < 0:
         raise ValueError("n must be >= 0 or None.")
 
-    selected_indices = defaultdict(list)
-    selected_scores = defaultdict(list)
-
     if n == 0:
         return sdata[table_names[0]][[]].copy()
 
-    if n is not None:
-        # Efficient global top-k: O(total_patches * log(n)) and O(n) memory.
-        heap = []  # (score, table_name, row_idx)
-        for table_name in table_names:
-            patch_table = sdata[table_name]
-            try:
-                scores = get_patch_scores(patch_table, feature_name)
-            except KeyError as e:
-                raise KeyError(f"{e} (table='{table_name}')") from e
+    # First, collect all eligible patches and their scores
+    all_candidates = []  # (score, table_name, row_idx)
+    
+    if min_score is None:
+        min_score = 0.0 if (n is None or take_every is not None) else float('-inf')
+    
+    for table_name in table_names:
+        patch_table = sdata[table_name]
+        try:
+            scores = get_patch_scores(patch_table, feature_name)
+        except KeyError as e:
+            raise KeyError(f"{e} (table='{table_name}')") from e
 
-            for row_idx, score in enumerate(scores):
-                score = float(score)
-                if len(heap) < n:
-                    heapq.heappush(heap, (score, table_name, row_idx))
-                elif score > heap[0][0]:
-                    heapq.heapreplace(heap, (score, table_name, row_idx))
-
-        for score, table_name, row_idx in sorted(heap, key=lambda x: x[0], reverse=True):
-            selected_indices[table_name].append(row_idx)
-            selected_scores[table_name].append(score)
+        keep_idx = np.where(scores > min_score)[0]
+        if keep_idx.size == 0:
+            continue
+            
+        for row_idx in keep_idx:
+            all_candidates.append((float(scores[row_idx]), table_name, row_idx))
+    
+    # Sort all candidates by score descending
+    all_candidates.sort(key=lambda x: x[0], reverse=True)
+    
+    # Apply sampling logic
+    if take_every is not None:
+        # Use the provided stride
+        stride = take_every
+    elif n is not None and len(all_candidates) > 0:
+        # Compute stride to get n samples evenly spaced
+        stride = max(1, len(all_candidates) // n)
     else:
-        # Threshold mode: collect all above threshold, then global sort.
-        if min_score is None:
-            min_score = 0.0
-
-        for table_name in table_names:
-            patch_table = sdata[table_name]
-            try:
-                scores = get_patch_scores(patch_table, feature_name)
-            except KeyError as e:
-                raise KeyError(f"{e} (table='{table_name}')") from e
-
-            keep_idx = np.where(scores > min_score)[0]
-            if keep_idx.size == 0:
-                continue
-
-            local_order = keep_idx[np.argsort(-scores[keep_idx])]
-            selected_indices[table_name].extend(local_order.tolist())
-            selected_scores[table_name].extend(scores[local_order].astype(float).tolist())
-
+        # No sampling, take all
+        stride = 1
+    
+    # Select patches with stride
+    if n is not None:
+        selected_candidates = all_candidates[::stride][:n]
+    else:
+        selected_candidates = all_candidates[::stride]
+    
+    # Group by table
+    selected_indices = defaultdict(list)
+    selected_scores = defaultdict(list)
+    
+    for score, table_name, row_idx in selected_candidates:
+        selected_indices[table_name].append(row_idx)
+        selected_scores[table_name].append(score)
+    
+    # Build output
     subsets = []
     for table_name in table_names:
         idx_list = selected_indices.get(table_name, [])
@@ -214,6 +466,119 @@ def select_top_patches(
     out = out[order].copy()
     out.obs.drop(columns=['_selection_score'], inplace=True)
     return out
+
+
+def select_negative_patches(
+    sdata,
+    patch_table_names: Union[str, Sequence[str]],
+    feature_name: str,
+    n: Optional[int] = None,
+    take_every: Optional[int] = None,
+) -> ad.AnnData:
+    """
+    Select patches with zero scores for a feature across one or more patch tables.
+    
+    Parameters
+    ----------
+    sdata : SpatialData-like
+        Container that stores patch tables addressable by name.
+    patch_table_names : str or sequence of str
+        One patch table name or multiple names. Selection is performed across
+        the union of all listed tables.
+    feature_name : str
+        Name of the feature to filter by (selects patches where score == 0).
+    n : int, optional
+        Number of patches to return. If None, returns all zero-score patches.
+    take_every : int, optional
+        If provided, samples every Nth patch from the zero-score patches.
+        If n is also provided and take_every is None, computes stride automatically
+        to get n evenly-spaced samples.
+        
+    Returns
+    -------
+    negative_patches : AnnData
+        AnnData containing selected zero-score patches. Adds `.obs['_source_patch_table']`.
+        
+    Examples
+    --------
+    >>> # Get 100 evenly-spaced negative patches
+    >>> neg_patches = select_negative_patches(
+    ...     sdata, 'LSP24530_grid_point_patch', 'UNI_SAE_12345', n=100
+    ... )
+    
+    >>> # Get every 10th negative patch across multiple tables
+    >>> neg_patches = select_negative_patches(
+    ...     sdata,
+    ...     ['LSP24530_grid_point_patch', 'LSP24531_grid_point_patch'],
+    ...     'UNI_SAE_12345',
+    ...     take_every=10
+    ... )
+    """
+    if isinstance(patch_table_names, str):
+        table_names = [patch_table_names]
+    else:
+        table_names = list(patch_table_names)
+
+    if len(table_names) == 0:
+        raise ValueError("patch_table_names must contain at least one table name.")
+
+    if n is not None and n < 0:
+        raise ValueError("n must be >= 0 or None.")
+
+    if n == 0:
+        return sdata[table_names[0]][[]].copy()
+
+    # Collect all zero-score patches
+    all_candidates = []  # (table_name, row_idx)
+    
+    for table_name in table_names:
+        patch_table = sdata[table_name]
+        try:
+            scores = get_patch_scores(patch_table, feature_name)
+        except KeyError as e:
+            raise KeyError(f"{e} (table='{table_name}')") from e
+
+        zero_idx = np.where(scores == 0)[0]
+        for row_idx in zero_idx:
+            all_candidates.append((table_name, row_idx))
+    
+    if len(all_candidates) == 0:
+        return sdata[table_names[0]][[]].copy()
+    
+    # Apply sampling logic
+    if take_every is not None:
+        stride = take_every
+    elif n is not None:
+        stride = max(1, len(all_candidates) // n)
+    else:
+        stride = 1
+    
+    # Select patches with stride
+    if n is not None:
+        selected_candidates = all_candidates[::stride][:n]
+    else:
+        selected_candidates = all_candidates[::stride]
+    
+    # Group by table
+    selected_indices = defaultdict(list)
+    
+    for table_name, row_idx in selected_candidates:
+        selected_indices[table_name].append(row_idx)
+    
+    # Build output
+    subsets = []
+    for table_name in table_names:
+        idx_list = selected_indices.get(table_name, [])
+        if len(idx_list) == 0:
+            continue
+        subset = sdata[table_name][np.asarray(idx_list, dtype=np.int64)].copy()
+        subset.obs['_source_patch_table'] = table_name
+        subsets.append(subset)
+
+    if len(subsets) == 0:
+        return sdata[table_names[0]][[]].copy()
+
+    return ad.concat(subsets, join='outer', merge='same')
 
 # def get_optimal_chunk_size(image, patch_chunk_size=256, target_size=500*1024*1024):
 #     n_channels = len(image['c'])
