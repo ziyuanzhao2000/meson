@@ -12,7 +12,8 @@ __getattr__, __dir__, __all__ = lazy.attach(
                     'MARKER_COLOR_DEFAULTS',
                     'get_marker_colormap'],
         '_feature_reports': ['plot_feature_spatial_distribution', 'create_feature_pdf'],
-        '_patch_gallery': ['plot_patch_gallery', 'sample_patches_for_feature'], 
-        '_rasterization': ['interpolate_multiclass', 'extract_samples']
+        '_patch_gallery': ['plot_patch_gallery', 'plot_patch_gallery_with_saliency', 'sample_patches_for_feature'], 
+        '_rasterization': ['interpolate_multiclass', 'extract_samples'],
+        '_feature_map': ['plot_feature_map']
     }
 )
