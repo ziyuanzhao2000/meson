@@ -15,6 +15,7 @@ from reportlab.lib.utils import ImageReader
 from reportlab.lib.units import inch
 
 from ._utils import get_transparent_colormap, resize_image_to_fit
+from ._feature_map import plot_feature_map
 
 if TYPE_CHECKING:
     from spatialdata import SpatialData
@@ -136,72 +137,58 @@ def plot_feature_spatial_distribution(
     n_images = len(image_names)
     if nrows is None:
         nrows = int(np.ceil(n_images / ncols))
+    
     feature_col = f'{feature_prefix}_{feature_idx}'
     temp_dir = tempfile.mkdtemp()
     image_paths = []
     
+    # Construct postfix strings from point_name and bbox_name
+    bbox_postfix = f'_{point_name}_{bbox_name}'
+    patch_postfix = f'_{point_name}_patch'
+    
     try:
         for i, image_name in enumerate(tqdm(image_names, desc="Rendering images")):
-            # Create minimal SpatialData with only necessary elements
-            sdata_mini = spatialdata.SpatialData()
-            sdata_mini[image_name] = sdata[image_name]
+            # Check if required elements exist
+            bbox_full_name = f'{image_name}{bbox_postfix}'
+            patch_full_name = f'{image_name}{patch_postfix}'
             
-            bbox_full_name = f'{image_name}_{point_name}_{bbox_name}'
-            if bbox_full_name in sdata.shapes:
-                sdata_mini[bbox_full_name] = sdata[bbox_full_name]
-            else:
+            if bbox_full_name not in sdata.shapes:
                 print(f"Warning: {bbox_full_name} not found in sdata.shapes")
                 continue
             
-            patch_full_name = f'{image_name}_{point_name}_patch'
-            if patch_full_name in sdata.tables:
-                sdata_mini[patch_full_name] = sdata[patch_full_name]
-            else:
+            if patch_full_name not in sdata.tables:
                 print(f"Warning: {patch_full_name} not found in sdata.tables")
                 continue
             
             # Check if feature column exists
-            if feature_col not in sdata_mini[patch_full_name].obs.columns:
+            if feature_col not in sdata[patch_full_name].obs.columns:
                 print(f"Warning: {feature_col} not found in {patch_full_name}.obs")
                 continue
             
-            # Render with spatialdata-plot
-            if datashader_method:
-                ax = sdata_mini.pl.render_images(element=image_name)\
-                    .pl.render_shapes(
-                        element=bbox_full_name,
-                        color=feature_col,
-                        cmap=cmap,
-                        fill_alpha=fill_alpha,
-                        method='datashader',
-                        datashader_reduction='max'
-                    )\
-                    .pl.show(
-                        image_name,
-                        colorbar=colorbar,
-                        title=image_name if show_titles else '',
-                        return_ax=True
-                    )
-            else:
-                ax = sdata_mini.pl.render_images(element=image_name)\
-                    .pl.render_shapes(
-                        element=bbox_full_name,
-                        color=feature_col,
-                        cmap=cmap,
-                        fill_alpha=fill_alpha
-                    )\
-                    .pl.show(
-                        image_name,
-                        colorbar=colorbar,
-                        title=image_name if show_titles else '',
-                        return_ax=True
-                    )
+            # Use plot_feature_map to render individual image
+            fig = plot_feature_map(
+                sdata=sdata,
+                image_name=image_name,
+                feature_name=feature_col,
+                bbox_postfix=bbox_postfix,
+                patch_postfix=patch_postfix,
+                cmap=cmap,
+                fill_alpha=fill_alpha,
+                figsize=figsize_per_image,
+                colorbar=colorbar,
+                title=image_name if show_titles else '',
+                method='datashader' if datashader_method else 'rasterize',
+                datashader_reduction='max',
+                return_ax=False
+            )
             
+            # Save individual plot to temp file
             img_path = os.path.join(temp_dir, f'plot_{i:03d}.png')
-            ax.figure.savefig(img_path, dpi=dpi, bbox_inches='tight')
+            fig.savefig(img_path, dpi=dpi, bbox_inches='tight')
             image_paths.append(img_path)
-            plt.close(ax.figure)
+            plt.close(fig)
         
+        # Create composite figure with all images
         fig, axes = plt.subplots(
             nrows, ncols,
             figsize=(figsize_per_image[0] * ncols, figsize_per_image[1] * nrows)
@@ -245,6 +232,7 @@ def plot_feature_spatial_distribution(
             return None
             
     finally:
+        # Cleanup temp files
         for path in image_paths:
             if os.path.exists(path):
                 os.remove(path)
