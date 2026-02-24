@@ -53,3 +53,35 @@ class UNIEmbedder():
         """(B, C, Y, X) -> (B, embed_dim)"""
         batch = self.transform(batch)
         return self.model(batch)
+    
+    def get_token_embeddings(self, batch, remove_cls=True):
+        """
+        Get token-level embeddings without global pooling.
+        
+        Parameters
+        ----------
+        batch : torch.Tensor
+            Input batch of shape (B, C, H, W)
+        remove_cls : bool, default=True
+            Whether to remove the CLS token
+        
+        Returns
+        -------
+        tokens : torch.Tensor
+            Token embeddings of shape (B, N_tokens, embed_dim)
+            If remove_cls=True: (B, 196, 1024) for 224×224 images
+            If remove_cls=False: (B, 197, 1024)
+        """
+        # Temporarily disable global pooling
+        original_pool = self.model.global_pool
+        self.model.global_pool = None
+        
+        batch = self.transform(batch)
+        tokens = self.model(batch)
+        
+        # Restore original pooling
+        self.model.global_pool = original_pool
+        
+        if remove_cls:
+            return tokens[:, 1:, :]  # Remove CLS token
+        return tokens
