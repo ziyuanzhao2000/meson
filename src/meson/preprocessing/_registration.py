@@ -203,7 +203,7 @@ class ForwardTransform:
             self.deform_h / self.source_h
         ])
         points = points * scale_to_deform
-        
+
         # Step 3: Sample deformation field
         # map_coordinates expects (y, x) indexing
         py, px = points[..., 1], points[..., 0]
@@ -217,7 +217,6 @@ class ForwardTransform:
         transformed = self.affine_tform.inverse(
             deformed_points.reshape(-1, 2)
         ).reshape(shape)
-        
         # Step 5: Scale back to full target resolution
         scale_from_deform = np.array([
             self.source_w / self.deform_w,

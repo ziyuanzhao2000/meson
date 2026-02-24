@@ -93,8 +93,8 @@ def extract_patches(
             # Extract patch from WSI at base level
             image_data = get_base_level(sdata[patch.image])[
                 :,
-                patch.ymin:patch.ymax,
-                patch.xmin:patch.xmax
+                int(patch.ymin):int(patch.ymax),
+                int(patch.xmin):int(patch.xmax)
             ]
             
             # Compute and convert to numpy
