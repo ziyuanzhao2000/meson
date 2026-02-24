@@ -16,29 +16,52 @@ import anndata as ad
 
 
 
-def get_patch_scores(patch_table: ad.AnnData, feature_name: str) -> np.ndarray:
+def get_patch_scores(
+    patch_table: Union[ad.AnnData, Sequence[ad.AnnData]], 
+    feature_name: str
+) -> np.ndarray:
     """
-    Extract feature scores from a patch table.
+    Extract feature scores from a patch table or list of patch tables.
     
     Handles both sparse arrays (e.g., SAE scores stored in .X) and 
-    dense arrays stored in .obs columns.
+    dense arrays stored in .obs columns. When multiple tables are provided,
+    scores are concatenated in order.
     
     Parameters
     ----------
-    patch_table : AnnData
-        Patch-level data containing feature scores.
+    patch_table : AnnData or sequence of AnnData
+        Patch-level data containing feature scores. Can be a single AnnData
+        object or a list/sequence of AnnData objects.
     feature_name : str
         Name of the feature to extract.
         
     Returns
     -------
     scores : ndarray of shape (n_patches,)
-        Feature scores as a 1D array.
+        Feature scores as a 1D array. When multiple tables are provided,
+        scores are concatenated in the order of input tables.
         
     Examples
     --------
+    >>> # Single table
     >>> scores = get_patch_scores(patches, 'UNI_SAE_12345')
+    
+    >>> # Multiple tables
+    >>> scores = get_patch_scores([patches1, patches2], 'UNI_SAE_12345')
     """
+    # Handle list of tables
+    if isinstance(patch_table, (list, tuple)):
+        all_scores = []
+        for table in patch_table:
+            scores = _extract_scores_from_single_table(table, feature_name)
+            all_scores.append(scores)
+        return np.concatenate(all_scores)
+    
+    # Handle single table
+    return _extract_scores_from_single_table(patch_table, feature_name)
+
+def _extract_scores_from_single_table(patch_table: ad.AnnData, feature_name: str) -> np.ndarray:
+    """Helper function to extract scores from a single AnnData table."""
     # Try to get from .X (sparse matrix)
     if feature_name in patch_table.var_names:
         scores = patch_table[:, feature_name].X.toarray()[:, 0]
