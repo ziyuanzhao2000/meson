@@ -24,8 +24,7 @@ class UNIModelManager(ModelManager):
             dynamic_img_size=True
         )
         model.load_state_dict(torch.load(os.path.join(local_dir, "pytorch_model.bin"), map_location="cpu"), strict=True)
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = model.to(device)
+        model = model.to(cls.device)
         model.eval()
 
         transform = v2.Compose([
@@ -40,18 +39,34 @@ class UNIModelManager(ModelManager):
         cls.loaded = True
 
 class UNIEmbedder():
-    def __init__(self, token=None):
+    def __init__(self, token=None, device=None):
         self.name = 'UNI'
         self.embed_dim = 1024
         if token is not None:
             UNIModelManager.set_token(token)
         self.manager = UNIModelManager.initialize()
-        self.model = self.manager.model
-        self.transform = self.manager.transform
+        self.manager.set_device(device)
 
+    @property
+    def model(self):
+        return UNIModelManager.model
+
+    @property
+    def transform(self):
+        return UNIModelManager.transform
+
+    @property
+    def device(self):
+        return UNIModelManager._resolve_device()
+
+    def to(self, device):
+        """Switch device. Returns self for chaining."""
+        UNIModelManager.set_device(device)
+        return self
+    
     def __call__(self, batch):
         """(B, C, Y, X) -> (B, embed_dim)"""
-        batch = self.transform(batch)
+        batch = self.transform(batch).to(self.device)
         return self.model(batch)
     
     def get_token_embeddings(self, batch, remove_cls=True):

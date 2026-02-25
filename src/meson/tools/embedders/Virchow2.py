@@ -25,10 +25,8 @@ class Virchow2ModelManager(ModelManager):
         # Setup transforms using timm's config system
         data_config = resolve_data_config(model.pretrained_cfg, model=model)
         transform = create_transform(**data_config)
-
-        # Device setup
-        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        model = model.to(device)
+        
+        model = model.to(cls.device)
         model.eval()
 
         cls.model = model
@@ -36,18 +34,34 @@ class Virchow2ModelManager(ModelManager):
 
 
 class Virchow2Embedder():
-    def __init__(self, token=None):
+    def __init__(self, token=None, device=None):
         self.name = 'Virchow2'
         self.embed_dim = 2560  # 1280 (class) + 1280 (mean patches)
         if token is not None:
             Virchow2ModelManager.set_token(token)
         self.manager = Virchow2ModelManager.initialize()
-        self.model = self.manager.model
-        self.transform = self.manager.transform
+        self.manager.set_device(device)
+        
+    @property
+    def model(self):
+        return Virchow2ModelManager.model
 
+    @property
+    def transform(self):
+        return Virchow2ModelManager.transform
+    
+    @property
+    def device(self):
+        return Virchow2ModelManager._resolve_device()
+
+    def to(self, device):
+        """Switch device. Returns self for chaining."""
+        Virchow2ModelManager.set_device(device)
+        return self
+    
     def __call__(self, batch):
         """(B, C, Y, X) -> (B, embed_dim)"""
-        batch = self.transform(batch)
+        batch = self.transform(batch).to(self.device)
         with torch.inference_mode(), torch.autocast(device_type="cuda", dtype=torch.float16):
             output = self.model(batch)
             

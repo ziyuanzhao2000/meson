@@ -2,6 +2,7 @@
 import os
 from typing import Optional
 from getpass import getpass
+import torch 
 
 class ModelManager:
     _instance = None
@@ -9,6 +10,7 @@ class ModelManager:
     transform = None
     download_dir = None
     _token = None
+    device = None 
 
     @classmethod
     def set_token(cls, token):
@@ -25,6 +27,25 @@ class ModelManager:
                 cls._token = getpass("Enter your Hugging Face token: ")
         
         return cls._token
+    
+    @classmethod
+    def set_device(cls, device=None):
+        """Move model to a new device and update state."""
+        if device is None:
+            device = cls._resolve_device()
+        cls.device = torch.device(device)
+        if cls.model is not None:
+            cls.model = cls.model.to(cls.device)
+            print(f"{cls.__name__}: model moved to {cls.device}")
+
+    @classmethod
+    def _resolve_device(cls, device=None):
+        """Resolve device: explicit arg > class attr > auto-detect."""
+        if device is not None:
+            return torch.device(device)
+        if cls.device is not None:
+            return cls.device
+        return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
     @classmethod
     def initialize(cls, download_dir: Optional[str] = None):
