@@ -169,7 +169,7 @@ class WriteableZarrArray:
         self.temp_dir = f".temp_{self.uuid}"
         os.makedirs(self.temp_dir, exist_ok=True)
         self._dirty = False
-
+        self._loaded = False
 
     def _create_temp_arrays(self):
         # Create temp arrays on disk with same properties as original
@@ -213,21 +213,64 @@ class WriteableZarrArray:
     def __str__(self):
         return self.original.__str__()
 
-    def __getitem__(self, key):
-        if self.dirty:
-            mask_slice = self.mask_da[key]
-            original_data = self.original_da[key]
-            temp_data = self.data_da[key]
-            return da.where(mask_slice, temp_data, original_data)
+    def load(self):
+        if not self._loaded:
+            self._numpy = self.original_da.compute()  # one-time full decode
+            self._loaded = True
+        return self
+
+    def to_array(self):
+        """Return the best available array representation.
+        
+        - If load() has been called: returns the raw numpy array directly.
+          Wrapping this in xarray.DataArray gives zero-overhead indexing since
+          xarray will index straight into numpy memory.
+        - Otherwise: returns the lazy dask array backed by the zarr store.
+        
+        Either way the caller (e.g. _open_wsi, preload_wsi) can pass the result
+        directly to xarray.DataArray without any isinstance branching — xarray
+        handles both numpy and dask arrays natively.
+        
+        If dirty edits exist and the array is loaded, they are already baked
+        into self._numpy via __setitem__, so the returned numpy array reflects
+        all edits.
+        """
+        if self._loaded:
+            if self.dirty:
+                # edits already applied in-place to _numpy via __setitem__
+                return self._numpy
+            return self._numpy
         else:
-            return self.original_da[key] 
+            if self.dirty:
+                # merge lazily: dirty patches over original
+                return da.where(self.mask_da, self.data_da, self.original_da)
+            return self.original_da
+
+    def __getitem__(self, key):
+        if self._loaded:
+            result = self._numpy[key]          
+            if self.dirty:
+                mask = self.mask_array[key]
+                result = np.where(mask, self.data_array[key], result)
+            return result
+        else:
+            if self.dirty:
+                mask_slice = self.mask_da[key]
+                original_data = self.original_da[key]
+                temp_data = self.data_da[key]
+                return da.where(mask_slice, temp_data, original_data)
+            else:
+                return self.original_da[key] 
 
     def __setitem__(self, key, value):
-        self.dirty = True
-        self.data_array[key] = value
-        self.mask_array[key] = True
-        self.data_da = da.from_zarr(self.data_array)
-        self.mask_da = da.from_zarr(self.mask_array)
+        if self._loaded:
+            self._numpy[key] = value  
+        else:
+            self.dirty = True
+            self.data_array[key] = value
+            self.mask_array[key] = True
+            self.data_da = da.from_zarr(self.data_array)
+            self.mask_da = da.from_zarr(self.mask_array)
     
     @property
     def shape(self):

@@ -10,9 +10,60 @@ if TYPE_CHECKING:
     from xarray import Dataset, DataTree
 
 
+def _tifffile_wza_to_cyx(wza) -> "xarray.DataArray | dask.array.Array | np.ndarray":
+    """Convert a WriteableZarrArray to a (C, Y, X) array.
+
+    Calls wza.to_array() which returns either:
+    - a numpy array  (if wza.load() has been called — hot cache, zero overhead)
+    - a dask array   (otherwise — fully lazy)
+
+    xarray.DataArray accepts both without any isinstance branching, so the
+    caller can always just do:
+        DataArray(_tifffile_wza_to_cyx(wza), dims=['C', dim_y, dim_x])
+
+    The transpose is done with np.transpose or da.transpose depending on the
+    type, via a small unified helper so neither path loads data eagerly.
+    """
+    import numpy as np
+    import dask.array as da
+
+    arr = wza.to_array()   # numpy or dask — decided by loaded state
+    axes = wza.axes
+
+    def _transpose(a, order):
+        if isinstance(a, np.ndarray):
+            return np.transpose(a, order)
+        else:
+            return da.transpose(a, order)
+
+    def _expand(a):
+        if isinstance(a, np.ndarray):
+            return np.expand_dims(a, axis=0)
+        else:
+            return da.expand_dims(a, axis=0)
+
+    if axes == 'YXS':
+        return _transpose(arr, (2, 0, 1))   # (Y,X,S) → (S,Y,X) i.e. (C,Y,X)
+    elif axes == 'YX':
+        return _expand(arr)                  # (Y,X) → (1,Y,X)
+    elif axes[0] in ('S', 'C'):
+        return arr                           # already (C,Y,X)
+    else:
+        # Generic: move Y and X to last two positions, flatten rest into C
+        y_idx = axes.index('Y')
+        x_idx = axes.index('X')
+        other = [j for j in range(len(axes)) if j not in (y_idx, x_idx)]
+        arr = _transpose(arr, other + [y_idx, x_idx])
+        n_c = int(np.prod([arr.shape[k] for k in range(len(other))])) if other else 1
+        if isinstance(arr, np.ndarray):
+            return arr.reshape(n_c, arr.shape[-2], arr.shape[-1])
+        else:
+            return arr.reshape(n_c, arr.shape[-2], arr.shape[-1])
+
+
 def add_wsi(sdata: "SpatialData", 
             path: str | Path, 
-            backend: Literal["tiffslide", "openslide"] = "tiffslide",
+            backend: Literal["tiffslide", "openslide", "tifffile"] = "tiffslide",
             image_name: str | None = None, 
             *args, **kwargs):
     wsi_img, slide_name, slide_metadata = read_wsi(path=path, backend=backend, *args, **kwargs)
@@ -30,7 +81,7 @@ def read_wsi(
     path: str | Path,
     chunks: tuple[int, int, int] | dict = {},
     as_image: bool = True,
-    backend: Literal["tiffslide", "openslide", "default"] = "tiffslide",
+    backend: Literal["tiffslide", "openslide", "tifffile", "default"] = "tiffslide",
     type: Literal["HnE", "mIF", "mono"] = "HnE",
 ) -> "SpatialData" | Tuple["DataTree", str, dict]:
     """Read a WSI into a `SpatialData` object
@@ -39,7 +90,7 @@ def read_wsi(
         path: Path to the WSI
         chunks: Tuple representing the chunksize for the dimensions `(C, Y, X)`.
         as_image: If `True`, returns a, image instead of a `SpatialData` object
-        backend: The library to use as a backend in order to load the WSI. One of: `"openslide"`, `"tiffslide"`.
+        backend: The library to use as a backend in order to load the WSI. One of: `"openslide"`, `"tiffslide"`, `"tifffile"`.
 
     Returns:
         A `SpatialData` object with a multiscale 2D-image of shape `(C, Y, X)`, or just the DataTree if `as_image=True`
@@ -102,8 +153,76 @@ def read_wsi(
         images[f"scale{key}"] = Dataset({"image": scale_image})
 
     multiscale_image = DataTree.from_dict(images)
+    if hasattr(img, 'attrs'):
+        multiscale_image.attrs = img.attrs
     return multiscale_image, image_name, slide_metadata
 
+
+
+def preload_wsi(
+    img: "DataTree | SpatialData",
+    image_name: str | None = None,
+    levels: list[int] | None = None,
+) -> "DataTree | SpatialData":
+    """Force-load WSI pyramid levels into RAM for fast repeated access.
+
+    After calling this, the DataArrays in the DataTree are backed by numpy
+    arrays rather than dask/zarr graphs, so any indexing is direct memory
+    access with no scheduling overhead.
+
+    Mutates in-place and returns the same object for optional chaining:
+        wsi = preload_wsi(read_wsi(path, backend='tifffile'), levels=[2, 3])
+
+    Only works for DataTrees loaded with backend='tifffile'.
+
+    Args:
+        img:         DataTree (from read_wsi) or SpatialData object.
+        image_name:  Required when img is a SpatialData object.
+        levels:      Pyramid levels to load, e.g. [2, 3, 4].
+                     Defaults to all levels. Level 0 is full resolution —
+                     be careful with RAM on large slides.
+    """
+    from xarray import DataArray, Dataset
+
+    # Unwrap SpatialData → DataTree
+    if hasattr(img, 'images'):
+        if image_name is None:
+            raise ValueError("image_name must be provided when passing a SpatialData object")
+        datatree = img.images[image_name]
+    else:
+        datatree = img
+
+    level_data_refs = datatree.attrs.get('_wsi_level_data')
+    if level_data_refs is None:
+        raise ValueError(
+            "No _wsi_level_data found on this DataTree. "
+            "preload_wsi only works with backend='tifffile'."
+        )
+
+    levels_to_load = [str(l) for l in levels] if levels is not None else list(level_data_refs.keys())
+
+    for level_key in levels_to_load:
+        if level_key not in level_data_refs:
+            raise ValueError(f"Level {level_key!r} not found. Available: {list(level_data_refs.keys())}")
+
+        wza = level_data_refs[level_key]
+        wza.load()  # compute once → stores in wza._numpy
+
+        # wza.to_array() now returns wza._numpy directly (zero-copy view).
+        # _tifffile_wza_to_cyx applies np.transpose/expand_dims (not da.*),
+        # so the result is a plain numpy array — xarray indexes it at RAM speed.
+        scale_key = f"scale{level_key}"
+        old_image = datatree[scale_key]['image']
+
+        new_image = DataArray(
+            _tifffile_wza_to_cyx(wza),       # numpy array after load()
+            dims=old_image.dims,              # preserve (c, y, x)
+            coords=old_image.coords,          # preserve spatial coords
+            attrs=old_image.attrs,            # preserve spatialdata transforms
+        )
+        datatree[scale_key].ds = Dataset({"image": new_image})
+
+    return img
 
 
 def _get_scale_transformation(scale_factor: float):
@@ -115,7 +234,7 @@ def _get_scale_transformation(scale_factor: float):
 def wsi_autoscale(
     path: str | Path,
     image_model_kwargs: dict | None = None,
-    backend: Literal["tiffslide", "openslide"] = "tiffslide",
+    backend: Literal["tiffslide", "openslide", "tifffile"] = "tiffslide",
 ) -> "SpatialData":
     """Read a WSI into a `SpatialData` object.
 
@@ -125,7 +244,7 @@ def wsi_autoscale(
     Args:
         path: Path to the WSI
         image_model_kwargs: Kwargs provided to the `Image2DModel`
-        backend: The library to use as a backend in order to load the WSI. One of: `"openslide"`, `"tiffslide"`.
+        backend: The library to use as a backend in order to load the WSI. One of: `"openslide"`, `"tiffslide"`, `"tifffile"`.
 
     Returns:
         A `SpatialData` object with a 2D-image of shape `(C, Y, X)`
@@ -163,9 +282,53 @@ def _default_image_models_kwargs(image_models_kwargs: dict | None) -> dict:
 
 
 def _open_wsi(
-    path: str | Path, backend: Literal["tiffslide", "openslide", "custom-multiseries", "default"] = "tiffslide"
+    path: str | Path, backend: Literal["tiffslide", "openslide", "tifffile", "custom-multiseries", "default"] = "tiffslide"
 ) -> tuple[str, "Dataset", Any, dict]:
     image_name = Path(path).stem
+
+    if backend == "tifffile":
+        from meson._tifffile_wsi import TiffFile
+        import numpy as np
+
+        wsi = TiffFile(path)
+        img_ds = {}
+        level_data_refs = {}  # keep WriteableZarrArray refs alive
+
+        series = wsi.series[0]
+
+        metadata = {
+            "properties": series.metadata,
+            "dimensions": (series.levels[0].width, series.levels[0].height),
+            "level_count": len(series.levels),
+            "level_dimensions": [(level.width, level.height) for level in series.levels],
+            "level_downsamples": [],
+        }
+
+        base_width, base_height = series.levels[0].width, series.levels[0].height
+        for level in series.levels:
+            downsample_x = base_width / level.width
+            downsample_y = base_height / level.height
+            metadata["level_downsamples"].append(float(np.round((downsample_x + downsample_y) / 2)))
+
+        for i, level in enumerate(series.levels):
+            dim_y = f'Y{i}' if i > 0 else 'Y'
+            dim_x = f'X{i}' if i > 0 else 'X'
+
+            wza = level.data
+            level_data_refs[str(i)] = wza
+
+            # _tifffile_wza_to_cyx returns numpy (if loaded) or dask (if lazy).
+            # xarray.DataArray accepts both natively — no branching needed here.
+            img_ds[str(i)] = xarray.DataArray(
+                _tifffile_wza_to_cyx(wza),
+                dims=['C', dim_y, dim_x],
+            )
+
+        zarr_img = xarray.Dataset(img_ds)
+        zarr_img.attrs['_wsi_handle'] = wsi
+        zarr_img.attrs['_wsi_level_data'] = level_data_refs
+
+        return image_name, zarr_img, metadata
 
     if backend == "custom-multiseries":
         from meson._tifffile_wsi import TiffFile
