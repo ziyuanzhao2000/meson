@@ -101,9 +101,12 @@ class SpatialData(sd.SpatialData):
                 patch_arr = sdata_copy[table_name].obsm['patch']
                 sdata_copy[table_name].obsm['patch'] = da.zeros((len(patch_arr)))
         # sdata uses json that cannot serialize model params
-        for model_info in sdata_copy.attrs['models_metadata']:
-            del sdata_copy.attrs['models'][model_info['name']]
-        print("Writing data to", file_path)
+        if 'models_metadata' in sdata_copy.attrs and sdata_copy.attrs['models_metadata']:
+            sdata_copy.attrs.setdefault('models', {})
+            for model_info in sdata_copy.attrs['models_metadata']:
+                name = model_info.get('name') if isinstance(model_info, dict) else None
+                if name and name in sdata_copy.attrs['models']:
+                    del sdata_copy.attrs['models'][name]
         sd.SpatialData.write(sdata_copy, file_path, **kwargs)
 
 
