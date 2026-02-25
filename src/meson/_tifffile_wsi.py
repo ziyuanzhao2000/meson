@@ -11,6 +11,11 @@ from math import log
 from functools import cached_property
 from PIL import Image
 
+from dask.cache import Cache
+cache = Cache(10e9)  # 10 GB cache
+cache.register()
+print("Registered cache.")
+
 tag_registries = [tifffile.TIFF.TAGS,
                   tifffile.TIFF.GPS_TAGS,
                   tifffile.TIFF.IOP_TAGS,
@@ -154,14 +159,17 @@ class WriteableZarrArray:
             elif num_axes>2:
                 self.axes = '?'*(num_axes-2)+'YX'
         if isinstance(original_array, np.ndarray):
-            self.original_da = da.from_array(original_array)
+            self.original_da = da.from_array(original_array,
+                                             chunks=self.original.chunks)
         elif isinstance(original_array, zarr.core.Array) or \
             isinstance(original_array, zarr.storage.LRUStoreCache):
-            self.original_da = da.from_zarr(original_array)
+            self.original_da = da.from_zarr(original_array,
+                                            chunks=self.original.chunks)
         self.uuid = str(uuid.uuid4())
         self.temp_dir = f".temp_{self.uuid}"
         os.makedirs(self.temp_dir, exist_ok=True)
         self._dirty = False
+
 
     def _create_temp_arrays(self):
         # Create temp arrays on disk with same properties as original
@@ -178,7 +186,9 @@ class WriteableZarrArray:
                                     chunks=self.chunks,
                                     dtype=bool,
                                     mode='w')
-
+            self.data_da = da.from_zarr(self.data_array)
+            self.mask_da = da.from_zarr(self.mask_array)
+            
     @property
     def dirty(self):
         return self._dirty
@@ -205,21 +215,20 @@ class WriteableZarrArray:
 
     def __getitem__(self, key):
         if self.dirty:
-            mask_slice = da.array(self.mask_array)[key]
-            original_data = da.from_array(self.original,
-                                          chunks=self.original.chunks)[key]
-            temp_data = da.from_array(self.data_array,
-                                      chunks=self.data_array.chunks)[key]
+            mask_slice = self.mask_da[key]
+            original_data = self.original_da[key]
+            temp_data = self.data_da[key]
             return da.where(mask_slice, temp_data, original_data)
         else:
-            return da.from_array(self.original, 
-                                 chunks=self.original.chunks)[key]
+            return self.original_da[key] 
 
     def __setitem__(self, key, value):
         self.dirty = True
         self.data_array[key] = value
         self.mask_array[key] = True
-
+        self.data_da = da.from_zarr(self.data_array)
+        self.mask_da = da.from_zarr(self.mask_array)
+    
     @property
     def shape(self):
         return self.original.shape
@@ -237,8 +246,16 @@ class WriteableZarrArray:
         return self.original.dtype
 
     def cleanup(self):
-        shutil.rmtree(self.temp_dir)
+        if os.path.exists(self.temp_dir):
+            shutil.rmtree(self.temp_dir, ignore_errors=True)
 
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.cleanup()
+        return False   # don't suppress exceptions
+    
     def tiles(self, tile_size=None):
         y_ax, x_ax = self.axes.index('Y'), self.axes.index('X')
         y_size, x_size = self.original.shape[y_ax], self.original.shape[x_ax]
@@ -521,7 +538,13 @@ class TiffFile():
                 if series.name == key:
                     self._series[id] = value
                     break
-
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, *args):
+        self.close()
+        
     def close(self):
         for series in self.series:
             series.cleanup()
