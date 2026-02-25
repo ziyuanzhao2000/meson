@@ -7,6 +7,6 @@ __getattr__, __dir__, __all__ = lazy.attach(
     'UNI2': ['UNI2Embedder'],
     'Virchow2': ['Virchow2Embedder'],
     'SAE': ['SparseAutoencoder'],
-    'KMeans': ['FrequencyRankedKMeans']
+    'FrequencyRankedKMeans': ['FrequencyRankedKMeans']
     }
 )

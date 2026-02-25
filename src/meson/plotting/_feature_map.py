@@ -1,5 +1,6 @@
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 import matplotlib.pyplot as plt
+from spatialdata_plot import pl
 import spatialdata
 
 def plot_feature_map(
