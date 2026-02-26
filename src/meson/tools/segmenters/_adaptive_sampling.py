@@ -10,9 +10,8 @@ from typing import Dict, Tuple, Optional, List, Union
 from dataclasses import dataclass
 from collections import deque
 from tqdm import tqdm
-from scipy.ndimage import distance_transform_edt
-from scipy.interpolate import griddata
 from skimage.filters import sobel
+from meson._interpolation import interpolate_edt, interpolate_multiclass, interpolate_linear
 import heapq
 
 from meson._readwrite import get_base_level
@@ -91,124 +90,8 @@ def initialize_grid(
     return samples, cells
 
 
-def interpolate_edt(
-    samples: Dict[Tuple[int, int], int],
-    height: int,
-    width: int,
-    cluster_idx: Union[int, List[int]],
-    downsample: int = 1,
-    upsample: bool = True
-) -> np.ndarray:
-    """
-    Interpolate binary mask using Euclidean Distance Transform.
-    
-    Parameters
-    ----------
-    samples : Dict[Tuple[int, int], int]
-        Dictionary mapping (x, y) coordinates to cluster labels
-    height : int
-        Height of output image
-    width : int
-        Width of output image
-    cluster_idx : int or list of int
-        Target cluster index(es) for foreground
-    downsample : int, default=1
-        Factor by which to downsample before interpolation
-    upsample : bool, default=True
-        Whether to upsample result back to original resolution
-        
-    Returns
-    -------
-    interpolated : np.ndarray
-        Binary mask with interpolated values
-    """
-    if isinstance(cluster_idx, int):
-        cluster_idx = [cluster_idx]
-    
-    full_height, full_width = height, width
-    height, width = height // downsample, width // downsample
-    
-    canvas_foreground = np.zeros((height, width), dtype=bool)
-    canvas_background = np.zeros((height, width), dtype=bool)
-    
-    for (x, y), value in samples.items():
-        x, y = x // downsample, y // downsample
-        x = np.clip(x, 0, width - 1)
-        y = np.clip(y, 0, height - 1)
-        if value in cluster_idx:
-            canvas_foreground[y, x] = True
-        else:
-            canvas_background[y, x] = True
-    
-    edt_foreground = distance_transform_edt(~canvas_background)
-    edt_background = distance_transform_edt(~canvas_foreground)
-    interpolated = edt_foreground > edt_background
-    
-    if downsample > 1 and upsample:
-        import cv2
-        interpolated = cv2.resize(
-            interpolated.astype(np.uint8),
-            (full_width, full_height),
-            interpolation=cv2.INTER_NEAREST_EXACT
-        ).astype(bool)
-    
-    return interpolated
-
-
-def interpolate_linear(
-    samples: Dict[Tuple[int, int], int],
-    height: int,
-    width: int,
-    downsample: int = 1,
-    mapping: Optional[Dict[int, int]] = None
-) -> np.ndarray:
-    """
-    Interpolate continuous values using linear griddata interpolation.
-    
-    Parameters
-    ----------
-    samples : Dict[Tuple[int, int], int]
-        Dictionary mapping (x, y) coordinates to cluster labels
-    height : int
-        Height of output image
-    width : int
-        Width of output image
-    downsample : int, default=1
-        Factor by which to downsample the output
-    mapping : dict, optional
-        Dictionary to remap cluster labels before interpolation
-        
-    Returns
-    -------
-    interpolated : np.ndarray
-        Continuously interpolated values in downsampled resolution
-    """
-    # Convert samples to arrays
-    points = np.array(list(samples.keys()), dtype=float)
-    values = list(samples.values())
-    
-    if mapping is not None:
-        values = [mapping[v] for v in values]
-    values = np.array(values, dtype=float)
-    
-    # Create downsampled grid
-    out_height = height // downsample
-    out_width = width // downsample
-    
-    # Downsample point coordinates and swap to (y, x) order
-    points_down = points / downsample
-    points_down = points_down[:, [1, 0]]  # (x, y) -> (y, x)
-    
-    # Create meshgrid for interpolation
-    grid_y, grid_x = np.mgrid[0:out_height, 0:out_width]
-    
-    # Interpolate using linear method
-    interpolated = griddata(
-        points_down, values, (grid_y, grid_x),
-        method='linear', fill_value=0.0
-    )
-    
-    return interpolated
+# interpolate_edt, interpolate_multiclass, interpolate_linear
+# are imported from meson._interpolation above.
 
 
 def adaptive_refine_step(
