@@ -167,13 +167,13 @@ class WriteableZarrArray:
                                             chunks=self.original.chunks)
         self.uuid = str(uuid.uuid4())
         self.temp_dir = f".temp_{self.uuid}"
-        os.makedirs(self.temp_dir, exist_ok=True)
         self._dirty = False
         self._loaded = False
 
     def _create_temp_arrays(self):
         # Create temp arrays on disk with same properties as original
         # might want to customize compression later if needed
+        os.makedirs(self.temp_dir, exist_ok=True)
         if not hasattr(self, 'data_array'):
             self.data_array = zarr.open(os.path.join(self.temp_dir, 'data'), 
                                     shape=self.original.shape,
