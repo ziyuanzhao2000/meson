@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
-from shapely.geometry import Polygon, LinearRing
+from shapely.geometry import GeometryCollection, MultiPolygon, Polygon, LinearRing, LineString
+from shapely.geometry.polygon import orient
 from typing import Dict, List, Tuple
 import pandas as pd
 
@@ -42,46 +43,107 @@ def get_ordered_vertices(ring: LinearRing, start_idx: int, is_ccw: bool) -> List
     else:
         reversed_coords = coords[start_idx::-1] + coords[:start_idx:-1]
         return reversed_coords
-    
-def cut_polygon_recursive(polygon: Polygon) -> Polygon:
+
+
+def _perpendicular_offset(p1: Tuple[float, float], p2: Tuple[float, float],
+                          epsilon: float) -> Tuple[float, float]:
     """
-    Recursively cut a polygon with holes into a simple polygon without holes.
+    Compute a perpendicular offset vector of magnitude `epsilon` for the
+    segment p1->p2.  Returns (dx, dy) to be *added* to a point so that it
+    shifts to one side of the segment.
     """
-    # Base case: if polygon has no holes, return it
-    if len(polygon.interiors) == 0:
-        return polygon
+    dx = p2[0] - p1[0]
+    dy = p2[1] - p1[1]
+    length = np.hypot(dx, dy)
+    if length == 0:
+        return (epsilon, 0.0)          # degenerate – just nudge in x
+    # unit perpendicular (rotate 90° CCW)
+    perp_x = -dy / length * epsilon
+    perp_y =  dx / length * epsilon
+    return (perp_x, perp_y)
 
-    # Take the first hole and keep others for later
-    first_hole = polygon.interiors[0]
-    other_holes = list(polygon.interiors[1:])
-    
-    # Find nearest vertices between exterior and the hole
-    nearest_ext, nearest_hole, ext_idx, hole_idx = find_nearest_vertices(
-        polygon.exterior, first_hole
-    )
-    
-    # Check if hole is clockwise or counterclockwise
-    hole_is_ccw = LinearRing(first_hole).is_ccw
+# def cut_polygon_recursive(polygon: Polygon, epsilon: float = 0.5,
+#                           _depth: int = 0, _max_depth: int = 100) -> Polygon:
+#     if _depth >= _max_depth:
+#         return polygon
 
-    # Build new exterior coordinates:
-    # 1. Start from the nearest exterior vertex and go around
-    exterior_vertices = get_ordered_vertices(polygon.exterior, ext_idx, True)
-    
-    # 2. Add the nearest exterior vertex again
-    new_coords = exterior_vertices + [nearest_ext]
-    
-    # 3. Add hole vertices starting from nearest point in appropriate direction
-    hole_vertices = get_ordered_vertices(first_hole, hole_idx, not hole_is_ccw)
-    new_coords.extend(hole_vertices)
-    
-    # 4. Close the ring by adding the nearest vertices again
-    new_coords.extend([nearest_hole, nearest_ext])
+#     if len(polygon.interiors) == 0:
+#         return polygon
 
-    # Create new polygon with remaining holes
-    new_polygon = Polygon(new_coords, [list(hole.coords) for hole in other_holes])
-    # Recursively process remaining holes
-    return cut_polygon_recursive(new_polygon)
+#     # Normalize: ensure exterior is CCW and holes are CW
+#     polygon = shapely.geometry.polygon.orient(polygon, sign=1.0)
 
+#     first_hole = polygon.interiors[0]
+#     other_holes = list(polygon.interiors[1:])
+
+#     nearest_ext, nearest_hole, ext_idx, hole_idx = find_nearest_vertices(
+#         polygon.exterior, first_hole
+#     )
+
+#     off = _perpendicular_offset(nearest_ext, nearest_hole, epsilon)
+
+#     ext_out  = (nearest_ext[0]  - off[0], nearest_ext[1]  - off[1])
+#     hole_out = (nearest_hole[0] - off[0], nearest_hole[1] - off[1])
+#     ext_ret  = (nearest_ext[0]  + off[0], nearest_ext[1]  + off[1])
+#     hole_ret = (nearest_hole[0] + off[0], nearest_hole[1] + off[1])
+
+#     # After orient(), exterior is CCW → traverse in stored order
+#     exterior_vertices = get_ordered_vertices(polygon.exterior, ext_idx, True)
+#     # After orient(), holes are CW → traverse in stored order
+#     hole_vertices = get_ordered_vertices(first_hole, hole_idx, True)
+
+#     new_coords = []
+#     new_coords.extend(exterior_vertices)
+#     new_coords.append(ext_out)
+#     new_coords.append(hole_out)
+#     new_coords.extend(hole_vertices)
+#     new_coords.append(hole_ret)
+#     new_coords.append(ext_ret)
+
+#     new_polygon = Polygon(new_coords, [list(hole.coords) for hole in other_holes])
+
+#     return cut_polygon_recursive(new_polygon, epsilon=epsilon * 0.8,
+#                                  _depth=_depth + 1, _max_depth=_max_depth)
+
+def cut_polygon_clean(polygon, epsilon=1.0, overshoot=2.0):
+    polygon = orient(polygon, sign=1.0)
+    
+    while len(polygon.interiors) > 0:
+        hole = polygon.interiors[0]
+        
+        nearest_ext, nearest_hole, _, _ = find_nearest_vertices(
+            polygon.exterior, hole
+        )
+        
+        cut_line = LineString([nearest_ext, nearest_hole])
+        corridor = cut_line.buffer(epsilon, cap_style=1)
+        polygon = polygon.difference(corridor)
+        
+        # Extract the largest polygon from whatever geometry type comes back
+        polygon = _extract_largest_polygon(polygon)
+        
+        if polygon is None:
+            return Polygon()  # completely degenerate
+    
+    return polygon
+
+
+def _extract_largest_polygon(geom):
+    """Extract the largest Polygon from any geometry type."""
+    if isinstance(geom, Polygon):
+        return geom
+    
+    # Collect all polygons from MultiPolygon or GeometryCollection
+    polygons = []
+    if isinstance(geom, (MultiPolygon, GeometryCollection)):
+        for part in geom.geoms:
+            if isinstance(part, Polygon) and part.area > 0:
+                polygons.append(part)
+    
+    if polygons:
+        return max(polygons, key=lambda g: g.area)
+    
+    return None
 
 def mask_to_polygons(label_mask: np.ndarray, 
                      background_label = 0,
@@ -129,7 +191,7 @@ def mask_to_polygons(label_mask: np.ndarray,
                         # Create polygon with holes
                         poly = Polygon(exterior, holes=[hole for hole in holes])
                         if simple_cut:
-                            poly = cut_polygon_recursive(poly)
+                            poly = cut_polygon_clean(poly)
                     else:
                         poly = Polygon(exterior)
 
