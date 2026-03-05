@@ -195,7 +195,7 @@ class ForwardTransform:
         points = points.copy().astype(np.float64)
         
         # Step 1: Apply source padding offset (x, y) order
-        points += np.array([self.pad_source[1][0], self.pad_source[0][0]])
+        points -= np.array([self.pad_source[1][0], self.pad_source[0][0]])
         
         # Step 2: Scale to deformation field resolution
         scale_to_deform = np.array([
