@@ -8,10 +8,12 @@ __getattr__, __dir__, _ = lazy.attach(__name__,
         '_wsi': ['add_wsi', 'read_wsi'],
         '_settings': ['settings'],
         '_interpolation': ['interpolate_edt', 'interpolate_multiclass', 'interpolate_linear'],
-        '_utils': ['csv2mask', 
-                   'select_random_patches', 'select_patches_for_binary_feature',    
-                   'select_top_patches', 'select_negative_patches',
-                   'get_patch_scores', 'copy_feature_score_to_obs']
+        '_utils': ['csv2mask', 'get_patch_scores', 'copy_feature_score_to_obs'],
+        '_patch_selector': ['select_random_patches', 
+                            'select_patches_for_binary_feature',    
+                            'select_top_patches', 
+                            'select_negative_patches',
+                            'select_exemplar_patches']
     }
 )
 
