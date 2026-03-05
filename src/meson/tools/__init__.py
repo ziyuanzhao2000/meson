@@ -4,7 +4,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
     submod_attrs={
     'embedders': ['TestEmbedder', 'UNIEmbedder', 'UNI2Embedder', 'SparseAutoencoder'],
     'segmenters': ['GenericSegmenter', 'TokenClusterizer', 'adaptive_sample_wsi'],
+    'sae': ['SAEFeatureSelector', 'SAEFeatureClusterer'],
     '_embed_patch': ['embed_patch'],
-    '_sae_feature_selector': ['SAEFeatureSelector']
     }
 )
