@@ -3,13 +3,10 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple, Union, List
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.colors import ListedColormap
 from tqdm import tqdm
-import torch
-import cv2
 
-from meson._readwrite import get_base_level
 from meson.preprocessing._extract_patches import extract_patches
+from meson.preprocessing._extract_saliency_maps import extract_saliency_maps
 from ._image_grid import _plot_image_grid
 
 if TYPE_CHECKING:
@@ -17,58 +14,12 @@ if TYPE_CHECKING:
     import anndata as ad
     from meson.tools.segmenters import TokenClusterizer
 
-import matplotlib.patches as mpatches
-import matplotlib.cm as cm
-from math import ceil
-
-def extract_patch_images(
-    sdata,
-    patch_df,
-    progress: bool = True,
-) -> list:
-    """
-    Extract raw image arrays from sdata for each row in patch_df.
-
-    Parameters
-    ----------
-    sdata : SpatialData
-    patch_df : pd.DataFrame or AnnData
-        Must have .obs columns: image, ymin, ymax, xmin, xmax.
-        If AnnData is passed, .obs is used automatically.
-    progress : bool
-        Show tqdm progress bar.
-
-    Returns
-    -------
-    images : list of np.ndarray, each (H, W, 3)
-    """
-    from meson._readwrite import get_base_level
-    from tqdm import tqdm
-
-    if hasattr(patch_df, "obs"):
-        obs = patch_df.obs
-    else:
-        obs = patch_df
-
-    iterator = tqdm(obs.iterrows(), total=len(obs), desc="Extracting patches") \
-        if progress else obs.iterrows()
-
-    images = []
-    for _, row in iterator:
-        img = (
-            get_base_level(sdata[row.image])
-            [:, row.ymin:row.ymax, row.xmin:row.xmax]
-            .transpose("y", "x", "c")
-            .compute()
-            .data
-        )
-        images.append(img)
-    return images
-
 def plot_patch_gallery_with_saliency(
-    sdata: "SpatialData",
     patches: "ad.AnnData",
-    clusterizers: List["TokenClusterizer"],
+    clusterizers: Optional[List["TokenClusterizer"]] = None,
+    sdata: Optional["SpatialData"] = None,
+    patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
+    saliency_maps: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     output_path: Optional[str] = None,
     filename_prefix: str = 'patch_gallery_saliency',
     samples_per_figure: int = 100,
@@ -80,284 +31,287 @@ def plot_patch_gallery_with_saliency(
     dpi: int = 300,
     return_fig: bool = False,
     progress_bar: bool = True,
-    saliency_alpha_power: float = 1.0
+    saliency_alpha_power: float = 1.0,
+    batch_size: int = 16,
 ) -> Optional[Tuple[plt.Figure, np.ndarray]]:
     """
     Create a gallery of patches with H&E images and token cluster saliency maps.
-    
-    Displays patches in a grid where each patch has:
-    - First row: Original H&E image
-    - Subsequent rows: Saliency maps from each TokenClusterizer
-    
-    The saliency maps use transparency (alpha) based on cluster ordering to highlight
-    regions of interest. If cluster_order is set in a TokenClusterizer, it uses that
-    ordering; otherwise uses raw cluster labels.
-    
+
+    Displays patches in a grid where each patch occupies a column-group of rows:
+    - Row 0: Original H&E image
+    - Row 1..K: Saliency overlay for each clusterizer / pre-computed map
+
+    Accepts either raw SpatialData + clusterizers (extraction done internally)
+    or pre-computed arrays (useful when plotting multiple times or formats).
+
     Parameters
     ----------
-    sdata : SpatialData
-        Spatial data object containing the full WSI images.
     patches : AnnData
-        AnnData object containing patch metadata in .obs.
-        Must have columns: 'image', 'xmin', 'xmax', 'ymin', 'ymax'.
-        Optional column: 'score' (for show_scores=True).
-    clusterizers : list of TokenClusterizer
-        List of K TokenClusterizer instances to generate saliency maps.
-        Each produces one row of saliency maps below the H&E row.
+        Patch metadata in .obs.
+        Required columns: 'image', 'xmin', 'xmax', 'ymin', 'ymax'.
+        Optional column: 'score' (used when show_scores=True).
+    clusterizers : list of TokenClusterizer, optional
+        Required when saliency_maps is None. Each produces one saliency row.
+    sdata : SpatialData, optional
+        Required when patches_array is None.
+    patches_array : np.ndarray or list of np.ndarray, optional
+        Pre-extracted patches, channel-last (N, H, W, C) or list of (H, W, C).
+        If provided, sdata is not used.
+    saliency_maps : np.ndarray or list of np.ndarray, optional
+        Pre-computed cluster label maps (uint8).
+        np.ndarray shape: (N, K, H, W); list: N elements of (K, H, W).
+        If provided, clusterizers are not called (but their feature_names are
+        still used for row labels if clusterizers is also given).
     output_path : str, optional
-        Path to save the figure(s). Required when len(patches) > samples_per_figure.
+        Directory to save figures. Required when n_patches > samples_per_figure.
     filename_prefix : str, default='patch_gallery_saliency'
-        Prefix for saved figure filenames.
     samples_per_figure : int, default=100
-        Maximum number of patches to display per figure page.
     patches_per_row : int, default=10
-        Number of patches per row in the grid.
     patch_display_size : float, default=2.0
-        Size of each patch subplot in inches.
+        Subplot size in inches.
     show_image_names : bool, default=False
-        Whether to show source image name above each patch.
     show_scores : bool, default=False
-        Whether to show score value above each patch.
-        Requires 'score' column in patches.obs.
     title : str, optional
-        Overall title for the figure (only used for single-page figures).
+        Figure suptitle (single-page only).
     dpi : int, default=300
-        Resolution for saving figures.
     return_fig : bool, default=False
-        Whether to return figure and axes. Only applies when creating
-        a single page. Multi-page figures are always saved and not returned.
+        Return (fig, axes) for single-page figures.
     progress_bar : bool, default=True
-        Whether to show tqdm progress bar while processing.
     saliency_alpha_power : float, default=1.0
-        Power to apply to normalized cluster values for alpha channel.
-        Higher values increase contrast. E.g., 2.0 squares the values,
-        making low values more transparent.
-        
+        Exponent applied to normalised cluster values for alpha contrast.
+    batch_size : int, default=16
+        Batch size passed to clusterizers during inference.
+
     Returns
     -------
-    fig, axes : tuple of (plt.Figure, np.ndarray) or None
-        Returns figure and axes array only if:
-        - return_fig=True AND
-        - len(patches) <= samples_per_figure (single page)
-        Otherwise returns None.
-        
+    (fig, axes) or None
+        Returned only when return_fig=True and a single page is produced.
+
     Raises
     ------
     ValueError
-        If output_path is None when multiple pages are needed.
-        If required columns are missing from patches.obs.
-        If no clusterizers provided.
-        
+        If required inputs are missing or columns absent from patches.obs.
+
     Examples
     --------
-    >>> from meson.plotting import plot_patch_gallery_with_saliency
-    >>> from meson.tools.segmenters import TokenClusterizer
-    >>> import joblib
-    >>> 
-    >>> # Create clusterizers
-    >>> kmeans1 = joblib.load('classifier1.joblib')
-    >>> kmeans2 = joblib.load('classifier2.joblib')
-    >>> 
-    >>> clusterizer1 = TokenClusterizer(uni, kmeans1, token_grid_size=14)
-    >>> clusterizer2 = TokenClusterizer(uni, kmeans2, token_grid_size=14)
-    >>> 
-    >>> # Optionally set cluster orders
-    >>> clusterizer1.cluster_order = np.array([2, 0, 1])
-    >>> 
-    >>> # Plot gallery
+    >>> # Fully automatic
     >>> plot_patch_gallery_with_saliency(
-    ...     sdata,
-    ...     selected_patches,
-    ...     clusterizers=[clusterizer1, clusterizer2],
-    ...     show_scores=True,
-    ...     patches_per_row=10,
-    ...     output_path='output/saliency_maps'
+    ...     patches, clusterizers=[c1, c2], sdata=sdata,
+    ...     output_path='output/saliency'
+    ... )
+    >>>
+    >>> # Pre-computed (extract once, plot many times)
+    >>> imgs = extract_patches(sdata, patches, channel_first=False)
+    >>> maps = extract_saliency_maps(
+    ...     extract_patches(sdata, patches, channel_first=True), [c1, c2]
+    ... )
+    >>> np.save("imgs.npy", imgs); np.save("maps.npy", maps)
+    >>>
+    >>> plot_patch_gallery_with_saliency(
+    ...     patches,
+    ...     clusterizers=[c1, c2],   # still used for row labels
+    ...     patches_array=np.load("imgs.npy"),
+    ...     saliency_maps=np.load("maps.npy"),
+    ...     output_path='output/saliency'
     ... )
     """
-    # Validate inputs
+    
+    if patches_array is None and sdata is None:
+        raise ValueError("Either sdata or patches_array must be provided.")
+    if saliency_maps is None and (clusterizers is None or len(clusterizers) == 0):
+        raise ValueError(
+            "Either saliency_maps or at least one clusterizer must be provided."
+        )
+
     required_cols = ['image', 'xmin', 'xmax', 'ymin', 'ymax']
-    missing_cols = [col for col in required_cols if col not in patches.obs.columns]
+    missing_cols = [c for c in required_cols if c not in patches.obs.columns]
     if missing_cols:
         raise ValueError(f"patches.obs missing required columns: {missing_cols}")
-    
     if show_scores and 'score' not in patches.obs.columns:
         raise ValueError("show_scores=True requires 'score' column in patches.obs")
-    
-    if not clusterizers or len(clusterizers) == 0:
-        raise ValueError("At least one TokenClusterizer must be provided")
-    
+
     patch_df = patches.obs
     n_patches = len(patch_df)
     n_pages = int(np.ceil(n_patches / samples_per_figure))
-    n_clusterizers = len(clusterizers)
-    
-    # Check if we need multiple pages but no output path provided
+
     if n_pages > 1 and output_path is None:
         raise ValueError(
             f"Dataset has {n_patches} patches requiring {n_pages} pages. "
             "Please provide output_path for multi-page figures."
         )
+
+    
+    if saliency_maps is not None:
+        # Infer K from pre-computed maps
+        if isinstance(saliency_maps, np.ndarray):
+            n_clusterizers = saliency_maps.shape[1]
+        else:
+            n_clusterizers = saliency_maps[0].shape[0]
+        row_labels = (
+            ["H&E"] + [c.feature_name for c in clusterizers]
+            if clusterizers
+            else ["H&E"] + [f"Clusterizer {k+1}" for k in range(n_clusterizers)]
+        )
+    else:
+        n_clusterizers = len(clusterizers)
+        row_labels = ["H&E"] + [c.feature_name for c in clusterizers]
+
+    import anndata as ad
+
+    if patches_array is None:
+        if progress_bar:
+            print("Extracting patches from sdata...")
+        patches_array = extract_patches(
+            sdata, patches,
+            channel_first=False,   # (N, H, W, C) for display
+            progress_bar=progress_bar,
+            skip_errors=True,
+        )
+
+    if saliency_maps is None:
+        if progress_bar:
+            print("Extracting patches (channel-first) for clusterizers...")
+        patches_cf = extract_patches(
+            sdata, patches,
+            channel_first=True,
+            progress_bar=progress_bar,
+            skip_errors=True,
+        )
+        saliency_maps = extract_saliency_maps(
+            patches_cf,
+            clusterizers=clusterizers,
+            batch_size=batch_size,
+            progress_bar=progress_bar,
+        )
+
+    # Normalise to lists for uniform downstream indexing
+    patches_list = (
+        list(patches_array) if isinstance(patches_array, np.ndarray)
+        else patches_array
+    )
+    saliency_list = (
+        list(saliency_maps) if isinstance(saliency_maps, np.ndarray)
+        else saliency_maps
+    )
     
     for page_idx in range(n_pages):
         start_idx = page_idx * samples_per_figure
         end_idx = min(start_idx + samples_per_figure, n_patches)
         batch_df = patch_df.iloc[start_idx:end_idx]
-        
-        # Extract all patches for this page at once
-        import anndata as ad
-        batch_patches = ad.AnnData(obs=batch_df.reset_index(drop=True))
-        
+
+        batch_images = patches_list[start_idx:end_idx]   # list of (H, W, C)
+        batch_maps = saliency_list[start_idx:end_idx]    # list of (K, H, W)
+
         if progress_bar and n_pages > 1:
-            print(f"Processing page {page_idx+1}/{n_pages}...")
-        
-        extracted_patches = extract_patches(
-            sdata,
-            batch_patches,
-            channel_first=True,  # (N, C, H, W) for TokenClusterizer
-            progress_bar=progress_bar,
-            skip_errors=True
-        )
-        
-        # Generate cluster maps for each clusterizer
-        all_cluster_maps = []
-        for clust_idx, clusterizer in enumerate(clusterizers):
-            if progress_bar:
-                print(f"  Generating saliency maps with clusterizer {clust_idx+1}/{n_clusterizers}...")
-            
-            # Use the __call__ method to get cluster maps
-            cluster_maps = clusterizer(
-                extracted_patches,
-                sdata=None,  # Already extracted
-                output_size=None,  # Use patch size
-                batch_size=16,
-                show_progress=progress_bar
-            )
-            all_cluster_maps.append(cluster_maps)
-        
-        # Calculate grid dimensions
-        n_samples = len(extracted_patches)
+            print(f"Rendering page {page_idx+1}/{n_pages} "
+                  f"(patches {start_idx+1}–{end_idx})...")
+
+        n_samples = len(batch_images)
         n_cols = min(patches_per_row, n_samples)
-        # Each patch has 1 H&E row + K saliency rows
         n_rows_per_patch = 1 + n_clusterizers
         n_rows_total = int(np.ceil(n_samples / patches_per_row)) * n_rows_per_patch
-        
-        # Create figure
+
         fig, axes = plt.subplots(
             n_rows_total, n_cols,
-            figsize=(patch_display_size * n_cols, patch_display_size * n_rows_total)
+            figsize=(patch_display_size * n_cols,
+                     patch_display_size * n_rows_total)
         )
-        
-        # Ensure axes is 2D array
+
+        # Normalise axes to 2-D array
         if n_rows_total == 1 and n_cols == 1:
             axes = np.array([[axes]])
         elif n_rows_total == 1:
             axes = axes.reshape(1, -1)
         elif n_cols == 1:
             axes = axes.reshape(-1, 1)
-        
-        # Display patches
+
         for i in range(n_samples):
             row_base = (i // patches_per_row) * n_rows_per_patch
             col = i % patches_per_row
-            
-            # Get patch data and metadata
-            image_data = extracted_patches[i]  # (C, H, W)
-            patch = batch_df.iloc[i]
-            
-            # Convert to (H, W, C) for display
-            image_display = image_data.transpose(1, 2, 0)
-            
-            # Build title (only for H&E row)
+
+            image_display = batch_images[i]          # (H, W, C)
+            patch_meta = batch_df.iloc[i]
+            cluster_maps_i = batch_maps[i]           # (K, H, W) uint8
+
+            # Title for the H&E row
             title_parts = []
             if show_image_names:
-                title_parts.append(str(patch.image))
+                title_parts.append(str(patch_meta['image']))
             if show_scores:
-                score_val = patch.score if hasattr(patch, 'score') else 0
-                title_parts.append(f"Score: {score_val:.3f}")
-            patch_title = "\n".join(title_parts) if title_parts else ""
-            
-            # Display H&E image (first row)
-            axes[row_base, col].imshow(image_display)
+                title_parts.append(f"Score: {patch_meta.get('score', 0):.3f}")
+            patch_title = "\n".join(title_parts)
+
+            # H&E row
+            ax_he = axes[row_base, col]
+            ax_he.imshow(image_display)
             if patch_title:
-                axes[row_base, col].set_title(patch_title, fontsize=8)
-            axes[row_base, col].axis('off')
-            
-            # Display saliency maps (subsequent rows)
-            for clust_idx in range(n_clusterizers):
-                saliency_row = row_base + 1 + clust_idx
-                cluster_map = all_cluster_maps[clust_idx][i]  # (H, W)
-                
-                # Get cluster order if available
-                clusterizer = clusterizers[clust_idx]
-                if clusterizer.cluster_order is not None:
-                    # Remap cluster labels using the order
-                    cluster_order = clusterizer.cluster_order
-                    n_clusters = len(cluster_order)
-                    # Map each cluster to its position in the ordering
-                    alpha_values = cluster_order[cluster_map.astype(np.uint8)] / n_clusters
+                ax_he.set_title(patch_title, fontsize=8)
+            ax_he.axis('off')
+
+            # Saliency rows
+            for k in range(n_clusterizers):
+                cluster_map = cluster_maps_i[k].astype(np.float32)  # (H, W)
+
+                # Determine alpha values from cluster ordering
+                clusterizer = clusterizers[k] if clusterizers else None
+                if clusterizer is not None and clusterizer.cluster_order is not None:
+                    order = np.asarray(clusterizer.cluster_order)
+                    n_clusters = len(order)
+                    alpha_values = order[cluster_map.astype(np.uint8)] / n_clusters
                 else:
-                    # Use raw cluster labels
                     n_clusters = cluster_map.max() + 1
-                    alpha_values = cluster_map.astype(float) / n_clusters
-                
-                # Apply power for contrast adjustment
+                    alpha_values = cluster_map / n_clusters
+
                 alpha_values = alpha_values ** saliency_alpha_power
-                
-                # Create black overlay with alpha
-                black_overlay = np.zeros((*alpha_values.shape, 4), dtype=np.float32)
-                black_overlay[..., 3] = alpha_values
-                
-                # Display H&E with overlay
-                axes[saliency_row, col].imshow(image_display, vmin=0, vmax=1)
-                axes[saliency_row, col].imshow(black_overlay, vmin=0, vmax=1)
-                print(np.unique(black_overlay[..., 3]))
-                axes[saliency_row, col].axis('off')
-        
-        # Hide unused subplots
-        for i in range(n_samples * n_rows_per_patch, n_rows_total * n_cols):
-            row = i // n_cols
-            col = i % n_cols
-            axes[row, col].axis('off')
-            axes[row, col].set_visible(False)
-        
-        # Add overall title for single-page figures
+
+                overlay = np.zeros((*alpha_values.shape, 4), dtype=np.float32)
+                overlay[..., 3] = alpha_values  # black with variable alpha
+
+                ax_sal = axes[row_base + 1 + k, col]
+                ax_sal.imshow(image_display)
+                ax_sal.imshow(overlay)
+                ax_sal.axis('off')
+
+        # Hide unused axes
+        for i in range(n_samples, n_rows_total // n_rows_per_patch * n_cols):
+            for k in range(n_rows_per_patch):
+                r = (i // n_cols) * n_rows_per_patch + k
+                c = i % n_cols
+                if r < n_rows_total:
+                    axes[r, c].axis('off')
+                    axes[r, c].set_visible(False)
+
         if title and n_pages == 1:
             fig.suptitle(title, fontsize=16)
-        
+
         plt.tight_layout()
-        
-        row_labels = ["H&E"] + [clust.feature_name for clust in clusterizers]
+
+        # Row labels on left margin
         for row_idx, label in enumerate(row_labels):
-            y = 1 - (row_idx + 0.5) / n_rows_per_patch  # row center in figure coords
-            fig.text(
-                -0.01, y,  # -0.01 positions labels close to left edge
-                label,
-                fontsize=12,
-                rotation=90,
-                va="center", ha="center"
-            )
-    
-        # Save if output_path provided
+            y = 1 - (row_idx + 0.5) / n_rows_per_patch
+            fig.text(-0.01, y, label, fontsize=12,
+                     rotation=90, va="center", ha="center")
+
         if output_path is not None:
             Path(output_path).mkdir(parents=True, exist_ok=True)
-            
-            # Format: prefix_samples_start-end.png
-            filename = f'{filename_prefix}_samples_{start_idx+1}-{end_idx}.png'
-            filepath = os.path.join(output_path, filename)
-            fig.savefig(filepath, bbox_inches='tight', dpi=dpi)
-            print(f"Saved: {filepath}")
-        
-        # Handle return behavior
+            fp = os.path.join(
+                output_path,
+                f'{filename_prefix}_samples_{start_idx+1}-{end_idx}.png'
+            )
+            fig.savefig(fp, bbox_inches='tight', dpi=dpi)
+            print(f"Saved: {fp}")
+
         if n_pages == 1 and return_fig:
             return fig, axes
-        else:
-            plt.close(fig)
-    
+
+        plt.close(fig)
+
     return None
 
 def plot_patch_gallery(
-    sdata: "SpatialData",
     patches: "ad.AnnData",
+    sdata: Optional["SpatialData"] = None,
+    patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     output_path: Optional[str] = None,
     filename_prefix: str = 'patch_gallery',
     samples_per_figure: int = 100,
@@ -371,16 +325,21 @@ def plot_patch_gallery(
     title: Optional[str] = None,
     dpi: int = 300,
     return_fig: bool = False,
-    progress_bar: bool = True
+    progress_bar: bool = True,
 ) -> Optional[Tuple[plt.Figure, np.ndarray]]:
     """
-    Create a grid gallery of tissue patches from selected observations.
+    Create a grid gallery of tissue patches.
 
     Parameters
     ----------
-    sdata : SpatialData
     patches : AnnData
-        Must have obs columns: 'image', 'xmin', 'xmax', 'ymin', 'ymax'.
+        Patch metadata in .obs.
+        Required columns: 'image', 'xmin', 'xmax', 'ymin', 'ymax'.
+    sdata : SpatialData, optional
+        Required when patches_array is None.
+    patches_array : np.ndarray or list of np.ndarray, optional
+        Pre-extracted patches, channel-last (N, H, W, C) or list of (H, W, C).
+        If provided, sdata is not used for extraction.
     output_path : str, optional
     filename_prefix : str
     samples_per_figure : int
@@ -389,8 +348,7 @@ def plot_patch_gallery(
     show_image_names : bool
     show_scores : bool
     group_col : str, optional
-        Column in patches.obs used to color-code patch borders.
-        E.g. a cluster assignment column.
+        Column in patches.obs for border colour-coding.
     border_alpha : float
     cmap : str
     title : str, optional
@@ -400,8 +358,20 @@ def plot_patch_gallery(
 
     Returns
     -------
-    fig, axes or None
+    (fig, axes) or None
+
+    Examples
+    --------
+    >>> # Automatic extraction
+    >>> plot_patch_gallery(patches, sdata=sdata, output_path='output/gallery')
+    >>>
+    >>> # Pre-computed
+    >>> imgs = extract_patches(sdata, patches, channel_first=False)
+    >>> plot_patch_gallery(patches, patches_array=imgs, output_path='output/gallery')
     """
+    if patches_array is None and sdata is None:
+        raise ValueError("Either sdata or patches_array must be provided.")
+
     required_cols = ['image', 'xmin', 'xmax', 'ymin', 'ymax']
     missing_cols = [c for c in required_cols if c not in patches.obs.columns]
     if missing_cols:
@@ -423,21 +393,31 @@ def plot_patch_gallery(
             "Please provide output_path for multi-page figures."
         )
 
+    # Full-dataset extraction (once, before paging)
+    if patches_array is None:
+        if progress_bar:
+            print("Extracting patches from sdata...")
+        patches_array = extract_patches(
+            sdata, patches,
+            channel_first=False,
+            progress_bar=progress_bar,
+            skip_errors=True,
+        )
+
+    patches_list = (
+        list(patches_array) if isinstance(patches_array, np.ndarray)
+        else patches_array
+    )
+
     for page_idx in range(n_pages):
         start_idx = page_idx * samples_per_figure
         end_idx = min(start_idx + samples_per_figure, n_patches)
         batch_df = patch_df.iloc[start_idx:end_idx]
+        batch_images = patches_list[start_idx:end_idx]
 
-        batch_patches = ad.AnnData(obs=batch_df.reset_index(drop=True))
         if progress_bar and n_pages > 1:
-            print(f"Processing page {page_idx+1}/{n_pages}...")
-
-        extracted = extract_patches(
-            sdata, batch_patches,
-            channel_first=False,
-            progress_bar=progress_bar,
-            skip_errors=True
-        )
+            print(f"Rendering page {page_idx+1}/{n_pages} "
+                  f"(patches {start_idx+1}–{end_idx})...")
 
         labels = []
         for _, row in batch_df.iterrows():
@@ -453,7 +433,7 @@ def plot_patch_gallery(
         )
 
         fig, axs = _plot_image_grid(
-            images=extracted,
+            images=batch_images,
             labels=labels if any(l is not None for l in labels) else None,
             group_ids=group_ids,
             n_cols=patches_per_row,
@@ -467,18 +447,19 @@ def plot_patch_gallery(
 
         if output_path is not None:
             Path(output_path).mkdir(parents=True, exist_ok=True)
-            fp = os.path.join(output_path,
-                              f'{filename_prefix}_samples_{start_idx+1}-{end_idx}.png')
+            fp = os.path.join(
+                output_path,
+                f'{filename_prefix}_samples_{start_idx+1}-{end_idx}.png'
+            )
             fig.savefig(fp, bbox_inches='tight', dpi=dpi)
             print(f"Saved: {fp}")
 
         if n_pages == 1 and return_fig:
             return fig, axs
-        else:
-            plt.close(fig)
+
+        plt.close(fig)
 
     return None
-
 
 def plot_feature_gallery(
     images: List[np.ndarray],
@@ -492,25 +473,23 @@ def plot_feature_gallery(
     fontsize: float = 6,
 ) -> tuple:
     """
-    Plot a grid of pre-extracted image arrays with cluster-colored borders.
+    Plot a grid of pre-extracted image arrays with cluster-coloured borders.
 
-    This is a thin wrapper around _plot_image_grid for the common SAE
-    feature gallery use-case where images are already in memory.
+    Thin wrapper around _plot_image_grid for the SAE feature gallery use-case
+    where images are already in memory.
 
     Parameters
     ----------
-    images : list of np.ndarray
-        Pre-extracted patch images, each (H, W, 3).
+    images : list of np.ndarray, each (H, W, 3)
     group_ids : list
-        Cluster/group assignment per image for border coloring.
     labels : list of str, optional
-        Per-image text label (e.g. feature index). Pass None to suppress.
     n_cols : int
     patch_size : float
     border_extend : float
     border_alpha : float
     cmap : str
     fontsize : float
+
     Returns
     -------
     fig, axs : tuple
@@ -524,5 +503,5 @@ def plot_feature_gallery(
         border_extend=border_extend,
         border_alpha=border_alpha,
         cmap=cmap,
-        fontsize=fontsize
+        fontsize=fontsize,
     )
