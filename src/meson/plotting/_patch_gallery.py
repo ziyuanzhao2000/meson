@@ -182,6 +182,7 @@ def plot_patch_gallery_with_saliency(
             clusterizers=clusterizers,
             batch_size=batch_size,
             progress_bar=progress_bar,
+            shared_embedder=True
         )
 
     # Normalise to lists for uniform downstream indexing
@@ -251,18 +252,8 @@ def plot_patch_gallery_with_saliency(
             # Saliency rows
             for k in range(n_clusterizers):
                 cluster_map = cluster_maps_i[k].astype(np.float32)  # (H, W)
-
-                # Determine alpha values from cluster ordering
-                clusterizer = clusterizers[k] if clusterizers else None
-                if clusterizer is not None and clusterizer.cluster_order is not None:
-                    order = np.asarray(clusterizer.cluster_order)
-                    n_clusters = len(order)
-                    alpha_values = order[cluster_map.astype(np.uint8)] / n_clusters
-                else:
-                    n_clusters = cluster_map.max() + 1
-                    alpha_values = cluster_map / n_clusters
-
-                alpha_values = alpha_values ** saliency_alpha_power
+                n_clusters = cluster_map.max() + 1
+                alpha_values = (cluster_map / n_clusters) ** saliency_alpha_power
 
                 overlay = np.zeros((*alpha_values.shape, 4), dtype=np.float32)
                 overlay[..., 3] = alpha_values  # black with variable alpha
@@ -321,6 +312,7 @@ def plot_patch_gallery(
     show_scores: bool = False,
     group_col: Optional[str] = None,
     border_alpha: float = 1.0,
+    border_extend: float = 0.1,
     cmap: str = 'tab10',
     title: Optional[str] = None,
     dpi: int = 300,
@@ -434,6 +426,7 @@ def plot_patch_gallery(
 
         fig, axs = _plot_image_grid(
             images=batch_images,
+            border_extend=border_extend,
             labels=labels if any(l is not None for l in labels) else None,
             group_ids=group_ids,
             n_cols=patches_per_row,
@@ -467,7 +460,7 @@ def plot_feature_gallery(
     labels: Optional[List[str]] = None,
     n_cols: int = 10,
     patch_size: float = 2.0,
-    border_extend: float = 0.05,
+    border_extend: float = 0.1,
     border_alpha: float = 1.0,
     cmap: str = 'tab10',
     fontsize: float = 6,
