@@ -217,7 +217,7 @@ def df2mask(df, size_x=None, size_y=None,
         size_x = int(df['SizeX'].iloc[0])
         size_y = int(df['SizeY'].iloc[0])
     if label_strategy == 'set':
-        labels = set(df[labels_colname])
+        labels = set(df[labels_colname].values)
         indexed_sorted = {elem: i for i, elem in enumerate(sorted(labels), start=1)}
 
     img = np.zeros((size_y, size_x), dtype=np.int32)

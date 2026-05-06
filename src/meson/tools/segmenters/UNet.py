@@ -2,6 +2,7 @@ import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
 from torch.utils.data import DataLoader
 from torch.optim import lr_scheduler
+import torch
 
 ### Form dataset using first 32 images and train a Unet with fixed decoder = resnet34
 

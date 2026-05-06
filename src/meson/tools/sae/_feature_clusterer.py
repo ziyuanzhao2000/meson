@@ -264,7 +264,7 @@ class SAEFeatureClusterer:
         -------
         fig, axs
         """
-        from meson.plotting._patch_gallery import extract_patch_images
+        from meson.preprocessing._extract_patches import extract_patches
         from meson._patch_selector import select_exemplar_patches
 
         self._check_clustered()
@@ -285,7 +285,7 @@ class SAEFeatureClusterer:
                 feature_names=feature_names,
                 n_exemplars=1,
             )
-            images = extract_patch_images(sdata, exemplar_adata, progress=True)
+            images = extract_patches(sdata, exemplar_adata, progress=True)
 
         labels = [str(idx) for idx in ordered_idx] if show_labels else None
         group_ids = self.reordered_clusters_.tolist()

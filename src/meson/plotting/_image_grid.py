@@ -2,6 +2,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 import matplotlib.cm as cm
+from matplotlib.colors import ListedColormap
 from math import ceil
 from typing import Optional, List, Union
 
@@ -12,7 +13,7 @@ def _plot_image_grid(
     group_ids: Optional[List] = None,
     n_cols: int = 10,
     patch_size: float = 2.0,
-    border_extend: float = 0.05,
+    border_extend: float = 0.1,
     border_alpha: float = 1.0,
     fontsize: float = 6,
     cmap: str = 'tab10',
@@ -59,11 +60,14 @@ def _plot_image_grid(
 
     # Build color lookup once
     if group_ids is not None:
-        unique_groups = list(dict.fromkeys(group_ids))   # preserves order
-        colormap = cm.get_cmap(cmap)
-        group_to_color = {
-            g: colormap((i % 10) / 10) for i, g in enumerate(unique_groups)
-        }
+        if isinstance(cmap, ListedColormap):
+            # index directly by group_id — color[3] is always group 3's color
+            group_to_color = {g: cmap(g) for g in set(group_ids)}
+        else:
+            # string cmap: normalize by total number of colors expected
+            colormap = cm.get_cmap(cmap)
+            n = colormap.N if hasattr(colormap, 'N') else 256
+            group_to_color = {g: colormap(g / n) for g in set(group_ids)}
 
     for i, image in enumerate(images):
         ax = axs[i]
@@ -73,8 +77,8 @@ def _plot_image_grid(
         if group_ids is not None:
             color = group_to_color[group_ids[i]]
             border = mpatches.Rectangle(
-                (-border_extend, -border_extend),
-                1 + 2 * border_extend,
+                (-border_extend * patch_size, -border_extend * patch_size),
+                1 + 2 * border_extend * patch_size,
                 1 + 2 * border_extend,
                 transform=ax.transAxes,
                 facecolor=color,

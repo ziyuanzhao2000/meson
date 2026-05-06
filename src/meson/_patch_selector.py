@@ -146,6 +146,7 @@ def select_patches_for_binary_feature(
     feature_name: str,
     n: Optional[int] = None,
     random_state: Optional[int] = None,
+    deprecated_rng = False
 ) -> ad.AnnData:
     """
     Sample patches where a binary feature (stored in .obs) equals 1.
@@ -171,8 +172,6 @@ def select_patches_for_binary_feature(
     if n == 0:
         return _empty_result(sdata, table_names)
 
-    rng = np.random.default_rng(random_state)
-
     all_active: list[tuple[str, int]] = []
     for table_name in table_names:
         patch_table = sdata[table_name]
@@ -194,13 +193,19 @@ def select_patches_for_binary_feature(
     if n is None:
         selected = all_active
     else:
-        n_to_sample = min(n, len(all_active))
+        num_active = len(all_active)
+        n_to_sample = min(n, num_active)
         if n_to_sample < n:
-            print(f"Warning: Only {len(all_active)} active patches, sampling all.")
-        selected = [
-            all_active[i]
-            for i in rng.choice(len(all_active), size=n_to_sample, replace=False)
-        ]
+            print(f"Warning: Only {num_active} active patches, sampling all.")
+        # This is because numpy upgraded its random API and the old one is now deprecated, 
+        # but we want to keep it around for reproducibility to get same results as in the paper
+        if deprecated_rng:
+            np.random.seed(random_state)
+            indices = np.random.choice(num_active, size=n_to_sample, replace=False)
+        else:  
+            rng = np.random.default_rng(random_state)
+            indices = rng.choice(num_active, size=n_to_sample, replace=False)
+        selected = [all_active[i] for i in indices]
 
     selected_indices: dict[str, list[int]] = defaultdict(list)
     for table_name, row_idx in selected:
@@ -263,7 +268,8 @@ def select_top_patches(
         )
 
     all_candidates.sort(key=lambda x: x[0], reverse=True)
-
+    if take_every is None: 
+        take_every = max(1, len(all_candidates) // n) if n is not None else 1
     strided = all_candidates[::take_every]
     selected = strided[:n] if n is not None else strided
 

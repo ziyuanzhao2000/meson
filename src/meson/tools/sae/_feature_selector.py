@@ -47,7 +47,6 @@ class SAEFeatureSelector:
         """
         feature_names = [f"{feature_prefix}_{i}" for i in range(num_features)]
         X_csc = adata[:, feature_names].X.tocsc()
-
         n = X_csc.shape[0]
         s = n // self.n_chunks
         pct_chunks, max_chunks = [], []
@@ -56,8 +55,14 @@ class SAEFeatureSelector:
             start = i * s
             end = (i + 1) * s if i < self.n_chunks - 1 else n
             Xc = X_csc[start:end]
-            pct_chunks.append(np.array((Xc > 0).mean(axis=0))[0])
-            max_chunks.append(np.array(Xc.max(axis=0).toarray())[0])
+            # It seems saving and loading to sparse format can sometimes change the shape of the output, so we catch both cases here
+            # Figure out how to fix later, but for now this is a workaround to avoid errors when the shape is changed from (chunk_size, num_features) to (1, chunk_size, num_features)
+            try: 
+                pct_chunks.append(np.array((Xc > 0).mean(axis=0)))
+                max_chunks.append(np.array(Xc.max(axis=0).toarray()))
+            except Exception as e:
+                pct_chunks.append(np.array((Xc > 0).mean(axis=0))[0])
+                max_chunks.append(np.array(Xc.max(axis=0).toarray())[0])
 
         self.pct_active_ = np.stack(pct_chunks).mean(axis=0)
         self.max_score_ = np.stack(max_chunks).max(axis=0)
