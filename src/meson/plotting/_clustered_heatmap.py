@@ -27,7 +27,7 @@ def plot_clustered_heatmap(
     linkage_method: str = 'average',
     threshold: float = 1.0,
     criterion: str = 'distance',
-    cmap: str = 'coolwarm_r',
+    cmap: str = 'Blues_r',
     center: Optional[float] = None,
 ) -> Tuple:
     """
@@ -89,8 +89,9 @@ def plot_clustered_heatmap(
 
     vmin, vmax = vis_matrix.min(), vis_matrix.max()
     vcenter = center if center is not None else (vmin + vmax) / 2
-    norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
-
+    # norm = mcolors.TwoSlopeNorm(vmin=vmin, vcenter=vcenter, vmax=vmax)
+    norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+    
     g = sns.clustermap(
         vis_matrix,
         row_linkage=linkage_matrix,
