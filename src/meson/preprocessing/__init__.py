@@ -7,6 +7,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
     '_make_patch': ['make_patch'],
     '_segment_tissue': ['segment_tissue'],
     '_extract_patches': ['extract_patches'],
+    '_extract_saliency_maps': ['extract_saliency_maps'],
     '_registration': ['ForwardTransform'],
     }
 )

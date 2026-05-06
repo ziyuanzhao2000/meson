@@ -1,6 +1,7 @@
 from typing import TYPE_CHECKING, List, Optional, Union
 import warnings
 import numpy as np
+import torch
 from tqdm import tqdm
 
 if TYPE_CHECKING:
@@ -11,6 +12,7 @@ def extract_saliency_maps(
     clusterizers: List["TokenClusterizer"],
     batch_size: int = 16,
     progress_bar: bool = True,
+    shared_embedder: bool = False,
 ) -> Union[np.ndarray, List[np.ndarray]]:
     """
     Generate token cluster saliency maps for a set of pre-extracted patches.
@@ -33,6 +35,11 @@ def extract_saliency_maps(
         Number of patches to process at once per clusterizer call.
     progress_bar : bool, default=True
         Whether to show tqdm progress bars.
+    shared_embedder : bool, default=False
+        If True, assumes all clusterizers use the same embedding model.
+        Embeddings are computed once using the first clusterizer's embedder,
+        then each clusterizer's _cluster_tokens and _rasterize are called
+        directly, avoiding redundant forward passes.
 
     Returns
     -------
@@ -56,16 +63,24 @@ def extract_saliency_maps(
     >>> maps = extract_saliency_maps(patches, clusterizers=[c1, c2])
     >>> print(maps.shape)   # (N, 2, H, W)  dtype=uint8
     >>>
+    >>> # If all clusterizers share the same embedder, avoid redundant passes:
+    >>> maps = extract_saliency_maps(
+    ...     patches, clusterizers=[c1, c2], shared_embedder=True
+    ... )
+    >>>
     >>> # Save for later reuse
     >>> np.save("patches.npy", patches)
     >>> np.save("saliency_maps.npy", maps)
 
     Notes
     -----
-    - Alpha mapping, power transforms, and colourmap selection are purely
-      visualization concerns and belong in the plotting layer, not here.
+    - Alpha mapping, power transforms, and power transforms, and colourmap
+      selection are purely visualization concerns and belong in the plotting
+      layer, not here.
     - Each clusterizer's __call__ must return an array of shape (N, H, W)
       with integer cluster labels.
+    - When shared_embedder=True, _cluster_tokens and _rasterize are called
+      directly on all but the first clusterizer, reusing cached embeddings.
     """
     if not clusterizers:
         raise ValueError("At least one TokenClusterizer must be provided.")
@@ -85,60 +100,136 @@ def extract_saliency_maps(
 
     n_clusterizers = len(clusterizers)
 
-    # Run each clusterizer and collect maps: list of (N, H, W) arrays
-    per_clusterizer_maps = []
-    clust_iter = enumerate(clusterizers)
-    if progress_bar:
-        clust_iter = tqdm(
-            clust_iter,
-            total=n_clusterizers,
-            desc="Running clusterizers",
-        )
+    # per_clusterizer_maps[k] will be either an (N, H, W) ndarray or list of (H, W)
+    per_clusterizer_maps = [None] * n_clusterizers
 
-    for clust_idx, clusterizer in clust_iter:
-        if progress_bar:
-            tqdm.write(
-                f"  Clusterizer {clust_idx + 1}/{n_clusterizers}: "
-                f"{getattr(clusterizer, 'feature_name', str(clusterizer))}"
-            )
-
-        # clusterizer expects (N, C, H, W); handle list input by stacking
-        # temporarily if all shapes agree, else process one-by-one
+    if shared_embedder:
         if is_list_input:
             shapes = [p.shape for p in patches_array]
-            if len(set(shapes)) == 1:
-                batch = np.stack(patches_array, axis=0)
+            all_same_shape = len(set(shapes)) == 1
+        else:
+            all_same_shape = True
+
+        # Initialise accumulators: list-of-lists per clusterizer
+        accum = [[] for _ in range(n_clusterizers)]
+
+        if is_list_input and not all_same_shape:
+            # Variable-size patches: process one at a time
+            patch_iter = enumerate(patches_array)
+            if progress_bar:
+                patch_iter = tqdm(
+                    patch_iter, total=n_patches, desc="Patches (shared embedder)"
+                )
+            first_clusterizer = clusterizers[0]
+            first_clusterizer.embedder.model.eval()
+
+            for _, patch in patch_iter:
+                batch = torch.from_numpy(patch[None]).float() / 255.0  # (1, C, H, W)
+                output_size = (patch.shape[1], patch.shape[2])
+
+                with torch.inference_mode():
+                    token_embeds = first_clusterizer.embedder.get_token_embeddings(
+                        batch.to(first_clusterizer.device), remove_cls=True
+                    )  # (1, N_tokens, D)
+
+                for k, clusterizer in enumerate(clusterizers):
+                    cluster_map = clusterizer._cluster_tokens(token_embeds)  # (1, g, g)
+                    rasterized = clusterizer._rasterize(cluster_map, output_size)  # (1, H, W)
+                    accum[k].append(rasterized[0])
+
+            for k in range(n_clusterizers):
+                per_clusterizer_maps[k] = accum[k]  # list of (H, W)
+
+        else:
+            # Fixed-size patches: process in batches
+            if is_list_input:
+                patches_tensor = torch.from_numpy(
+                    np.stack(patches_array, axis=0)
+                ).float() / 255.0
+            else:
+                patches_tensor = torch.from_numpy(patches_array).float() / 255.0
+
+            output_size = (patches_tensor.shape[2], patches_tensor.shape[3])
+            n_batches = int(np.ceil(n_patches / batch_size))
+            first_clusterizer = clusterizers[0]
+            first_clusterizer.embedder.model.eval()
+
+            batch_iter = range(n_batches)
+            if progress_bar:
+                batch_iter = tqdm(
+                    batch_iter, total=n_batches, desc="Batches (shared embedder)"
+                )
+
+            for i in batch_iter:
+                batch = patches_tensor[
+                    i * batch_size : (i + 1) * batch_size
+                ].to(first_clusterizer.device)
+
+                with torch.inference_mode():
+                    token_embeds = first_clusterizer.embedder.get_token_embeddings(
+                        batch, remove_cls=True
+                    )  # (B, N_tokens, D)
+
+                for k, clusterizer in enumerate(clusterizers):
+                    if progress_bar and i == 0:
+                        tqdm.write(
+                            f"  Clusterizer {k + 1}/{n_clusterizers}: "
+                            f"{getattr(clusterizer, 'feature_name', str(clusterizer))}"
+                        )
+                    cluster_map = clusterizer._cluster_tokens(token_embeds)  # (B, g, g)
+                    rasterized = clusterizer._rasterize(cluster_map, output_size)  # (B, H, W)
+                    accum[k].append(rasterized)
+
+            for k in range(n_clusterizers):
+                per_clusterizer_maps[k] = np.concatenate(accum[k], axis=0)  # (N, H, W)
+
+    else:
+        clust_iter = enumerate(clusterizers)
+        if progress_bar:
+            clust_iter = tqdm(
+                clust_iter,
+                total=n_clusterizers,
+                desc="Running clusterizers",
+            )
+
+        for clust_idx, clusterizer in clust_iter:
+            if progress_bar:
+                tqdm.write(
+                    f"  Clusterizer {clust_idx + 1}/{n_clusterizers}: "
+                    f"{getattr(clusterizer, 'feature_name', str(clusterizer))}"
+                )
+
+            if is_list_input:
+                shapes = [p.shape for p in patches_array]
+                if len(set(shapes)) == 1:
+                    batch = np.stack(patches_array, axis=0)
+                    cluster_maps = clusterizer(
+                        batch,
+                        batch_size=batch_size,
+                        show_progress=progress_bar,
+                    )  # (N, H, W)
+                else:
+                    cluster_maps = []
+                    patch_iter = patches_array
+                    if progress_bar:
+                        patch_iter = tqdm(
+                            patch_iter, total=n_patches, desc="  Patches", leave=False
+                        )
+                    for patch in patch_iter:
+                        m = clusterizer(
+                            patch[None],
+                            batch_size=1,
+                            show_progress=False,
+                        )  # (1, H, W)
+                        cluster_maps.append(m[0])
+            else:
                 cluster_maps = clusterizer(
-                    batch,
+                    patches_array,
                     batch_size=batch_size,
                     show_progress=progress_bar,
                 )  # (N, H, W)
-            else:
-                # Process individually for variable-size patches
-                cluster_maps = []
-                patch_iter = patches_array
-                if progress_bar:
-                    patch_iter = tqdm(
-                        patch_iter, total=n_patches, desc="  Patches", leave=False
-                    )
-                for patch in patch_iter:
-                    m = clusterizer(
-                        patch[None],  # (1, C, H, W)
-                        batch_size=1,
-                        show_progress=False,
-                    )  # (1, H, W)
-                    cluster_maps.append(m[0])
-        else:
-            cluster_maps = clusterizer(
-                patches_array,
-                batch_size=batch_size,
-                show_progress=progress_bar,
-            )  # (N, H, W)
 
-        per_clusterizer_maps.append(cluster_maps)
-
-    # per_clusterizer_maps: K elements, each (N, H, W) array or list of (H, W)
-    # Transpose to per-patch view: N elements, each (K, H, W)
+            per_clusterizer_maps[clust_idx] = cluster_maps
 
     if is_list_input and isinstance(per_clusterizer_maps[0], list):
         # Variable spatial sizes: return list of (K, H, W) uint8
@@ -146,18 +237,16 @@ def extract_saliency_maps(
         for i in range(n_patches):
             patch_maps = np.stack(
                 [per_clusterizer_maps[k][i] for k in range(n_clusterizers)],
-                axis=0
+                axis=0,
             ).astype(np.uint8)  # (K, H, W)
             saliency_list.append(patch_maps)
         return saliency_list
     else:
-        # All maps are (N, H, W) arrays — stack to (K, N, H, W) then transpose
         stacked = np.stack(
             [np.asarray(m) for m in per_clusterizer_maps], axis=0
         )  # (K, N, H, W)
         saliency_array = stacked.transpose(1, 0, 2, 3).astype(np.uint8)  # (N, K, H, W)
 
-        # Confirm all spatial shapes are consistent; warn otherwise
         spatial_shapes = set(
             (saliency_array[i, 0].shape) for i in range(n_patches)
         )
