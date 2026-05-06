@@ -22,5 +22,6 @@ __getattr__, __dir__, __all__ = lazy.attach(
         '_clustered_heatmap': ['plot_clustered_heatmap'],
         '_rasterization': ['interpolate_multiclass', 'extract_samples'],
         '_feature_map': ['plot_feature_map'],
+        '_assemble_pyramid': ['assemble_pyramid'],
     }
 )
