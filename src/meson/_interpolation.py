@@ -141,9 +141,8 @@ def interpolate_multiclass(
 
     return label_map
 
-
 def interpolate_linear(
-    samples: Dict[Tuple[int, int], int],
+    samples: Dict[Tuple[int, int], Union[int, np.ndarray]],
     height: int,
     width: int,
     downsample: int = 1,
@@ -154,8 +153,9 @@ def interpolate_linear(
 
     Parameters
     ----------
-    samples : Dict[Tuple[int, int], int]
-        Dictionary mapping (x, y) coordinates to cluster labels.
+    samples : Dict[Tuple[int, int], int or np.ndarray]
+        Dictionary mapping (x, y) coordinates to scalar labels or
+        1-D value arrays. All arrays must have the same length.
     height : int
         Height of output image.
     width : int
@@ -164,18 +164,29 @@ def interpolate_linear(
         Factor by which to downsample the output.
     mapping : dict, optional
         Dictionary to remap cluster labels before interpolation.
+        Only applied when values are scalar integers.
 
     Returns
     -------
     interpolated : np.ndarray
+        - shape (out_height, out_width)        when values are scalar.
+        - shape (out_height, out_width, C)     when values are length-C arrays.
         Continuously interpolated values in downsampled resolution.
     """
     points = np.array(list(samples.keys()), dtype=float)
     values = list(samples.values())
 
-    if mapping is not None:
-        values = [mapping[v] for v in values]
-    values = np.array(values, dtype=float)
+    # Determine if values are array-valued
+    first = values[0]
+    is_vector = isinstance(first, (np.ndarray, list, tuple)) and np.ndim(first) > 0
+
+    if is_vector:
+        # Stack to (N, C)
+        values_arr = np.array(values, dtype=float)  # (N, C)
+    else:
+        if mapping is not None:
+            values = [mapping[v] for v in values]
+        values_arr = np.array(values, dtype=float)  # (N,)
 
     out_height = height // downsample
     out_width  = width  // downsample
@@ -186,9 +197,77 @@ def interpolate_linear(
 
     grid_y, grid_x = np.mgrid[0:out_height, 0:out_width]
 
-    interpolated = griddata(
-        points_down, values, (grid_y, grid_x),
-        method='linear', fill_value=0.0,
-    )
+    if is_vector:
+        n_channels = values_arr.shape[1]  # C
+        # griddata supports multi-column values natively — one call suffices
+        interpolated = griddata(
+            points_down, values_arr, (grid_y, grid_x),
+            method='linear', fill_value=0.0,
+        )  # shape: (out_height, out_width, C)
+    else:
+        interpolated = griddata(
+            points_down, values_arr, (grid_y, grid_x),
+            method='linear', fill_value=0.0,
+        )  # shape: (out_height, out_width)
 
     return interpolated
+
+# ...existing code...
+
+def interpolate_patch_max(
+    samples: Dict[Tuple[int, int], float],
+    height: int,
+    width: int,
+    patch_size: int,
+    downsample: int = 1,
+) -> np.ndarray:
+    """
+    Rasterize sparse sample scores by painting filled squares of size
+    ``patch_size`` centred on each sample coordinate.  Patches are drawn
+    in ascending score order so the highest score wins on overlap.
+
+    Parameters
+    ----------
+    samples : Dict[Tuple[int, int], float]
+        Dictionary mapping (x, y) pixel coordinates to scalar scores.
+    height : int
+        Full-resolution canvas height.
+    width : int
+        Full-resolution canvas width.
+    patch_size : int
+        Side length (in full-resolution pixels) of each painted square.
+    downsample : int, default=1
+        Factor by which to downsample the canvas before painting.
+        Coordinates and patch_size are scaled accordingly.
+
+    Returns
+    -------
+    out : np.ndarray, shape (out_height, out_width), dtype float32
+        Rasterized score map; background pixels are 0.
+    """
+    out_height = height // downsample
+    out_width  = width  // downsample
+    half       = (patch_size // downsample) // 2
+
+    out = np.zeros((out_height, out_width), dtype=np.float32)
+
+    # Sort ascending so highest score is painted last (wins on overlap)
+    coords  = np.array(list(samples.keys()))   # (N, 2)  col=x, row=y
+    scores  = np.array(list(samples.values()), dtype=np.float32)  # (N,)
+    order   = np.argsort(scores)
+
+    for idx in order:
+        x, y = coords[idx]
+        score = scores[idx]
+
+        xi = int(round(x / downsample))
+        yi = int(round(y / downsample))
+
+        x0 = max(xi - half, 0)
+        x1 = min(xi + half, out_width  - 1)
+        y0 = max(yi - half, 0)
+        y1 = min(yi + half, out_height - 1)
+
+        out[y0:y1, x0:x1] = score
+
+    return out
