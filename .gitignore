@@ -3,6 +3,8 @@
 *.bin
 *.pyc
 *.egg-info
+*.egg-info/
+*.bak
 src_old/
 build/
 notebooks/
