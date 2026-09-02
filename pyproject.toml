@@ -25,5 +25,11 @@ dependencies = [
     "huggingface_hub"
 ]
 
+[project.scripts]
+tissue-seg = "meson.cli.tissue_seg:main"
+chn-norm   = "meson.cli.chn_norm:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+
+

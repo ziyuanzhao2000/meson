@@ -4,7 +4,7 @@ import cv2
 from typing import Optional, Union
 from tqdm import tqdm
 import anndata
-
+from sklearn.cluster import KMeans
 class TokenClusterizer:
     """
     Token-level clustering and rasterization for vision transformer embeddings.
@@ -242,7 +242,7 @@ class TokenClusterizer:
         
         return rasterized_masks
     
-    def compute_and_set_cluster_order_from_feature(
+    def fit(
         self,
         sdata: 'spatialdata.SpatialData',
         patch_table_names: Union[str, list],
@@ -303,7 +303,7 @@ class TokenClusterizer:
         >>> # Now the clusterizer will use this ordering when rasterizing
         >>> masks = clusterizer(images)
         """
-        from meson._utils import select_top_patches, select_negative_patches
+        from meson._patch_selector import select_top_patches, select_negative_patches
         from meson.preprocessing import extract_patches
         
         if show_progress:
@@ -378,6 +378,12 @@ class TokenClusterizer:
         if show_progress:
             print("Predicting cluster labels...")
         
+        # Fit KMeans if not already fitted
+        if not hasattr(self.kmeans, 'cluster_centers_'):
+            if show_progress:
+                print("Fitting KMeans on all tokens...")
+            self.kmeans = KMeans(n_clusters=3, random_state=0).fit(positive_tokens)
+        
         # Predict cluster labels
         positive_labels = self.kmeans.predict(positive_tokens)
         negative_labels = self.kmeans.predict(negative_tokens)
@@ -398,7 +404,7 @@ class TokenClusterizer:
         diff_percentage = percentage_positive - percentage_negative
         
         # Rank clusters by differential abundance (high to low)
-        cluster_order = np.argsort(-diff_percentage)
+        cluster_order = np.argsort(np.argsort(-diff_percentage))
         
         # Store and return
         self.cluster_order = cluster_order
@@ -407,4 +413,4 @@ class TokenClusterizer:
             print(f"Cluster order computed and stored. Top 3 enriched clusters: {cluster_order[:3]}")
             print(f"Differential abundances: {diff_percentage[cluster_order[:3]]}")
         
-        return cluster_order
+        return self

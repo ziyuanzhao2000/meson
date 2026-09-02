@@ -212,8 +212,6 @@ def interpolate_linear(
 
     return interpolated
 
-# ...existing code...
-
 def interpolate_patch_max(
     samples: Dict[Tuple[int, int], float],
     height: int,

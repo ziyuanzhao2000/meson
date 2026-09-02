@@ -1,11 +1,144 @@
 import pytorch_lightning as pl
 import segmentation_models_pytorch as smp
-from torch.utils.data import DataLoader
+from torch.utils.data import Dataset, DataLoader
 from torch.optim import lr_scheduler
 import torch
+import cv2 
+import os
+import zarr
+from tqdm import tqdm
 
-### Form dataset using first 32 images and train a Unet with fixed decoder = resnet34
+def preprocess_datasets(images, labels=None, positive_class_idx=[0], target_size=448, smooth_size=31, cleanup=0):
+    n_samples = len(images)
+    out_images = np.zeros((n_samples, 3, target_size, target_size), dtype=np.uint8)
+    out_labels = np.zeros((n_samples, 1, target_size, target_size))
 
+    if labels is not None:
+        labels = np.isin(labels, positive_class_idx)
+    for i in tqdm(range(n_samples)):
+        image = images[i]
+        for j in range(3):
+            out_images[i, j] = cv2.resize(image[j], (target_size, target_size))
+        if labels is not None:
+            label = labels[i]
+            if cleanup > 0:
+                label = remove_small_objects(label, min_size=cleanup)
+                label = remove_small_holes(label, area_threshold=cleanup)
+            resized = cv2.resize(label.astype(np.float32), 
+                                (target_size, target_size),
+                                interpolation=cv2.INTER_CUBIC)
+            out_labels[i, 0] = cv2.GaussianBlur(resized, (smooth_size, smooth_size), 0)
+    return out_images, out_labels
+
+
+def save_segmentation_data_to_zarr(images_array, masks_array, output_dir):
+    """
+    Save image and mask arrays to Zarr format.
+    
+    Parameters:
+    -----------
+    images_array : numpy.ndarray
+        Array of images with shape (N, C, H, W)
+    masks_array : numpy.ndarray
+        Array of masks with shape (N, 1, H, W)
+    output_dir : str
+        Path to save the Zarr dataset
+    """
+    # Validate input shapes
+    assert len(images_array.shape) == 4, f"Images array should be 4D (N,C,H,W), got {images_array.shape}"
+    assert len(masks_array.shape) == 4, f"Masks array should be 4D (N,1,H,W), got {masks_array.shape}"
+    assert images_array.shape[0] == masks_array.shape[0], "Number of images and masks must match"
+    assert masks_array.shape[1] == 1, f"Masks should have 1 channel, got {masks_array.shape[1]}"
+    assert images_array.shape[2:] == masks_array.shape[2:], "Image and mask spatial dimensions must match"
+    
+    # Create the zarr store
+    os.makedirs(os.path.dirname(output_dir), exist_ok=True)
+    store = zarr.DirectoryStore(output_dir)
+    root = zarr.group(store=store)
+    
+    # Extract dimensions
+    N, C, H, W = images_array.shape
+    
+    # Create datasets with appropriate chunking
+    images = root.create_dataset(
+        'images',
+        shape=images_array.shape,
+        chunks=(1, C, H, W),  # One full image per chunk
+        dtype=images_array.dtype,
+        # compressor=zarr.Blosc(cname='zstd')
+    )
+    
+    masks = root.create_dataset(
+        'masks',
+        shape=masks_array.shape,
+        chunks=(1, 1, H, W),  # One full mask per chunk
+        dtype=masks_array.dtype,
+        # compressor=zarr.Blosc(cname='zstd')
+    )
+    
+    # Store metadata
+    root.attrs['shape'] = {
+        'images': images_array.shape,
+        'masks': masks_array.shape,
+        'channels': C,
+        'height': H,
+        'width': W,
+        'samples': N
+    }
+    
+    # Write data
+    for i in tqdm(range(len(images_array))):
+        images[i] = images_array[i]
+        masks[i] = masks_array[i]
+    
+    print(f"Successfully saved {N} image-mask pairs to {output_dir}")
+    return root
+
+import torch
+from torch.utils.data import Dataset
+import zarr
+from torchvision import tv_tensors  # <-- Crucial import for v2 transforms
+
+class ZarrSegmentationDataset(Dataset):
+    """PyTorch Dataset for loading segmentation data from Zarr storage"""
+    
+    def __init__(self, zarr_path, transform=None, normalize=True, mask_transform=None, 
+                mode='binary'):
+        self.root = zarr.open(zarr_path, mode='r')
+        self.images = self.root['images']
+        self.masks = self.root['masks']
+        self.transform = transform
+        self.mask_transform = mask_transform
+        self.normalize = normalize
+        self.mode = mode
+        
+    def __len__(self):
+        return self.images.shape[0]
+    
+    def __getitem__(self, idx):
+        image = self.images[idx]
+        mask = self.masks[idx]
+        
+        image = torch.from_numpy(image)
+        mask = torch.from_numpy(mask)
+        
+        if image.ndim == 2:
+            image = image.unsqueeze(0)
+        if mask.ndim == 2:
+            mask = mask.unsqueeze(0)
+
+        if self.normalize and image.max() > 1.0:
+            image = image.float() / 255.0
+            
+        if self.transform is not None:
+            image = tv_tensors.Image(image)
+            mask = tv_tensors.Mask(mask)
+            
+            image, mask = self.transform(image, mask)
+        
+        mask = torch.clip(mask, 0, 1)
+        
+        return torch.as_tensor(image), torch.as_tensor(mask)
 class GenericSegmenter(pl.LightningModule):
     def __init__(self, arch, encoder_name, in_channels, out_classes, **kwargs):
         super().__init__()
@@ -18,9 +151,29 @@ class GenericSegmenter(pl.LightningModule):
         )
         # preprocessing parameteres for image
         params = smp.encoders.get_preprocessing_params(encoder_name)
-        self.register_buffer("std", torch.tensor(params["std"]).view(1, 3, 1, 1))
-        self.register_buffer("mean", torch.tensor(params["mean"]).view(1, 3, 1, 1))
+        
+        # Check if user provided custom stats in kwargs, otherwise adapt ImageNet stats
+        dataset_mean = kwargs.pop("mean", None)
+        dataset_std = kwargs.pop("std", None)
 
+        if dataset_mean is not None and dataset_std is not None:
+            mean = dataset_mean
+            std = dataset_std
+        elif in_channels == 3:
+            mean = params["mean"]
+            std = params["std"]
+        else:
+            # Fallback: Average the 3 ImageNet channels and repeat for 'in_channels'
+            avg_mean = sum(params["mean"]) / len(params["mean"])
+            avg_std = sum(params["std"]) / len(params["std"])
+            mean = [avg_mean] * in_channels
+            std = [avg_std] * in_channels
+
+        print(len(mean), len(std))
+        # Dynamically set the view to match in_channels instead of hardcoding 3
+        self.register_buffer("std", torch.tensor(std).view(1, in_channels, 1, 1).float())
+        self.register_buffer("mean", torch.tensor(mean).view(1, in_channels, 1, 1).float())
+        
         # for image segmentation dice loss could be the best first choice
         self.loss_fn = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
 
@@ -28,12 +181,11 @@ class GenericSegmenter(pl.LightningModule):
         self.training_step_outputs = []
         self.validation_step_outputs = []
         self.test_step_outputs = []
-
+        self.T_max = kwargs.get('T_max', 100)
     def forward(self, image):
         # normalize image here
         image = (image - self.mean) / self.std
         mask = self.model(image)
-        print(image.shape, mask.shape)
         return mask
 
     def shared_step(self, batch, stage):
@@ -148,7 +300,7 @@ class GenericSegmenter(pl.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.parameters(), lr=2e-4)
-        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_MAX, eta_min=1e-5)
+        scheduler = lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.T_max, eta_min=1e-5)
         return {
             "optimizer": optimizer,
             "lr_scheduler": {

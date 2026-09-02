@@ -124,7 +124,7 @@ def plot_clustered_heatmap(
             end - start + 1,
             fill=False,
             edgecolor='black',
-            linewidth=2,
+            linewidth=1,
         )
         g.ax_heatmap.add_patch(rect)
 

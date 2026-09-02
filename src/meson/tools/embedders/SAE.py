@@ -17,6 +17,7 @@ class SimpleAutoencoder(nn.Module):
         super().__init__()
         self.input_dim = input_dim
         self.hidden_dim = int(input_dim * expansion_factor)
+        self.centering_bias = np.zeros(input_dim, dtype=np.float32)  # Centering bias for input embeddings
         
         # Simple encoder and decoder
         self.encoder = nn.Linear(input_dim, self.hidden_dim, bias=True)
@@ -57,19 +58,30 @@ def train_simple_sae(model, embeddings, device='cpu',
               target_sparsity=0.001,
             #   epsilon=0.05,
               learning_rate=5e-5,
-              verbose=100):  # Target 1% activation
+              verbose=100,
+              skip=100,
+    ):  # Target 1% activation
     """
     Train the SAE with modified sparsity control
     """
-    # Scale dataset
-    print(embeddings.shape)
-    embeddings_tensor = torch.tensor(embeddings, dtype=torch.float32)
-    n = embeddings_tensor.shape[1]
-    current_norm = torch.mean(torch.sum(embeddings_tensor**2, dim=1))
-    target_norm = torch.sqrt(torch.tensor(n, dtype=torch.float32))
-    scale_factor = torch.sqrt(target_norm / current_norm)
-    embeddings_tensor = embeddings_tensor * scale_factor
-    print("Scale factor:", scale_factor)
+    center = np.mean(embeddings[::skip], axis=0)
+    embeddings_centered = embeddings - center
+    model.centering_bias = torch.tensor(center, dtype=torch.float32)
+    print("Centered all embeddings.")
+    norm = np.mean(np.linalg.norm(embeddings_centered, axis=1))
+    model.norm = norm
+    embeddings_normalized = embeddings_centered / model.norm
+    embeddings_tensor = torch.tensor(embeddings_normalized, dtype=torch.float32)
+    print("Normalized all embeddings.")
+    n_clusters = model.hidden_dim
+    from sklearn.cluster import KMeans
+    kmeans = KMeans(n_clusters=n_clusters, random_state=0).fit(embeddings_normalized[::skip])
+    kmeans_centroids = torch.tensor(kmeans.cluster_centers_, dtype=torch.float32)
+    print("Computed KMeans centroids.")
+    # kmeans_centroids_normalized = torch.tensor(kmeans_centroids / np.linalg.norm(kmeans_centroids, axis=1, keepdims=True), dtype=torch.float32)
+    model.encoder.weight.data = kmeans_centroids
+    model.decoder.weight.data = kmeans_centroids.t()
+    print("Initialized encoder and decoder weights with KMeans centroids.")
 
     dataset = torch.utils.data.TensorDataset(embeddings_tensor)
     dataloader = torch.utils.data.DataLoader(
@@ -135,6 +147,9 @@ def train_simple_sae(model, embeddings, device='cpu',
             # The gradient norm is clipped to 1 
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
+            # renormalize decoder weights to unit norm after each update
+            with torch.no_grad():
+                model.decoder.weight.data = F.normalize(model.decoder.weight.data, p=2, dim=0)
             
             # Update learning rate
             if step > 0.8 * num_steps:
@@ -186,7 +201,7 @@ def train_simple_sae(model, embeddings, device='cpu',
         'recon_losses': recon_losses,
         'sparsity_losses': sparsity_losses
     }
-    return scale_factor, logs
+    return logs
 
 class SparseAutoencoder(TransformerMixin, BaseEstimator):
     def __init__(self, 
@@ -209,7 +224,8 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
         self.random_state = random_state
 
     def fit(self, X, y=None, 
-            verbose: int | bool = False):
+            verbose: int | bool = False, 
+            skip = 100):
         self.random_state_ = check_random_state(self.random_state)
         X = self._validate_data(X, accept_sparse=False)
         assert len(X.shape) == 2 # expect X shape = B x d_emb 
@@ -218,7 +234,7 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
                                         expansion_factor=self.expansion_factor)
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
         torch.manual_seed(self.random_state_.random(1))
-        self.scale_factor_, self._training_log = train_simple_sae(
+        self._training_log = train_simple_sae(
             model=self.model_,
             embeddings=X,
             device=device,
@@ -229,7 +245,8 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
             target_sparsity=self.target_sparsity,
             # epsilon=self.epsilon,
             learning_rate=self.learning_rate, 
-            verbose=verbose
+            verbose=verbose,
+            skip=skip,
         )
         return self
         
@@ -240,14 +257,17 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.model_.to(device)
         # X may be large so we need to use dataloader
-        dataset = TensorDataset(torch.tensor(X, dtype=torch.float32) * self.scale_factor_)
+        dataset = TensorDataset(torch.tensor(X, dtype=torch.float32))
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
         rows = []
         cols = []
         vals = []
         with torch.no_grad():
             for idx, batch in enumerate(tqdm(dataloader)):
-                _, X_ = self.model_.forward(batch[0].to(device))
+                X_batch = batch[0]
+                X_centered = X_batch - self.model_.centering_bias
+                X_normalized = X_centered / self.model_.norm
+                _, X_ = self.model_.forward(X_normalized.to(device))
                 if column_keep_indices is not None:
                     X_ = X_[:, column_keep_indices]
                 arr = X_.to_sparse().cpu()

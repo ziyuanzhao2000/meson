@@ -252,7 +252,7 @@ def plot_patch_gallery_with_saliency(
             # Saliency rows
             for k in range(n_clusterizers):
                 cluster_map = cluster_maps_i[k].astype(np.float32)  # (H, W)
-                n_clusters = cluster_map.max() + 1
+                n_clusters = 3
                 alpha_values = (cluster_map / n_clusters) ** saliency_alpha_power
 
                 overlay = np.zeros((*alpha_values.shape, 4), dtype=np.float32)

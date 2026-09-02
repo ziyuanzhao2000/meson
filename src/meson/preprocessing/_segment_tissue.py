@@ -8,8 +8,7 @@ from spatialdata.models import Labels2DModel
 from spatialdata.transformations import set_transformation, Affine
 from meson._readwrite import get_top_level, get_scaling_factor
 
-def segment_tissue(sdata, image_name, 
-                    image_level=-1,
+def _segment_tissue(img,
                    entropy_ksize=7,
                    percentile=0,
                   median_ksize=51,
@@ -22,14 +21,6 @@ def segment_tissue(sdata, image_name,
                   label_name=None,
                   kernel_type='disk',
                   cs: str | None = None):
-    if cs is None:
-        cs = image_name.split('_')[0]
-    img_obj = sdata[image_name]
-    if image_level == -1:
-        img = get_top_level(img_obj).compute().transpose('y', 'x', 'c').to_numpy()
-    else:
-        import spatialdata as sd
-        img = sd.get_pyramid_levels(img_obj, n=image_level).compute().transpose('y', 'x', 'c').to_numpy()
     img = cv2.resize(img, (img.shape[1] // downsample, img.shape[0] // downsample))
     img_hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV) 
     img_sat = img_hsv[:, :, 1] # measures saturation of some sort...
@@ -71,8 +62,46 @@ def segment_tissue(sdata, image_name,
                                         disk(opening_ksize))
     img_dilated = cv2.dilate(img_clopened, disk(dilation_ksize))
 
-    label = Labels2DModel.parse(img_dilated, dims=['y', 'x'])
+    return img_dilated
 
+
+def segment_tissue(sdata, image_name, 
+                    image_level=-1,
+                   entropy_ksize=7,
+                   percentile=0,
+                  median_ksize=51,
+                  closing_ksize=0,
+                  opening_ksize=0,
+                  dilation_ksize=0, 
+                  downsample=1,
+                  remove_holes=True,
+                  remove_light_regions=0,
+                  label_name=None,
+                  kernel_type='disk',
+                  cs: str | None = None):
+    if cs is None:
+        cs = image_name.split('_')[0]
+    img_obj = sdata[image_name]
+    if image_level == -1:
+        img = get_top_level(img_obj).compute().transpose('y', 'x', 'c').to_numpy()
+    else:
+        import spatialdata as sd
+        img = sd.get_pyramid_levels(img_obj, n=image_level).compute().transpose('y', 'x', 'c').to_numpy()
+    mask = _segment_tissue(img,
+                            entropy_ksize=entropy_ksize,
+                            percentile=percentile,
+                            median_ksize=median_ksize,
+                            closing_ksize=closing_ksize,
+                            opening_ksize=opening_ksize,
+                            dilation_ksize=dilation_ksize,
+                            downsample=downsample,
+                            remove_holes=remove_holes,
+                            remove_light_regions=remove_light_regions,
+                            label_name=label_name,
+                            kernel_type=kernel_type,
+                            cs=cs)
+    label = Labels2DModel.parse(mask, dims=['y', 'x'])
+    
     # ensure tissue mask transforms to the base layer of image pyramid
     scaling_factors = [f*downsample for f in get_scaling_factor(img_obj, image_level)]
     affine = Affine(np.eye(3) * [*scaling_factors, 1], 

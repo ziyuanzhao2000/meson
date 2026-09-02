@@ -58,12 +58,11 @@ class SAEFeatureSelector:
             # It seems saving and loading to sparse format can sometimes change the shape of the output, so we catch both cases here
             # Figure out how to fix later, but for now this is a workaround to avoid errors when the shape is changed from (chunk_size, num_features) to (1, chunk_size, num_features)
             try: 
-                pct_chunks.append(np.array((Xc > 0).mean(axis=0)))
-                max_chunks.append(np.array(Xc.max(axis=0).toarray()))
-            except Exception as e:
                 pct_chunks.append(np.array((Xc > 0).mean(axis=0))[0])
                 max_chunks.append(np.array(Xc.max(axis=0).toarray())[0])
-
+            except Exception as e:
+                pct_chunks.append(np.array((Xc > 0).mean(axis=0)))
+                max_chunks.append(np.array(Xc.max(axis=0).toarray()))
         self.pct_active_ = np.stack(pct_chunks).mean(axis=0)
         self.max_score_ = np.stack(max_chunks).max(axis=0)
         self._is_fitted = True
@@ -89,15 +88,30 @@ class SAEFeatureSelector:
             'selected': selected
         })
 
-        g = sns.JointGrid(data=data, x='pct_patches_active', y='max_feature_score', hue='selected')
+        g = sns.JointGrid(data=data, 
+                          x='pct_patches_active', 
+                          y='max_feature_score')
         g.ax_joint.set_xscale('log')
         g.ax_joint.set_yscale('log')
         g.ax_joint.set_xlabel('Fraction of patches active')
         g.ax_joint.set_ylabel('Max feature score')
-        g.plot_joint(sns.scatterplot, s=10, linewidth=0, legend=False)
-        g.plot_marginals(sns.histplot, bins=50)
-        g.ax_marg_x.set_yscale('log')
-        g.ax_marg_y.set_xscale('log')
+        
+        g.plot_joint(
+            sns.scatterplot, 
+            hue=data['selected'],   # Pass hue here instead
+            s=10, 
+            linewidth=0, 
+            legend=False, 
+            # rasterized=True
+        )
+
+        # sns.histplot(data=data, x='pct_patches_active', hue='selected', ax=g.ax_marg_x, bins=50, legend=False, element="step")
+        # sns.histplot(data=data, y='max_feature_score', hue='selected', ax=g.ax_marg_y, bins=50, legend=False, element="step")
+
+        # g.ax_marg_x.set_yscale('log')
+        # g.ax_marg_x.set_ylim(bottom=1)
+        # g.ax_marg_y.set_xscale('log')
+        # g.ax_marg_x.set_xlim(left=1)
         g.refline(x=self.pct_threshold, y=self.max_score_threshold)
 
         n_selected = selected.sum()
