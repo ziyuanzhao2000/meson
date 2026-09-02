@@ -1,35 +1,27 @@
-[build-system]
-requires = ["setuptools>=42", "wheel"]
-build-backend = "setuptools.build_meta"
-
 [project]
-name = "meson"
-version = "1.0.0"
+name = "mesoslide"
+version = "0.1.0"
 description = "A package for mesoscale tissue analysis using multiomics data"
 authors = [{ name = "Ziyuan Zhao", email = "ziyuanzhao@fas.harvard.edu" }]
 readme = "README.md"
 license = { text = "MIT" }
+requires-python = ">=3.12"
 dependencies = [
-    "openslide-python",
-    "shapely",
-    "scikit-image",
-    "matplotlib",
-    "seaborn",
-    "zarr",
-    "dask",
-    "opencv-python",
-    "spatialdata[extra]",
-    "tiffslide",
-    "torchvision",
-    "timm",
-    "huggingface_hub"
+    "ezslide>=0.1.4",
+    "spatialdata>=0.8",
+    "zarr>=3.0",
+    "tifffile>=2025.5.21",
+    "spatialdata-plot"
 ]
 
 [project.scripts]
+mesoslide = "mesoslide:main"
 tissue-seg = "meson.cli.tissue_seg:main"
 chn-norm   = "meson.cli.chn_norm:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
 
-
+[tool.uv.sources]
+ezslide = { path = "/n/scratch/users/z/ziz531/ezslide", editable = true }
