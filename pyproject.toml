@@ -1,6 +1,6 @@
 [project]
 name = "mesoslide"
-version = "0.1.0"
+version = "0.2.0"
 description = "A package for mesoscale tissue analysis using multiomics data"
 authors = [{ name = "Ziyuan Zhao", email = "ziyuanzhao@fas.harvard.edu" }]
 readme = "README.md"
@@ -8,10 +8,12 @@ license = { text = "MIT" }
 requires-python = ">=3.12"
 dependencies = [
     "ezslide>=0.1.4",
+    "lazyslide-models>=0.0.4",
     "spatialdata>=0.8",
     "zarr>=3.0",
     "tifffile>=2025.5.21",
-    "spatialdata-plot"
+    "spatialdata-plot",
+    "lazyslide>=0.12.0",
 ]
 
 [project.scripts]
@@ -25,3 +27,8 @@ build-backend = "uv_build"
 
 [tool.uv.sources]
 ezslide = { path = "/n/scratch/users/z/ziz531/ezslide", editable = true }
+
+[dependency-groups]
+dev = [
+    "ipykernel>=7.3.0",
+]

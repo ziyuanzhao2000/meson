@@ -31,7 +31,7 @@ class TokenClusterizer:
     
     Examples
     --------
-    >>> from meson.tools.embedders import UNIEmbedder
+    >>> from meson.tools.embedders._legacy import UNIEmbedder
     >>> from meson.tools.segmenters import TokenClusterizer
     >>> import torch
     >>> import joblib

@@ -14,7 +14,7 @@ Key change from v1:
       (after processing all current boundary cells).
 """
 import numpy as np
-from meson.tools._embed_patch import embed_patch
+from meson.tools._legacy._embed_patch import embed_patch
 import torch
 import pickle
 from pathlib import Path

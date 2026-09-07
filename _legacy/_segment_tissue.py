@@ -6,7 +6,7 @@ from skimage.filters import rank
 from scipy.ndimage import binary_fill_holes
 from spatialdata.models import Labels2DModel
 from spatialdata.transformations import set_transformation, Affine
-from meson._readwrite import get_top_level, get_scaling_factor
+from mesoslide._readwrite import get_top_level, get_scaling_factor
 
 def _segment_tissue(img,
                    entropy_ksize=7,
@@ -81,7 +81,7 @@ def segment_tissue(sdata, image_name,
                   cs: str | None = None):
     if cs is None:
         cs = image_name.split('_')[0]
-    img_obj = sdata[image_name]
+    img_obj = sdata.images[image_name]
     if image_level == -1:
         img = get_top_level(img_obj).compute().transpose('y', 'x', 'c').to_numpy()
     else:
