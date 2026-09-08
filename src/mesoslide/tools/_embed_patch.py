@@ -2,8 +2,11 @@
 
 Runs a lazyslide-models vision encoder over the tiles of an ezslide/wsidata
 `WSIData` slide and writes the resulting embeddings into a shared per-tile-set
-AnnData table (`slide.tables[tile_key]`), one `obsm` entry per model. `.X` is
-left untouched so it stays free for interpretable features (e.g. a sparse
+AnnData table (`slide.tables[table_key]`, default `f"{tile_key}_table"`), one
+`obsm` entry per model. The table is stored under a key distinct from the
+tiles shapes element (`tile_key`) because SpatialData requires element names
+to be unique across *all* element types, not just within one. `.X` is left
+untouched so it stays free for interpretable features (e.g. a sparse
 autoencoder) computed downstream, per AnnData's own layering convention --
 `sc.pp.neighbors(table, use_rep=key_added)` redirects scanpy's graph/
 clustering calls onto a given `obsm` entry without needing them in `.X`.
@@ -41,10 +44,16 @@ def _resolve_model(model, *, model_path=None, token=None):
     if isinstance(model, str):
         from lazyslide_models import MODEL_REGISTRY
         if model in MODEL_REGISTRY:
-            return MODEL_REGISTRY[model](model_path=model_path, token=token), model
-        from lazyslide_models import TimmModel
-        return TimmModel(model, model_path=model_path, token=token), model
-    return model, model.name
+            instance, name = MODEL_REGISTRY[model](model_path=model_path, token=token), model
+        else:
+            from lazyslide_models import TimmModel
+            instance, name = TimmModel(model, model_path=model_path, token=token), model
+    else:
+        instance, name = model, model.name
+
+    from ._timm_transform_patch import patch_transform_if_needed
+    patch_transform_if_needed(instance)
+    return instance, name
 
 
 def embed_patch(
@@ -52,9 +61,11 @@ def embed_patch(
     model: "str | ImageModel",
     *,
     tile_key: str = "tiles",
+    table_key: str | None = None,
     key_added: str | None = None,
     batch_size: int = 32,
-    num_workers: int = 0,
+    num_workers: int = 0,  # >0 uses multiprocessing_context="spawn" below, since
+                            # tensorstore-backed readers aren't fork-safe
     device: str | None = None,
     token: str | None = None,
     model_path: str | Path | None = None,
@@ -66,7 +77,7 @@ def embed_patch(
 ) -> "WSIData":
     """Embed every tile of `slide[tile_key]` with a vision foundation model.
 
-    Embeddings are written to `slide.tables[tile_key].obsm[key_added]`
+    Embeddings are written to `slide.tables[table_key].obsm[key_added]`
     (`key_added` defaults to the resolved model name). Requires
     `slide[tile_key]` to already exist (see `lazyslide.pp.tile_tissues`).
 
@@ -80,8 +91,12 @@ def embed_patch(
         an arbitrary timm model name, or an already-instantiated
         `lazyslide_models` `ImageModel`.
     tile_key
-        Name of the tile shapes element, and of the AnnData table its
-        embeddings are stored in.
+        Name of the tile shapes element.
+    table_key
+        Name of the AnnData table the embeddings are stored in. Defaults to
+        `f"{tile_key}_table"` -- it cannot default to `tile_key` itself, since
+        SpatialData requires every element name to be unique across all
+        element types, and `tile_key` already names the tiles shapes element.
     key_added
         `obsm` key to write the embeddings under. Defaults to the resolved
         model name.
@@ -107,8 +122,9 @@ def embed_patch(
 
     model, model_name = _resolve_model(model, model_path=model_path, token=token)
     key_added = key_added or model_name
+    table_key = table_key or f"{tile_key}_table"
 
-    table = slide.tables.get(tile_key)
+    table = slide.tables.get(table_key)
     if table is not None and not overwrite and key_added in table.obsm:
         return slide
 
@@ -126,6 +142,7 @@ def embed_patch(
     )
     loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+        multiprocessing_context="spawn" if num_workers > 0 else None,
     )
 
     n_tiles = len(dataset)
@@ -135,7 +152,7 @@ def embed_patch(
     with torch.inference_mode():
         for batch in tqdm(loader, desc=f"Embedding tiles with {model_name}"):
             image = batch["image"].to(device, non_blocking=True)
-            with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=amp_on):
+            with torch.autocast(device_type=device, dtype=torch.float16, enabled=amp_on):
                 batch_embedding = model.encode_image(image)
             outputs.append(batch_embedding.float().cpu().numpy())
 
@@ -158,10 +175,11 @@ def embed_patch(
             AnnData(obs=obs),
             region=tile_key, region_key="library_id", instance_key="tile_id",
         )
-
-    table.obsm[key_added] = embeddings
-    slide.tables[tile_key] = table
+        table.obsm[key_added] = embeddings
+        slide.tables[table_key] = table
+    else:
+        table.obsm[key_added] = embeddings
 
     if save:
-        slide.write_element(tile_key, overwrite=True)
+        slide.write_element(table_key, overwrite=True)
     return slide
