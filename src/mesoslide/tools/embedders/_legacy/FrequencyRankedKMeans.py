@@ -7,6 +7,15 @@ from sklearn.utils.validation import check_is_fitted
 from sklearn.utils import check_random_state
 from typing import Optional
 
+try:
+    # sklearn >=1.6: BaseEstimator._validate_data was removed in favor of this
+    # module-level function (same behavior, estimator passed explicitly).
+    from sklearn.utils.validation import validate_data as _validate_data
+except ImportError:
+    # sklearn <1.6: fall back to the old bound method.
+    def _validate_data(estimator, X, **kwargs):
+        return estimator._validate_data(X, **kwargs)
+
 
 class FrequencyRankedKMeans(TransformerMixin, BaseEstimator, ClusterMixin):
     """
@@ -100,7 +109,7 @@ class FrequencyRankedKMeans(TransformerMixin, BaseEstimator, ClusterMixin):
             Fitted estimator.
         """
         self.random_state_ = check_random_state(self.random_state)
-        X = self._validate_data(X, accept_sparse=False)
+        X = _validate_data(self, X, accept_sparse=False)
         
         assert len(X.shape) == 2, f"Expected 2D array, got shape {X.shape}"
         self.embed_dim_ = X.shape[1]
@@ -160,14 +169,20 @@ class FrequencyRankedKMeans(TransformerMixin, BaseEstimator, ClusterMixin):
             Frequency-ranked cluster labels (0 = most common, etc.)
         """
         check_is_fitted(self)
-        X = self._validate_data(X, accept_sparse=False, reset=False)
-        
+        X = _validate_data(self, X, accept_sparse=False, reset=False)
+
         # Normalize if requested
         if self.normalize:
             X_processed = self._normalize_embeddings(X)
         else:
             X_processed = X
-        
+
+        # Newer sklearn's Cython KMeans kernel requires X's dtype to exactly
+        # match the fitted centroids' dtype (older sklearn was lenient about
+        # float32/float64 mixing); cast explicitly since a pickled model's
+        # centroids may not match whatever float dtype the caller passes in.
+        X_processed = X_processed.astype(self.kmeans_.cluster_centers_.dtype, copy=False)
+
         # Predict original labels
         original_labels = self.kmeans_.predict(X_processed)
         
