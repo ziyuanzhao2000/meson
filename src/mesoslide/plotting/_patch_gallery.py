@@ -5,27 +5,34 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
+from mesoslide._slides import DEFAULT_TILE_KEY, SLIDE_ID
+from mesoslide._deprecated import SLIDES_HINT, deprecated_kwargs, removed, rename
 from mesoslide.preprocessing._extract_patches import extract_patches
 from mesoslide.preprocessing._extract_saliency_maps import extract_saliency_maps
 from ._image_grid import _plot_image_grid
 
 if TYPE_CHECKING:
-    from spatialdata import SpatialData
     import anndata as ad
+    from wsidata import WSIData
     from mesoslide.tools.segmenters import TokenClusterizer
 
+@deprecated_kwargs(
+    sdata=removed(SLIDES_HINT),
+    show_image_names=rename('show_slide_ids'),
+)
 def plot_patch_gallery_with_saliency(
     patches: "ad.AnnData",
     clusterizers: Optional[List["TokenClusterizer"]] = None,
-    sdata: Optional["SpatialData"] = None,
+    slides=None,
     patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     saliency_maps: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     output_path: Optional[str] = None,
     filename_prefix: str = 'patch_gallery_saliency',
+    tile_key: str = DEFAULT_TILE_KEY,
     samples_per_figure: int = 100,
     patches_per_row: int = 10,
     patch_display_size: float = 2.0,
-    show_image_names: bool = False,
+    show_slide_ids: bool = False,
     show_scores: bool = False,
     title: Optional[str] = None,
     dpi: int = 300,
@@ -47,16 +54,17 @@ def plot_patch_gallery_with_saliency(
     Parameters
     ----------
     patches : AnnData
-        Patch metadata in .obs.
-        Required columns: 'image', 'xmin', 'xmax', 'ymin', 'ymax'.
+        Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
+        Required .obs columns: 'x', 'y' (plus 'slide_id' across slides).
         Optional column: 'score' (used when show_scores=True).
     clusterizers : list of TokenClusterizer, optional
         Required when saliency_maps is None. Each produces one saliency row.
-    sdata : SpatialData, optional
-        Required when patches_array is None.
+    slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
+        Required when patches_array is None. Build with
+        :func:`mesoslide.open_slides`; slides must have image data attached.
     patches_array : np.ndarray or list of np.ndarray, optional
         Pre-extracted patches, channel-last (N, H, W, C) or list of (H, W, C).
-        If provided, sdata is not used.
+        If provided, slides is not used.
     saliency_maps : np.ndarray or list of np.ndarray, optional
         Pre-computed cluster label maps (uint8).
         np.ndarray shape: (N, K, H, W); list: N elements of (K, H, W).
@@ -69,7 +77,7 @@ def plot_patch_gallery_with_saliency(
     patches_per_row : int, default=10
     patch_display_size : float, default=2.0
         Subplot size in inches.
-    show_image_names : bool, default=False
+    show_slide_ids : bool, default=False
     show_scores : bool, default=False
     title : str, optional
         Figure suptitle (single-page only).
@@ -95,15 +103,16 @@ def plot_patch_gallery_with_saliency(
     Examples
     --------
     >>> # Fully automatic
+    >>> slides = ms.open_slides(manifest)
     >>> plot_patch_gallery_with_saliency(
-    ...     patches, clusterizers=[c1, c2], sdata=sdata,
+    ...     patches, clusterizers=[c1, c2], slides=slides,
     ...     output_path='output/saliency'
     ... )
     >>>
     >>> # Pre-computed (extract once, plot many times)
-    >>> imgs = extract_patches(sdata, patches, channel_first=False)
+    >>> imgs = extract_patches(patches, slides, channel_first=False)
     >>> maps = extract_saliency_maps(
-    ...     extract_patches(sdata, patches, channel_first=True), [c1, c2]
+    ...     extract_patches(patches, slides, channel_first=True), [c1, c2]
     ... )
     >>> np.save("imgs.npy", imgs); np.save("maps.npy", maps)
     >>>
@@ -116,17 +125,15 @@ def plot_patch_gallery_with_saliency(
     ... )
     """
     
-    if patches_array is None and sdata is None:
-        raise ValueError("Either sdata or patches_array must be provided.")
+    if patches_array is None and slides is None:
+        raise ValueError("Either slides or patches_array must be provided.")
     if saliency_maps is None and (clusterizers is None or len(clusterizers) == 0):
         raise ValueError(
             "Either saliency_maps or at least one clusterizer must be provided."
         )
 
-    required_cols = ['image', 'xmin', 'xmax', 'ymin', 'ymax']
-    missing_cols = [c for c in required_cols if c not in patches.obs.columns]
-    if missing_cols:
-        raise ValueError(f"patches.obs missing required columns: {missing_cols}")
+    if show_slide_ids and SLIDE_ID not in patches.obs.columns:
+        raise ValueError(f"show_slide_ids=True requires a '{SLIDE_ID}' column in patches.obs")
     if show_scores and 'score' not in patches.obs.columns:
         raise ValueError("show_scores=True requires 'score' column in patches.obs")
 
@@ -160,9 +167,10 @@ def plot_patch_gallery_with_saliency(
 
     if patches_array is None:
         if progress_bar:
-            print("Extracting patches from sdata...")
+            print("Extracting patches from slides...")
         patches_array = extract_patches(
-            sdata, patches,
+            patches, slides,
+            tile_key=tile_key,
             channel_first=False,   # (N, H, W, C) for display
             progress_bar=progress_bar,
             skip_errors=True,
@@ -172,7 +180,8 @@ def plot_patch_gallery_with_saliency(
         if progress_bar:
             print("Extracting patches (channel-first) for clusterizers...")
         patches_cf = extract_patches(
-            sdata, patches,
+            patches, slides,
+            tile_key=tile_key,
             channel_first=True,
             progress_bar=progress_bar,
             skip_errors=True,
@@ -236,8 +245,8 @@ def plot_patch_gallery_with_saliency(
 
             # Title for the H&E row
             title_parts = []
-            if show_image_names:
-                title_parts.append(str(patch_meta['image']))
+            if show_slide_ids:
+                title_parts.append(str(patch_meta[SLIDE_ID]))
             if show_scores:
                 title_parts.append(f"Score: {patch_meta.get('score', 0):.3f}")
             patch_title = "\n".join(title_parts)
@@ -299,16 +308,21 @@ def plot_patch_gallery_with_saliency(
 
     return None
 
+@deprecated_kwargs(
+    sdata=removed(SLIDES_HINT),
+    show_image_names=rename('show_slide_ids'),
+)
 def plot_patch_gallery(
     patches: "ad.AnnData",
-    sdata: Optional["SpatialData"] = None,
+    slides=None,
     patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     output_path: Optional[str] = None,
     filename_prefix: str = 'patch_gallery',
+    tile_key: str = DEFAULT_TILE_KEY,
     samples_per_figure: int = 100,
     patches_per_row: int = 10,
     patch_display_size: float = 2.0,
-    show_image_names: bool = False,
+    show_slide_ids: bool = False,
     show_scores: bool = False,
     group_col: Optional[str] = None,
     border_alpha: float = 1.0,
@@ -325,19 +339,20 @@ def plot_patch_gallery(
     Parameters
     ----------
     patches : AnnData
-        Patch metadata in .obs.
-        Required columns: 'image', 'xmin', 'xmax', 'ymin', 'ymax'.
-    sdata : SpatialData, optional
-        Required when patches_array is None.
+        Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
+        Required .obs columns: 'x', 'y' (plus 'slide_id' across slides).
+    slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
+        Required when patches_array is None. Build with
+        :func:`mesoslide.open_slides`.
     patches_array : np.ndarray or list of np.ndarray, optional
         Pre-extracted patches, channel-last (N, H, W, C) or list of (H, W, C).
-        If provided, sdata is not used for extraction.
+        If provided, slides is not used for extraction.
     output_path : str, optional
     filename_prefix : str
     samples_per_figure : int
     patches_per_row : int
     patch_display_size : float
-    show_image_names : bool
+    show_slide_ids : bool
     show_scores : bool
     group_col : str, optional
         Column in patches.obs for border colour-coding.
@@ -355,19 +370,18 @@ def plot_patch_gallery(
     Examples
     --------
     >>> # Automatic extraction
-    >>> plot_patch_gallery(patches, sdata=sdata, output_path='output/gallery')
+    >>> slides = ms.open_slides(manifest)
+    >>> plot_patch_gallery(patches, slides=slides, output_path='output/gallery')
     >>>
     >>> # Pre-computed
-    >>> imgs = extract_patches(sdata, patches, channel_first=False)
+    >>> imgs = extract_patches(patches, slides, channel_first=False)
     >>> plot_patch_gallery(patches, patches_array=imgs, output_path='output/gallery')
     """
-    if patches_array is None and sdata is None:
-        raise ValueError("Either sdata or patches_array must be provided.")
+    if patches_array is None and slides is None:
+        raise ValueError("Either slides or patches_array must be provided.")
 
-    required_cols = ['image', 'xmin', 'xmax', 'ymin', 'ymax']
-    missing_cols = [c for c in required_cols if c not in patches.obs.columns]
-    if missing_cols:
-        raise ValueError(f"patches.obs missing required columns: {missing_cols}")
+    if show_slide_ids and SLIDE_ID not in patches.obs.columns:
+        raise ValueError(f"show_slide_ids=True requires a '{SLIDE_ID}' column in patches.obs")
     if show_scores and 'score' not in patches.obs.columns:
         raise ValueError("show_scores=True requires 'score' column in patches.obs")
     if group_col is not None and group_col not in patches.obs.columns:
@@ -388,9 +402,10 @@ def plot_patch_gallery(
     # Full-dataset extraction (once, before paging)
     if patches_array is None:
         if progress_bar:
-            print("Extracting patches from sdata...")
+            print("Extracting patches from slides...")
         patches_array = extract_patches(
-            sdata, patches,
+            patches, slides,
+            tile_key=tile_key,
             channel_first=False,
             progress_bar=progress_bar,
             skip_errors=True,
@@ -414,8 +429,8 @@ def plot_patch_gallery(
         labels = []
         for _, row in batch_df.iterrows():
             parts = []
-            if show_image_names:
-                parts.append(str(row['image']))
+            if show_slide_ids:
+                parts.append(str(row[SLIDE_ID]))
             if show_scores:
                 parts.append(f"Score: {row.get('score', 0):.3f}")
             labels.append('\n'.join(parts) if parts else None)

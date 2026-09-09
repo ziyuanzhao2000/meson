@@ -7,28 +7,58 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.image as mpimg
 from matplotlib.colors import LinearSegmentedColormap
-import spatialdata
 from tqdm import tqdm
 from PIL import Image
-from reportlab.pdfgen import canvas
-from reportlab.lib.utils import ImageReader
-from reportlab.lib.units import inch
 
+from mesoslide._slides import DEFAULT_TILE_KEY
+from mesoslide._deprecated import (
+    ELEMENT_NAME_HINT, SLIDES_HINT, deprecated_kwargs, drop, removed,
+)
 from ._utils import get_transparent_colormap, resize_image_to_fit
-from ._feature_map import plot_feature_map
+from ._feature_map import plot_feature_map, DEFAULT_IMAGE_KEY
 
 if TYPE_CHECKING:
-    from spatialdata import SpatialData
+    from wsidata import WSIData
 
 
+def _iter_plot_slides(slides, tile_key):
+    """Yield (slide_id, wsi) with images attached, from whatever `slides` is."""
+    import pandas as pd
+    from wsidata import WSIData
+    from mesoslide._slides import iter_slides, slide_id_from
+
+    if isinstance(slides, pd.DataFrame):
+        yield from iter_slides(slides, attach_images=True)
+        return
+    if isinstance(slides, WSIData):
+        slides = [slides]
+    if isinstance(slides, dict):
+        yield from slides.items()
+        return
+    for wsi in slides:
+        yield slide_id_from(wsi), wsi
+
+
+@deprecated_kwargs(
+    image_names=removed(SLIDES_HINT),
+    point_name=drop('grid_point', ELEMENT_NAME_HINT),
+    bbox_name=drop('bbox', ELEMENT_NAME_HINT),
+    feature_prefix=removed(
+        "feature_prefix and feature_idx collapse to a single feature_name; "
+        "pass f'{prefix}_{idx}'."
+    ),
+    feature_idx=removed(
+        "feature_prefix and feature_idx collapse to a single feature_name; "
+        "pass f'{prefix}_{idx}'."
+    ),
+)
 def plot_feature_spatial_distribution(
-    sdata: "SpatialData",
-    feature_prefix: str,
-    feature_idx: int,
-    image_names: Union[List[str], str] = 'all',
+    slides,
+    feature_name: str,
+    *,
     output_path: Optional[str] = None,
-    point_name: str = 'grid_point',
-    bbox_name: str = 'bbox',
+    tile_key: str = DEFAULT_TILE_KEY,
+    image_key: str = DEFAULT_IMAGE_KEY,
     cmap: Union[str, LinearSegmentedColormap] = 'transparent_to_green',
     fill_alpha: float = 0.3,
     nrows: Optional[int] = None,
@@ -38,201 +68,138 @@ def plot_feature_spatial_distribution(
     colorbar: bool = False,
     datashader_method: bool = True,
     show_titles: bool = False,
-    return_fig: bool = False
+    return_fig: bool = False,
 ) -> Optional[plt.Figure]:
     """
-    Plot spatial distribution of a feature across multiple whole slide images.
-    
-    Creates a grid of WSI images with the feature overlaid as colored shapes,
-    saving the result as a single composite figure.
-    
+    Plot the spatial distribution of one feature across a cohort of slides.
+
+    Renders each slide with :func:`mesoslide.plotting.plot_feature_map` and
+    composites the results into a single grid figure.
+
     Parameters
     ----------
-    sdata : SpatialData
-        Spatial data object containing images and feature annotations.
-    feature_prefix : str
-        Prefix of the feature column in obs table. For example:
-        - 'kmeans_label' for k-means clustering
-        - 'kmeans_k25_label' for specific k-means model
-        - 'UNI_SAE' for SAE features
-    feature_idx : int
-        Index of the specific feature to visualize.
-        Will look for column '{feature_prefix}_{feature_idx}' in obs.
-    image_names : list of str or 'all', default='all'
-        List of image names to include in the visualization.
-        If 'all', uses all images in sdata.
+    slides : slides_table, WSIData, list of WSIData, or {slide_id: WSIData}
+        The cohort. A manifest DataFrame is streamed one slide at a time
+        (images attached automatically); pre-opened slides must already carry
+        image data (``ezslide.read_wsi(store, attach_images=True)``).
+    feature_name : str
+        Feature to plot, e.g. 'UNI_SAE_42' or 'kmeans_label_3'. An .obs column
+        of the tile table, or a .var name in its .X.
     output_path : str, optional
-        Directory path to save the output figure.
-        If None, figure is not saved to disk.
-    point_name : str, default='grid_point'
-        Name of the point element in spatial data.
-    bbox_name : str, default='bbox'
-        Name of the bounding box/shape element to render.
+        Directory to save the composite figure into. Not saved if None.
+    tile_key : str, default='tiles'
+    image_key : str, default='wsi'
     cmap : str or LinearSegmentedColormap, default='transparent_to_green'
-        Colormap for visualization. Can be:
-        - 'transparent_to_green', 'transparent_to_red', 'transparent_to_blue'
-        - matplotlib colormap name
-        - LinearSegmentedColormap instance
+        'transparent_to_green' / '_red' / '_blue', a matplotlib colormap name,
+        or a colormap instance.
     fill_alpha : float, default=0.3
-        Alpha transparency for the feature overlay (0=transparent, 1=opaque).
     nrows : int, optional
-        Number of rows in the grid. If None, calculated from ncols.
+        Grid rows. Derived from ncols if None.
     ncols : int, default=5
-        Number of columns in the grid layout.
     figsize_per_image : tuple, default=(8, 6)
-        Size (width, height) in inches for each subplot.
     dpi : int, default=150
-        Resolution for saving the figure.
     colorbar : bool, default=False
-        Whether to show colorbar in individual plots.
     datashader_method : bool, default=True
-        Whether to use datashader rendering method for shapes.
     show_titles : bool, default=False
-        Whether to show image names as titles on subplots.
+        Label each panel with its slide id.
     return_fig : bool, default=False
-        Whether to return the figure object instead of closing it.
-        
+
     Returns
     -------
-    fig : matplotlib.figure.Figure or None
-        Figure object if return_fig=True, otherwise None.
-        
+    matplotlib Figure if return_fig=True, else None
+
     Examples
     --------
-    >>> from mesoslide.plotting import plot_feature_spatial_distribution
-    >>> 
-    >>> # Plot k-means cluster 0 across all images
-    >>> plot_feature_spatial_distribution(
-    ...     sdata,
-    ...     feature_prefix='kmeans_label',
-    ...     feature_idx=0,
-    ...     output_path='/path/to/output/feature_reports'
-    ... )
-    >>> 
-    >>> # Plot SAE feature 42 on specific images
-    >>> plot_feature_spatial_distribution(
-    ...     sdata,
-    ...     feature_prefix='UNI_SAE',
-    ...     feature_idx=42,
-    ...     image_names=['slide_001', 'slide_002', 'slide_003'],
-    ...     cmap='transparent_to_red',
-    ...     ncols=3
+    >>> import mesoslide as ms
+    >>> ms.plotting.plot_feature_spatial_distribution(
+    ...     manifest, 'UNI_SAE_42', output_path='reports/', ncols=3
     ... )
     """
-    if isinstance(image_names, str) and image_names == 'all':
-        image_names = list(set([name.split('_')[0] for name in sdata.images]))
-        image_names.sort()
-    elif not isinstance(image_names, list):
-        raise ValueError("image_names must be 'all' or a list of image names")
-    
     if isinstance(cmap, str):
-        if cmap in ['transparent_to_green', 'transparent_to_red', 'transparent_to_blue']:
-            # Extract color name from string like 'transparent_to_green' -> 'green'
-            color_name = cmap.split('_')[-1]
-            cmap = get_transparent_colormap(color_name, alpha=fill_alpha)
+        if cmap in ('transparent_to_green', 'transparent_to_red', 'transparent_to_blue'):
+            cmap = get_transparent_colormap(cmap.split('_')[-1], alpha=fill_alpha)
         else:
-            # Assume it's a matplotlib colormap name
             cmap = plt.get_cmap(cmap)
-            
-    n_images = len(image_names)
-    if nrows is None:
-        nrows = int(np.ceil(n_images / ncols))
-    
-    feature_col = f'{feature_prefix}_{feature_idx}'
+
     temp_dir = tempfile.mkdtemp()
     image_paths = []
-    
-    # Construct postfix strings from point_name and bbox_name
-    bbox_postfix = f'_{point_name}_{bbox_name}'
-    patch_postfix = f'_{point_name}_patch'
-    
+
     try:
-        for i, image_name in enumerate(tqdm(image_names, desc="Rendering images")):
-            # Check if required elements exist
-            bbox_full_name = f'{image_name}{bbox_postfix}'
-            patch_full_name = f'{image_name}{patch_postfix}'
-            
-            if bbox_full_name not in sdata.shapes:
-                print(f"Warning: {bbox_full_name} not found in sdata.shapes")
+        rendered = 0
+        for slide_id, wsi in tqdm(
+            _iter_plot_slides(slides, tile_key), desc="Rendering slides"
+        ):
+            try:
+                fig = plot_feature_map(
+                    wsi,
+                    feature_name,
+                    tile_key=tile_key,
+                    image_key=image_key,
+                    cmap=cmap,
+                    fill_alpha=fill_alpha,
+                    figsize=figsize_per_image,
+                    colorbar=colorbar,
+                    title=str(slide_id) if show_titles else '',
+                    method='datashader' if datashader_method else 'rasterize',
+                    datashader_reduction='max',
+                    return_ax=False,
+                )
+            except (KeyError, ValueError) as e:
+                print(f"Warning: skipping slide {slide_id!r}: {e}")
                 continue
-            
-            if patch_full_name not in sdata.tables:
-                print(f"Warning: {patch_full_name} not found in sdata.tables")
-                continue
-            
-            # Check if feature column exists
-            if feature_col not in sdata[patch_full_name].obs.columns:
-                print(f"Warning: {feature_col} not found in {patch_full_name}.obs")
-                continue
-            
-            # Use plot_feature_map to render individual image
-            fig = plot_feature_map(
-                sdata=sdata,
-                image_name=image_name,
-                feature_name=feature_col,
-                bbox_postfix=bbox_postfix,
-                patch_postfix=patch_postfix,
-                cmap=cmap,
-                fill_alpha=fill_alpha,
-                figsize=figsize_per_image,
-                colorbar=colorbar,
-                title=image_name if show_titles else '',
-                method='datashader' if datashader_method else 'rasterize',
-                datashader_reduction='max',
-                return_ax=False
-            )
-            
-            # Save individual plot to temp file
-            img_path = os.path.join(temp_dir, f'plot_{i:03d}.png')
+
+            img_path = os.path.join(temp_dir, f'plot_{rendered:03d}.png')
             fig.savefig(img_path, dpi=dpi, bbox_inches='tight')
             image_paths.append(img_path)
             plt.close(fig)
-        
-        # Create composite figure with all images
+            rendered += 1
+
+        if not image_paths:
+            raise ValueError(
+                f"No slide could be rendered for feature '{feature_name}'."
+            )
+
+        if nrows is None:
+            nrows = int(np.ceil(len(image_paths) / ncols))
+
         fig, axes = plt.subplots(
             nrows, ncols,
             figsize=(figsize_per_image[0] * ncols, figsize_per_image[1] * nrows)
         )
-        
-        # Ensure axes is 2D array
+
         if nrows == 1 and ncols == 1:
             axes = np.array([[axes]])
         elif nrows == 1:
             axes = axes.reshape(1, -1)
         elif ncols == 1:
             axes = axes.reshape(-1, 1)
-        
+
         axes_flat = axes.flatten()
-        
+
         for i, img_path in enumerate(image_paths):
-            img = mpimg.imread(img_path)
-            axes_flat[i].imshow(img)
+            axes_flat[i].imshow(mpimg.imread(img_path))
             axes_flat[i].axis('off')
-        
-        # Hide unused subplots
+
         for i in range(len(image_paths), len(axes_flat)):
             axes_flat[i].axis('off')
             axes_flat[i].set_visible(False)
-        
+
         plt.tight_layout()
-        
+
         if output_path is not None:
             Path(output_path).mkdir(parents=True, exist_ok=True)
             output_file = os.path.join(
-                output_path,
-                f'{feature_prefix}_{feature_idx:05d}_spatial_distribution.png'
+                output_path, f'{feature_name}_spatial_distribution.png'
             )
             fig.savefig(output_file, bbox_inches='tight', dpi=dpi)
             print(f"Saved: {output_file}")
-        
+
         if return_fig:
             return fig
-        else:
-            plt.close(fig)
-            return None
-            
+        plt.close(fig)
+        return None
+
     finally:
-        # Cleanup temp files
         for path in image_paths:
             if os.path.exists(path):
                 os.remove(path)
@@ -292,6 +259,13 @@ def create_feature_pdf(
     maintaining aspect ratio. The scaling accounts for conversion
     between points (PDF units) and dots (image units).
     """
+    # reportlab is only needed for the PDF path, so it is imported here rather
+    # than at module scope -- otherwise plot_feature_spatial_distribution, which
+    # does not use it, cannot be imported without it installed.
+    from reportlab.pdfgen import canvas
+    from reportlab.lib.utils import ImageReader
+    from reportlab.lib.units import inch
+
     # Set up page dimensions
     page_width = page_width_inches * inch  # Convert to points
     page_height = page_height_inches * inch

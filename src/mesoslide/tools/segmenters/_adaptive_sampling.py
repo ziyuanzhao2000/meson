@@ -14,7 +14,6 @@ Key change from v1:
       (after processing all current boundary cells).
 """
 import numpy as np
-from mesoslide.tools._legacy._embed_patch import embed_patch
 import torch
 import pickle
 from pathlib import Path
@@ -27,6 +26,7 @@ from mesoslide._interpolation import interpolate_edt, interpolate_multiclass, in
 import heapq
 
 from mesoslide._utils import get_base_level
+from mesoslide._slides import DEFAULT_TILE_KEY, slide_id_from, tile_table_key
 from collections import deque
 
 
@@ -423,29 +423,55 @@ def load_samples_parquet(path: Union[str, Path]) -> Dict[Tuple[int, int], int]:
 # ---------------------------------------------------------------------------
 
 def adaptive_sample_wsi(
-    sdata,
-    image_name: str,
+    wsi,
     embedder,
     classifier,
     cluster_groups: List[List[int]],
     output_dir: Union[str, Path],
+    *,
+    tile_key: str = DEFAULT_TILE_KEY,
+    table_key: Optional[str] = None,
+    image_key: str = 'wsi',
+    embedding_key: str = 'UNI_embedding',
     initial_size: int = 256,
     batch_size: int = 1024,
     size_threshold: Union[int, List[int]] = 32,
     patch_size: int = 448,
-    point_name: str = 'grid_point',
     save_format: str = 'parquet',
     show_progress: bool = True,
 ) -> Dict[Tuple[int, int], int]:
     """
     Perform adaptive quadtree sampling on a whole slide image.
 
-    This v2 implementation uses *epoch-based* iteration: each epoch computes
-    the gradient once and then drains all positive-gradient cells across
-    multiple minibatches before recomputing.  This dramatically reduces the
-    number of expensive gradient recomputations (interpolation + Sobel).
+    Epoch-based iteration: each epoch computes the gradient once, then drains
+    all positive-gradient cells across multiple minibatches before recomputing.
+    That keeps the expensive gradient recomputations (interpolation + Sobel)
+    rare.
 
-    Parameters are identical to v1.
+    Parameters
+    ----------
+    wsi : WSIData
+        A single slide with tiles, a tile table carrying `embedding_key` in
+        .obsm, and image data attached (``attach_images=True``).
+    embedder, classifier
+        Patch embedder and a fitted clusterer exposing `.predict`.
+    cluster_groups : list of list of int
+        Cluster indices to refine towards, one refinement pass per group.
+    output_dir : str or Path
+    tile_key : str, default='tiles'
+    table_key : str, optional
+        Defaults to ``f"{tile_key}_table"``.
+    image_key : str, default='wsi'
+    embedding_key : str, default='UNI_embedding'
+        .obsm entry holding the patch embeddings the classifier was fitted on.
+    initial_size, batch_size, size_threshold, patch_size
+        Sampling geometry, as before.
+    save_format : {'parquet', 'pickle'}
+    show_progress : bool
+
+    Returns
+    -------
+    dict mapping (x, y) -> cluster label
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -461,28 +487,36 @@ def adaptive_sample_wsi(
             )
         size_thresholds = list(size_threshold)
 
-    # Get k means labels
-    sdata.attrs['models'][f'kmeans'] = classifier
-    sdata.attrs['models_metadata'].append({
-        'name': f'kmeans',
-        'model_type': 'KMeans'
-    })
-    print(f"Embedding patches with KMeans...", flush=True)
-    sdata = embed_patch(
-        sdata,
-        embedder=f'kmeans',
-        image_name=image_name,
-        point_name='grid_point',
-        patch_name='patch',
-        obsm_key='UNI_embedding',
-        save=False,
-        overwrite=False
-    )
+    table_key = table_key or tile_table_key(tile_key)
+    slide_id = slide_id_from(wsi)
 
-    # Get patch table and WSI
-    print("Getting patch table and WSI...", flush=True)
-    patch_table = sdata[f'{image_name}_{point_name}_patch']
-    wsi = get_base_level(sdata[image_name]).compute().data
+    patch_table = wsi.tables.get(table_key)
+    if patch_table is None:
+        raise ValueError(
+            f"Slide '{slide_id}' has no table '{table_key}'; run "
+            "mesoslide.tl.embed_patch on it first."
+        )
+    if embedding_key not in patch_table.obsm:
+        raise ValueError(
+            f"'{embedding_key}' not in {table_key}.obsm "
+            f"(have: {list(patch_table.obsm)}). Run mesoslide.tl.embed_patch "
+            f"with key_added='{embedding_key}'."
+        )
+    if image_key not in wsi.images:
+        raise ValueError(
+            f"Slide '{slide_id}' has no image element '{image_key}'; reopen with "
+            "ezslide.read_wsi(store, attach_images=True)."
+        )
+
+    # Label every tile with the classifier. This used to route through the
+    # legacy embed_patch KMeans branch; the embeddings are already in .obsm, so
+    # it is just a predict.
+    print("Labelling patches with the classifier...", flush=True)
+    embeddings = np.asarray(patch_table.obsm[embedding_key], dtype=np.float64)
+    patch_table.obs['kmeans_label'] = classifier.predict(embeddings)
+
+    print("Loading slide pixels...", flush=True)
+    image = get_base_level(wsi.images[image_key]).compute().data
 
     # Initialize grid
     print("Initializing grid...", flush=True)
@@ -525,7 +559,7 @@ def adaptive_sample_wsi(
         while cells:
             n_epochs += 1
             samples, cells, n_new, _ = adaptive_refine_epoch(
-                samples, cells, wsi,
+                samples, cells, image,
                 embedder, classifier,
                 batch_size=batch_size,
                 size_threshold=group_size_threshold,
@@ -549,10 +583,10 @@ def adaptive_sample_wsi(
 
     # Save results
     if save_format == 'parquet':
-        samples_path = output_dir / f'{image_name}_samples.parquet'
+        samples_path = output_dir / f'{slide_id}_samples.parquet'
         save_samples_parquet(samples, samples_path)
     else:
-        samples_path = output_dir / f'{image_name}_samples.pkl'
+        samples_path = output_dir / f'{slide_id}_samples.pkl'
         with open(samples_path, 'wb') as f:
             pickle.dump(samples, f)
 

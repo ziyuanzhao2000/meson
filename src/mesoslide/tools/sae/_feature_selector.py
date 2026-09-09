@@ -31,10 +31,15 @@ class SAEFeatureSelector:
         self.max_score_ = None       # peak activation score per feature
         self._is_fitted = False
 
+        # accumulators, so a cohort can be folded in one slide at a time
+        self._n_active = None
+        self._n_obs = 0
+        self._max = None
+
     def compute_activation_stats(self, adata, feature_prefix, num_features):
         """
         Compute per-feature activation frequency and peak score.
-        This is the expensive step — only needs to be run once.
+        This is the expensive step -- only needs to be run once.
 
         Parameters
         ----------
@@ -44,29 +49,94 @@ class SAEFeatureSelector:
             Prefix of feature columns, e.g. 'UNI_SAE'
         num_features : int
             Total number of SAE features
+
+        See Also
+        --------
+        fit_slides : the same statistics streamed over a cohort.
         """
+        self.start(num_features)
+        self.accumulate(adata, feature_prefix, num_features)
+        return self.finalize()
+
+    def fit_slides(self, slides, feature_prefix, num_features, *,
+                   tile_key="tiles", progress=True):
+        """
+        Compute activation statistics over a cohort, one slide at a time.
+
+        Exactly equivalent to concatenating every slide and calling
+        :meth:`compute_activation_stats`, but peak memory is one slide.
+        Both statistics reduce associatively over rows: the peak score is a
+        max, and the active fraction is a sum of nonzero counts over a sum of
+        row counts.
+
+        Parameters
+        ----------
+        slides : slides_table, AnnData, WSIData, or sequence/mapping of either
+        feature_prefix : str
+        num_features : int
+        tile_key : str, default='tiles'
+        progress : bool
+
+        Returns
+        -------
+        self
+        """
+        from mesoslide._slides import SlideSource
+
+        source = slides if isinstance(slides, SlideSource) else SlideSource(slides, tile_key=tile_key)
+        self.start(num_features)
+        it = tqdm(source, desc="Activation stats") if progress else source
+        for _, table in it:
+            self.accumulate(table, feature_prefix, num_features, progress=False)
+        return self.finalize()
+
+    # -- accumulation --------------------------------------------------------
+
+    def start(self, num_features):
+        """Reset the accumulators for a fresh pass over `num_features` features."""
+        self._n_active = np.zeros(num_features, dtype=np.float64)
+        self._n_obs = 0
+        self._max = np.zeros(num_features, dtype=np.float64)
+        self._is_fitted = False
+        return self
+
+    def accumulate(self, adata, feature_prefix, num_features, progress=True):
+        """Fold one patch table into the running statistics."""
         feature_names = [f"{feature_prefix}_{i}" for i in range(num_features)]
         X_csc = adata[:, feature_names].X.tocsc()
         n = X_csc.shape[0]
-        s = n // self.n_chunks
-        pct_chunks, max_chunks = [], []
+        if n == 0:
+            return self
 
-        for i in tqdm(range(self.n_chunks), desc="Computing activation stats"):
-            start = i * s
-            end = (i + 1) * s if i < self.n_chunks - 1 else n
-            Xc = X_csc[start:end]
-            # It seems saving and loading to sparse format can sometimes change the shape of the output, so we catch both cases here
-            # Figure out how to fix later, but for now this is a workaround to avoid errors when the shape is changed from (chunk_size, num_features) to (1, chunk_size, num_features)
-            try: 
-                pct_chunks.append(np.array((Xc > 0).mean(axis=0))[0])
-                max_chunks.append(np.array(Xc.max(axis=0).toarray())[0])
-            except Exception as e:
-                pct_chunks.append(np.array((Xc > 0).mean(axis=0)))
-                max_chunks.append(np.array(Xc.max(axis=0).toarray()))
-        self.pct_active_ = np.stack(pct_chunks).mean(axis=0)
-        self.max_score_ = np.stack(max_chunks).max(axis=0)
+        s = max(1, n // self.n_chunks)
+        starts = range(0, n, s)
+        it = tqdm(starts, desc="Computing activation stats") if progress else starts
+
+        for start in it:
+            Xc = X_csc[start:start + s]
+            # Saving and reloading sparse data can add a leading axis; tolerate
+            # both shapes rather than failing the whole pass.
+            try:
+                counts = np.array((Xc > 0).sum(axis=0))[0]
+                mx = np.array(Xc.max(axis=0).toarray())[0]
+            except IndexError:
+                counts = np.array((Xc > 0).sum(axis=0)).ravel()
+                mx = np.array(Xc.max(axis=0).toarray()).ravel()
+            self._n_active += counts
+            self._max = np.maximum(self._max, mx)
+
+        self._n_obs += n
+        return self
+
+    def finalize(self):
+        """Turn the accumulators into pct_active_ / max_score_."""
+        if self._n_obs == 0:
+            raise ValueError("No patches were accumulated.")
+        # Fraction over the true total, rather than a mean of per-chunk means:
+        # the latter is only correct when every chunk is the same size.
+        self.pct_active_ = self._n_active / self._n_obs
+        self.max_score_ = self._max
         self._is_fitted = True
-
         return self
 
     def plot_feature_selection(self):

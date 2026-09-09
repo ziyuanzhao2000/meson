@@ -1,14 +1,54 @@
+"""Render a per-tile feature over its slide image."""
+
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 import matplotlib.pyplot as plt
-from spatialdata_plot import pl
-import spatialdata
 
+from mesoslide._slides import DEFAULT_TILE_KEY, tile_table_key
+from mesoslide._deprecated import ELEMENT_NAME_HINT, deprecated_kwargs, drop, removed
+
+DEFAULT_IMAGE_KEY = "wsi"
+
+
+def _align_instance_ids(table, element):
+    """Make the table's instance_key dtype match the element's index dtype.
+
+    Stores written before this was fixed hold `tile_id` as str while the tiles
+    GeoDataFrame indexes on int, and SpatialData matches the two by value -- so
+    without this they look unrelated and rendering is refused. Returns the table
+    unchanged when they already agree.
+    """
+    attrs = table.uns.get("spatialdata_attrs", {})
+    key = attrs.get("instance_key")
+    if key is None or key not in table.obs.columns:
+        return table
+
+    target = element.index.dtype
+    if table.obs[key].dtype == target:
+        return table
+    try:
+        aligned = table.obs[key].astype(target)
+    except (TypeError, ValueError):
+        return table
+
+    view = table.copy()
+    view.obs[key] = aligned
+    return view
+
+
+@deprecated_kwargs(
+    image_name=removed(
+        "Pass the WSIData itself as the first argument; each store holds one slide."
+    ),
+    bbox_postfix=drop('_grid_point_bbox', ELEMENT_NAME_HINT),
+    patch_postfix=drop('_grid_point_patch', ELEMENT_NAME_HINT),
+)
 def plot_feature_map(
-    sdata,
-    image_name,
+    wsi,
     feature_name,
-    bbox_postfix='_grid_point_bbox',
-    patch_postfix='_grid_point_patch',
+    *,
+    tile_key=DEFAULT_TILE_KEY,
+    table_key=None,
+    image_key=DEFAULT_IMAGE_KEY,
     cmap=None,
     fill_alpha=0.7,
     figsize=(10, 10),
@@ -17,87 +57,120 @@ def plot_feature_map(
     norm=None,
     method='datashader',
     datashader_reduction='max',
-    return_ax=False
+    return_ax=False,
 ):
     """
-    Plot a feature map overlay on a spatial image.
-    
+    Plot a per-tile feature as an overlay on the slide image.
+
     Parameters
     ----------
-    sdata : spatialdata.SpatialData
-        SpatialData object containing the image and annotations
-    image_name : str
-        Name of the image element to plot
+    wsi : WSIData
+        A single slide, opened with image data attached:
+        ``ezslide.read_wsi(store, attach_images=True)``. A store written by
+        ``wsi.write()`` holds shapes and tables but no pixels, so a slide read
+        back without ``attach_images`` has nothing to render under the overlay.
     feature_name : str
-        Name of the feature column in patch observations to visualize
-    bbox_postfix : str, optional
-        Postfix for the bounding box element name (default: '_grid_point_bbox')
-    patch_postfix : str, optional
-        Postfix for the patch table element name (default: '_grid_point_patch')
+        Feature to colour by. Either an .obs column of the tile table or a
+        .var name in its .X -- in the latter case the scores are copied into
+        .obs first, since spatialdata_plot cannot read .X by var name here.
+    tile_key : str, default='tiles'
+        Tile shapes element; also what the overlay is drawn from.
+    table_key : str, optional
+        Tile table name. Defaults to ``f"{tile_key}_table"``.
+    image_key : str, default='wsi'
+        Image element name, as attached by ezslide.
     cmap : matplotlib colormap, optional
-        Colormap to use for the feature. If None, uses transparent to green colormap
-    fill_alpha : float, optional
-        Alpha value for the overlay (default: 0.7)
-    figsize : tuple, optional
-        Figure size (default: (10, 10))
-    colorbar : bool, optional
-        Whether to show colorbar (default: False)
+        Defaults to transparent-to-green.
+    fill_alpha : float, default=0.7
+    figsize : tuple, default=(10, 10)
+    colorbar : bool, default=False
     title : str, optional
-        Plot title. If None, uses default title format
+        Defaults to the slide's filename.
     norm : matplotlib Normalize, optional
-        Normalization for image rendering. If None, uses Normalize(vmin=0, vmax=255)
-    method : str, optional
-        Rendering method (default: 'datashader')
-    datashader_reduction : str, optional
-        Datashader reduction method (default: 'max')
-    return_ax : bool, optional
-        Whether to return the axes object (default: False)
-        
+        Defaults to Normalize(vmin=0, vmax=255).
+    method : str, default='datashader'
+    datashader_reduction : str, default='max'
+    return_ax : bool, default=False
+
     Returns
     -------
-    fig : matplotlib.figure.Figure
-        Figure object
-    ax : matplotlib.axes.Axes
-        Axes object (only if return_ax=True)
+    fig, or (fig, ax) when return_ax=True
     """
-    # Create mini SpatialData with only necessary elements
-    sdata_mini = spatialdata.SpatialData()
-    sdata_mini[image_name] = sdata[image_name]
-    sdata_mini[f'{image_name}{bbox_postfix}'] = sdata[f'{image_name}{bbox_postfix}']
-    sdata_mini[f'{image_name}{patch_postfix}'] = sdata[f'{image_name}{patch_postfix}']
-    
-    # Set default colormap if not provided
+    from spatialdata_plot import pl  # noqa: F401  (registers the .pl accessor)
+
+    table_key = table_key or tile_table_key(tile_key)
+
+    if image_key not in wsi.images:
+        raise ValueError(
+            f"Slide has no image element '{image_key}', so there is nothing to "
+            "render the overlay on. wsi.write() does not persist WSI pixels -- "
+            "reopen with ezslide.read_wsi(store, attach_images=True). "
+            f"Available images: {list(wsi.images)}"
+        )
+    if tile_key not in wsi.shapes:
+        raise ValueError(
+            f"Slide has no tiles element '{tile_key}'. Available shapes: {list(wsi.shapes)}"
+        )
+
+    table = wsi.tables.get(table_key)
+    if table is None:
+        raise ValueError(
+            f"Slide has no table '{table_key}'. Available tables: {list(wsi.tables)}"
+        )
+
+    # spatialdata_plot colours shapes by an .obs column; bridge from .X when the
+    # feature is a var name (SAE scores live there).
+    if feature_name not in table.obs.columns:
+        if feature_name in table.var_names:
+            from mesoslide._utils import copy_feature_score_to_obs
+            copy_feature_score_to_obs(table, feature_name)
+        else:
+            raise KeyError(
+                f"Feature '{feature_name}' is in neither {table_key}.obs nor its "
+                f".var_names."
+            )
+
     if cmap is None:
         cmap = LinearSegmentedColormap.from_list(
-            'transparent_to_green', 
-            [(1, 1, 1, 0), (0, 1, 0, 0.5)], 
-            N=256
+            'transparent_to_green', [(1, 1, 1, 0), (0, 1, 0, 0.5)], N=256
         )
-    
-    # Set default normalization if not provided
     if norm is None:
         norm = Normalize(vmin=0, vmax=255)
-    
-    # Set default title if not provided
     if title is None:
-        title = f'Image {image_name}'
-    
-    # Create figure and plot
+        title = wsi.name
+
+    # wsidata keeps the WSI image in `_exclude_elements` so wsi.write() does not
+    # try to persist the pixels. That also hides it from SpatialData.__getitem__,
+    # which is what spatialdata_plot resolves elements through -- so rendering
+    # needs a plain SpatialData holding the three elements explicitly.
+    import spatialdata
+
+    view = spatialdata.SpatialData(
+        images={image_key: wsi.images[image_key]},
+        shapes={tile_key: wsi.shapes[tile_key]},
+        tables={table_key: _align_instance_ids(table, wsi.shapes[tile_key])},
+    )
+
+    coordinate_system = (
+        "global" if "global" in view.coordinate_systems else view.coordinate_systems[0]
+    )
+
     fig, ax = plt.subplots(figsize=figsize)
-    sdata_mini.pl.render_images(element=image_name, norm=norm)\
+    view.pl.render_images(element=image_key, norm=norm) \
         .pl.render_shapes(
-            element=f'{image_name}{bbox_postfix}',
+            element=tile_key,
             color=feature_name,
             cmap=cmap,
             fill_alpha=fill_alpha,
             method=method,
-            datashader_reduction=datashader_reduction
-        )\
-        .pl.show(image_name, title=title, colorbar=colorbar, ax=ax)
-    
+            datashader_reduction=datashader_reduction,
+        ) \
+        .pl.show(coordinate_systems=coordinate_system, title=title,
+                 colorbar=colorbar, ax=ax)
+
     ax.set_xticklabels([])
     ax.set_yticklabels([])
-    
+
     if return_ax:
         return fig, ax
     return fig

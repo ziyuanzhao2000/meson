@@ -170,8 +170,12 @@ def embed_patch(
             "y": bounds["miny"].to_numpy(),
             "library_id": pd.Categorical([tile_key] * n_tiles),
         })
-        obs["tile_id"] = obs["tile_id"].astype(str)
-        obs.index = obs["tile_id"]
+        # Index must be str for AnnData, but the tile_id *column* has to keep the
+        # tiles element's own dtype: SpatialData matches instance_key values
+        # against the element index, and a str/int mismatch makes the table look
+        # unrelated to its shapes (spatialdata_plot then refuses to render it).
+        # This mirrors wsidata.io.add_features.
+        obs.index = obs["tile_id"].astype(str)
         table = TableModel.parse(
             AnnData(obs=obs),
             region=tile_key, region_key="library_id", instance_key="tile_id",

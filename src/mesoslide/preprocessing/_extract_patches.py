@@ -1,128 +1,169 @@
-from typing import TYPE_CHECKING, Optional, Union, List
+"""Read the image data behind a set of selected tiles."""
+
+from typing import TYPE_CHECKING, List, Optional, Union
 import warnings
 import numpy as np
 from tqdm import tqdm
 
+from mesoslide._slides import (
+    DEFAULT_TILE_KEY,
+    SLIDE_ID,
+    slide_id_from,
+    tile_table_key,
+)
+
 if TYPE_CHECKING:
-    from spatialdata import SpatialData
     import anndata as ad
+    from wsidata import WSIData
+
+
+def _resolve_slides(slides) -> dict:
+    """Normalise `slides` to {slide_id: WSIData}; a lone slide keys on None."""
+    from wsidata import WSIData
+
+    if isinstance(slides, WSIData):
+        return {None: slides}
+    if isinstance(slides, dict):
+        return slides
+    if isinstance(slides, (list, tuple)):
+        return {slide_id_from(w): w for w in slides}
+    raise TypeError(
+        "slides must be a WSIData, a list of them, or the {slide_id: WSIData} "
+        f"mapping returned by mesoslide.open_slides; got {type(slides).__name__}."
+    )
+
+
+def _tile_size(wsi: "WSIData", tile_key: str) -> tuple:
+    """Tile height/width at level 0, from the slide's own tile spec."""
+    spec = wsi.tile_spec(tile_key)
+    if spec is None:
+        raise ValueError(
+            f"Slide has no tile spec for '{tile_key}'. Tile it first with "
+            "lazyslide.pp.tile_tissues."
+        )
+    return (
+        int(getattr(spec, "base_height", spec.height)),
+        int(getattr(spec, "base_width", spec.width)),
+    )
 
 
 def extract_patches(
-    sdata: "SpatialData",
     patches: "ad.AnnData",
+    slides,
+    *,
+    tile_key: str = DEFAULT_TILE_KEY,
     channel_first: bool = True,
     progress_bar: bool = True,
-    skip_errors: bool = True
+    skip_errors: bool = True,
 ) -> Union[np.ndarray, List[np.ndarray]]:
     """
-    Extract image patches from WSI based on patch table metadata.
+    Read image data for the tiles described by a patch table.
 
-    Extracts patches from whole slide images using bounding box coordinates
-    stored in the patch table. Returns a stacked numpy array if all patches
-    share the same shape, otherwise a list of arrays.
+    Coordinates come from ``patches.obs['x']`` / ``['y']`` (a tile's top-left
+    corner at level 0) and the tile size from each slide's own
+    ``wsi.tile_spec(tile_key)``, rather than from per-row bounds columns.
 
     Parameters
     ----------
-    sdata : SpatialData
-        Spatial data object containing the full WSI images.
     patches : AnnData
-        AnnData object containing patch metadata in .obs.
-        Required columns: 'image', 'xmin', 'xmax', 'ymin', 'ymax'.
+        Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
+        Required .obs columns: 'x', 'y'; plus 'slide_id' when `slides` covers
+        more than one slide.
+    slides : WSIData, list of WSIData, or {slide_id: WSIData}
+        The slides to read from. Use :func:`mesoslide.open_slides` to build the
+        mapping from a cohort manifest. Slides must have image data attached
+        (``ezslide.read_wsi(store, attach_images=True)``); a store written by
+        ``wsi.write()`` holds no pixels on its own.
+    tile_key : str, default='tiles'
     channel_first : bool, default=True
-        If True, each patch has shape (C, H, W) → stacked: (N, C, H, W).
-        If False, each patch has shape (H, W, C) → stacked: (N, H, W, C).
+        True -> each patch (C, H, W), stacked (N, C, H, W).
+        False -> each patch (H, W, C), stacked (N, H, W, C).
     progress_bar : bool, default=True
-        Whether to show tqdm progress bar during extraction.
     skip_errors : bool, default=True
-        If True, failed extractions are skipped and excluded from output.
-        If False, raises exception on first failure.
+        Skip failed reads instead of raising on the first one.
 
     Returns
     -------
-    patches_array : np.ndarray or list of np.ndarray
-        If all patches share the same shape, returns a stacked np.ndarray:
-        - channel_first=True:  (N, C, H, W)
-        - channel_first=False: (N, H, W, C)
-        If shapes differ, returns a list of arrays and emits a warning.
-
-        Note: If skip_errors=True, N may be less than len(patches.obs).
+    np.ndarray or list of np.ndarray
+        Stacked if all patches share a shape, else a list (with a warning).
+        Note N may be < len(patches) when skip_errors=True.
 
     Raises
     ------
     ValueError
-        If required columns are missing from patches.obs, or if no patches
-        were successfully extracted.
-    Exception
-        If skip_errors=False and patch extraction fails.
+        If required columns are missing, a needed slide is absent, or nothing
+        could be read.
 
     Examples
     --------
-    >>> from mesoslide.preprocessing import extract_patches
-    >>>
-    >>> # Extract patches in PyTorch format
-    >>> patches_array = extract_patches(sdata, patch_table, channel_first=True)
-    >>> print(patches_array.shape)  # (100, 3, 224, 224)
-    >>>
-    >>> # Extract for matplotlib visualization
-    >>> patches_array = extract_patches(sdata, patch_table, channel_first=False)
-    >>> plt.imshow(patches_array[0])
+    >>> import mesoslide as ms
+    >>> slides = ms.open_slides(manifest)
+    >>> top = ms.select_top_patches(manifest, 'UNI_SAE_123', n=100)
+    >>> imgs = ms.pp.extract_patches(top, slides, channel_first=False)
 
     Notes
     -----
-    - Patches are computed eagerly into memory (via .compute())
-    - For large batches, consider processing in chunks
-    - Currently optimized for H&E (RGB) images
+    This is for reading a *selected subset*. To iterate every tile of a slide,
+    use ``ezslide.tile_images(wsi, tile_key=...)`` (block-deduping, and what
+    :func:`mesoslide.tl.embed_patch` uses) or ``wsi.iter.tile_images(key)``.
     """
-    from mesoslide._utils import get_base_level
+    slide_map = _resolve_slides(slides)
+    single = set(slide_map) == {None}
 
-    required_cols = ['image', 'xmin', 'xmax', 'ymin', 'ymax']
-    missing_cols = [col for col in required_cols if col not in patches.obs.columns]
-    if missing_cols:
-        raise ValueError(f"patches.obs missing required columns: {missing_cols}")
+    required = ["x", "y"] if single else ["x", "y", SLIDE_ID]
+    missing = [c for c in required if c not in patches.obs.columns]
+    if missing:
+        raise ValueError(
+            f"patches.obs missing required columns: {missing}. "
+            "These come from the tile table written by mesoslide.tl.embed_patch; "
+            f"got: {list(patches.obs.columns)}"
+        )
 
     patch_df = patches.obs
-    extracted_patches = []
+    sizes = {sid: _tile_size(wsi, tile_key) for sid, wsi in slide_map.items()}
 
+    extracted = []
     iterator = patch_df.iterrows()
     if progress_bar:
         iterator = tqdm(iterator, total=len(patch_df), desc="Extracting patches")
 
     for _, patch in iterator:
+        slide_id = None if single else patch[SLIDE_ID]
         try:
-            image_data = get_base_level(sdata[patch.image])[
-                :,
-                int(patch.ymin):int(patch.ymax),
-                int(patch.xmin):int(patch.xmax)
-            ]
-
-            if channel_first:
-                patch_array = image_data.compute().values          # (C, H, W)
-            else:
-                patch_array = image_data.transpose('y', 'x', 'c').compute().values  # (H, W, C)
-
-            extracted_patches.append(patch_array)
-
-        except Exception as e:
+            wsi = slide_map[slide_id]
+        except KeyError:
+            msg = (
+                f"Warning: no slide '{slide_id}' in `slides` "
+                f"(have: {sorted(k for k in slide_map if k is not None)})"
+            )
             if skip_errors:
-                msg = f"Warning: Failed to load patch from {patch.image}: {e}"
                 tqdm.write(msg) if progress_bar else print(msg)
                 continue
-            else:
-                raise
+            raise ValueError(msg.removeprefix("Warning: "))
 
-    if len(extracted_patches) == 0:
+        try:
+            h, w = sizes[slide_id]
+            # read_region returns (H, W, C) uint8 at level 0
+            arr = wsi.read_region(int(patch.x), int(patch.y), w, h)
+            extracted.append(np.moveaxis(arr, -1, 0) if channel_first else arr)
+        except Exception as e:
+            if skip_errors:
+                msg = f"Warning: Failed to read patch at ({patch.x}, {patch.y}) from {slide_id}: {e}"
+                tqdm.write(msg) if progress_bar else print(msg)
+                continue
+            raise
+
+    if len(extracted) == 0:
         raise ValueError("No patches were successfully extracted")
 
-    # Stack if all shapes are identical, otherwise return list
-    shapes = [p.shape for p in extracted_patches]
+    shapes = [p.shape for p in extracted]
     if len(set(shapes)) == 1:
-        return np.stack(extracted_patches, axis=0)
-    else:
-        warnings.warn(
-            f"Patches have inconsistent shapes ({len(set(shapes))} distinct shapes). "
-            "Returning a list instead of a stacked array.",
-            UserWarning,
-            stacklevel=2,
-        )
-        return extracted_patches
+        return np.stack(extracted, axis=0)
+
+    warnings.warn(
+        f"Patches have inconsistent shapes ({len(set(shapes))} distinct shapes). "
+        "Returning a list instead of a stacked array.",
+        UserWarning,
+        stacklevel=2,
+    )
+    return extracted

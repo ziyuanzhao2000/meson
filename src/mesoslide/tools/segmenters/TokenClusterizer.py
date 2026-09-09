@@ -154,7 +154,7 @@ class TokenClusterizer:
     def __call__(
         self,
         images: Union[torch.Tensor, np.ndarray, 'anndata._core.anndata.AnnData'],
-        sdata: Optional['spatialdata.SpatialData'] = None,
+        slides=None,
         output_size: Optional[tuple] = None,
         batch_size: int = 16,
         show_progress: bool = True
@@ -164,13 +164,13 @@ class TokenClusterizer:
         
         Parameters
         ----------
-        images : torch.Tensor, np.ndarray, or pd.DataFrame
+        images : torch.Tensor, np.ndarray, or AnnData
             Input images. Can be:
             - torch.Tensor: (N, C, H, W) in [0, 1]
             - np.ndarray: (N, H, W, C) in [0, 255]
-            - pd.DataFrame: patch table with columns [image, xmin, xmax, ymin, ymax]
-        sdata : spatialdata.SpatialData, optional
-            Required if images is a DataFrame. Used to extract patches.
+            - AnnData: selected tiles, with .obs columns x, y (+ slide_id)
+        slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
+            Required if images is an AnnData. Used to read the tile pixels.
         output_size : tuple, optional
             Target (height, width) for masks. If None, uses input image size.
         batch_size : int, default=16
@@ -190,21 +190,21 @@ class TokenClusterizer:
         >>> patches = np.random.randint(0, 255, (10, 224, 224, 3), dtype=np.uint8)
         >>> masks = clusterizer(patches)
         
-        >>> # Method 2: From patch table
-        >>> top_patches_df = mesoslide.select_top_patches(sdata, ...)
-        >>> masks = clusterizer(top_patches_df, sdata=sdata)
+        >>> # Method 2: From a selected patch table
+        >>> top = mesoslide.select_top_patches(manifest, 'UNI_SAE_123', n=100)
+        >>> masks = clusterizer(top, slides=mesoslide.open_slides(manifest))
         """
-        # Handle DataFrame input - extract patches
-        if hasattr(images, 'obs'):  # It's a AnnData object
-            if sdata is None:
-                raise ValueError("sdata must be provided when images is a DataFrame")
-            
+        # Handle AnnData input - read the underlying tiles
+        if hasattr(images, 'obs'):  # It's an AnnData object
+            if slides is None:
+                raise ValueError("slides must be provided when images is an AnnData")
+
             # Import here to avoid circular dependency
             from mesoslide.preprocessing import extract_patches
-            
+
             if show_progress:
                 print(f"Extracting {len(images)} patches...")
-            images = extract_patches(sdata, images)
+            images = extract_patches(images, slides)
             
         # Convert to tensor if needed
         if isinstance(images, np.ndarray):
@@ -244,14 +244,15 @@ class TokenClusterizer:
     
     def fit(
         self,
-        sdata: 'spatialdata.SpatialData',
-        patch_table_names: Union[str, list],
+        slides,
         feature_name: str,
         n_positive: int = 100,
         n_negative: int = 100,
         batch_size: int = 16,
         show_progress: bool = True,
         take_every: Union[int, None] = None,
+        tile_key: str = 'tiles',
+        image_slides=None,
     ) -> np.ndarray:
         """
         Compute cluster order based on differential abundance between positive and negative patches.
@@ -269,10 +270,8 @@ class TokenClusterizer:
         
         Parameters
         ----------
-        sdata : SpatialData
-            Spatial data object containing images and patch tables
-        patch_table_names : str or list
-            Name(s) of patch tables to sample from
+        slides : slides_table, AnnData, WSIData, or sequence/mapping of either
+            Where to select patches from. See :func:`mesoslide.select_top_patches`.
         feature_name : str
             Feature name to use for patch selection (e.g., 'UNI_SAE_12345')
         n_positive : int, default=100
@@ -283,7 +282,12 @@ class TokenClusterizer:
             Batch size for processing
         show_progress : bool, default=True
             Whether to show progress bars
-        
+        tile_key : str, default='tiles'
+        image_slides : WSIData / list / {slide_id: WSIData}, optional
+            Slides to read pixels from, with image data attached. Defaults to
+            `slides` when that is already a mapping of open slides; otherwise
+            required, since a slides_table alone carries no pixels.
+
         Returns
         -------
         cluster_order : np.ndarray
@@ -293,49 +297,61 @@ class TokenClusterizer:
         Examples
         --------
         >>> # Compute cluster order for a specific SAE feature
-        >>> clusterizer.compute_and_set_cluster_order_from_feature(
-        ...     sdata=sdata,
-        ...     patch_table_names='all_patches',
+        >>> slides = mesoslide.open_slides(manifest)
+        >>> clusterizer.fit(
+        ...     slides,
         ...     feature_name='UNI_SAE_12345',
         ...     n_positive=100,
-        ...     n_negative=100
+        ...     n_negative=100,
         ... )
         >>> # Now the clusterizer will use this ordering when rasterizing
         >>> masks = clusterizer(images)
         """
         from mesoslide._patch_selector import select_top_patches, select_negative_patches
         from mesoslide.preprocessing import extract_patches
-        
+
+        if image_slides is None:
+            if isinstance(slides, dict):
+                image_slides = slides
+            else:
+                raise ValueError(
+                    "fit() needs slides with image data attached to read pixels. "
+                    "Pass image_slides=mesoslide.open_slides(manifest), or pass "
+                    "that mapping as `slides` directly."
+                )
+
         if show_progress:
             print(f"Selecting patches for feature '{feature_name}'...")
-        
-        # Get positive patches (evenly sampled from high-scoring patches)
+
+        # Positive patches: evenly sampled from high-scoring patches
         positive_patches_anndata = select_top_patches(
-            sdata,
-            patch_table_names=patch_table_names,
-            feature_name=feature_name,
+            slides,
+            feature_name,
             n=n_positive,
-            min_score=0,  # Only positive scores
-            take_every=take_every  # Auto-compute stride
+            tile_key=tile_key,
+            min_score=0,          # Only positive scores
+            take_every=take_every,
         )
-        
-        # Get negative patches (evenly sampled from zero-score patches)
+
+        # Negative patches: evenly sampled from zero-score patches
         negative_patches_anndata = select_negative_patches(
-            sdata,
-            patch_table_names=patch_table_names,
-            feature_name=feature_name,
+            slides,
+            feature_name,
             n=n_negative,
-            take_every=None  # Auto-compute stride
+            tile_key=tile_key,
+            take_every=None,      # Auto-compute stride
         )
-        
+
         if show_progress:
-            print(f"Extracting {len(positive_patches_anndata)} positive and {len(negative_patches_anndata)} negative patches...")
-        
-        # Extract actual image patches
-        positive_patches = extract_patches(sdata, positive_patches_anndata, 
-                                          channel_first=True, progress_bar=show_progress)
-        negative_patches = extract_patches(sdata, negative_patches_anndata,
-                                          channel_first=True, progress_bar=show_progress)
+            print(f"Extracting {len(positive_patches_anndata)} positive and "
+                  f"{len(negative_patches_anndata)} negative patches...")
+
+        positive_patches = extract_patches(
+            positive_patches_anndata, image_slides, tile_key=tile_key,
+            channel_first=True, progress_bar=show_progress)
+        negative_patches = extract_patches(
+            negative_patches_anndata, image_slides, tile_key=tile_key,
+            channel_first=True, progress_bar=show_progress)
         
         # Convert to tensors
         positive_patches = torch.from_numpy(positive_patches).float() / 255.0
