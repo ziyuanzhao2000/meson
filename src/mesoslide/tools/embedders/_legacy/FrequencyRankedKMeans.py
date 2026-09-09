@@ -1,4 +1,3 @@
-# /n/scratch/users/z/ziz531/meson/src/meson/tools/embedders/FrequencyRankedKMeans.py
 
 import numpy as np
 from sklearn.base import BaseEstimator, TransformerMixin, ClusterMixin
@@ -52,7 +51,7 @@ class FrequencyRankedKMeans(TransformerMixin, BaseEstimator, ClusterMixin):
     
     Examples
     --------
-    >>> from meson.tools.embedders import FrequencyRankedKMeans
+    >>> from mesoslide.tools.embedders._legacy import FrequencyRankedKMeans
     >>> import numpy as np
     >>> 
     >>> # Generate sample data

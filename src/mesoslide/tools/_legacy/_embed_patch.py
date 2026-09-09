@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 import torch
 import numpy as np
 from torch.utils.data import DataLoader, Dataset
-from meson._readwrite import get_base_level, overwrite_element
-from meson._utils import get_optimal_chunk_size
+from mesoslide._utils import get_base_level, overwrite_element
+from mesoslide._utils import get_optimal_chunk_size
 from tqdm import tqdm
 from scipy.sparse import csc_array, hstack
 import pandas as pd
@@ -27,16 +27,16 @@ if TYPE_CHECKING:
 def _get_embedder(sdata, embedder_name: str, token=None):
     """Convert embedder name to embedder instance"""
     if embedder_name == "test":
-        from meson.tools.embedders._legacy import TestEmbedder
+        from mesoslide.tools.embedders._legacy import TestEmbedder
         return TestEmbedder(), "Vision"
     elif embedder_name in ["uni", "UNI"]:
-        from meson.tools.embedders._legacy import UNIEmbedder
+        from mesoslide.tools.embedders._legacy import UNIEmbedder
         return UNIEmbedder(token=token), "Vision"
     elif embedder_name in ["uni2", "UNI2", "uni2-h", "UNI2-h"]:
-        from meson.tools.embedders._legacy import UNI2Embedder
+        from mesoslide.tools.embedders._legacy import UNI2Embedder
         return UNI2Embedder(token=token), "Vision"
     elif embedder_name in ["kmeans", "KMeans", "FrequencyRankedKMeans"]:
-        from meson.tools.embedders._legacy import FrequencyRankedKMeans
+        from mesoslide.tools.embedders._legacy import FrequencyRankedKMeans
         for model_info in sdata.attrs['models_metadata']:
             model_name = model_info['name']
             if embedder_name == model_name:

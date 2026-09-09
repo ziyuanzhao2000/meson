@@ -16,7 +16,6 @@ __getattr__, __dir__, __all__ = lazy.attach(
             'plot_patch_gallery',
             'plot_patch_gallery_with_saliency',
             'plot_feature_gallery',
-            'extract_patch_images'
         ],
         '_image_grid': ['_plot_image_grid'],
         '_clustered_heatmap': ['plot_clustered_heatmap'],

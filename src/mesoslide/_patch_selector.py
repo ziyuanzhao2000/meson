@@ -16,7 +16,7 @@ from typing import Optional, Sequence, Union
 import numpy as np
 import anndata as ad
 
-from meson._utils import get_patch_scores
+from mesoslide._utils import get_patch_scores
 
 
 # ---------------------------------------------------------------------------

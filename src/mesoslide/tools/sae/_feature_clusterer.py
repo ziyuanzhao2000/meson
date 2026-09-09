@@ -3,7 +3,7 @@ from scipy.sparse import diags, issparse
 from numba import njit, prange
 from typing import Optional, List, Union, Sequence
 
-from meson.plotting import plot_clustered_heatmap, plot_feature_gallery
+from mesoslide.plotting import plot_clustered_heatmap, plot_feature_gallery
 
 
 # ── Low-level IoU kernel ────────────────────────────────────────────────────
@@ -264,8 +264,8 @@ class SAEFeatureClusterer:
         -------
         fig, axs
         """
-        from meson.preprocessing._extract_patches import extract_patches
-        from meson._patch_selector import select_exemplar_patches
+        from mesoslide.preprocessing._extract_patches import extract_patches
+        from mesoslide._patch_selector import select_exemplar_patches
 
         self._check_clustered()
         ordered_idx = self.feature_indices_[self.reordered_idx_]

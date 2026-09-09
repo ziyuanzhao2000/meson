@@ -99,7 +99,7 @@ def plot_feature_spatial_distribution(
         
     Examples
     --------
-    >>> from meson.plotting import plot_feature_spatial_distribution
+    >>> from mesoslide.plotting import plot_feature_spatial_distribution
     >>> 
     >>> # Plot k-means cluster 0 across all images
     >>> plot_feature_spatial_distribution(
@@ -277,7 +277,7 @@ def create_feature_pdf(
         
     Examples
     --------
-    >>> from meson.plotting import create_feature_pdf
+    >>> from mesoslide.plotting import create_feature_pdf
     >>> 
     >>> create_feature_pdf(
     ...     'feature_00017_samples_1-20.png',

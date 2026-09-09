@@ -263,7 +263,7 @@ def resize_image_to_fit(image: Image.Image, max_width: int, max_height: int) -> 
     Examples
     --------
     >>> from PIL import Image
-    >>> from meson.plotting import resize_image_to_fit
+    >>> from mesoslide.plotting import resize_image_to_fit
     >>> 
     >>> img = Image.open('large_image.png')
     >>> resized, w, h = resize_image_to_fit(img, 1920, 1080)

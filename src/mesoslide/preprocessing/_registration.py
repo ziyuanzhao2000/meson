@@ -8,7 +8,7 @@ import joblib
 import numpy as np
 from scipy.ndimage import map_coordinates
 import anndata as ad
-from meson._tifffile_wsi import TiffFile
+from mesoslide.tools._legacy._tifffile_wsi import TiffFile
 
 
 class ForwardTransform:

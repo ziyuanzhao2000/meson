@@ -58,7 +58,7 @@ def extract_patches(
 
     Examples
     --------
-    >>> from meson.preprocessing import extract_patches
+    >>> from mesoslide.preprocessing import extract_patches
     >>>
     >>> # Extract patches in PyTorch format
     >>> patches_array = extract_patches(sdata, patch_table, channel_first=True)
@@ -74,7 +74,7 @@ def extract_patches(
     - For large batches, consider processing in chunks
     - Currently optimized for H&E (RGB) images
     """
-    from meson._readwrite import get_base_level
+    from mesoslide._utils import get_base_level
 
     required_cols = ['image', 'xmin', 'xmax', 'ymin', 'ymax']
     missing_cols = [col for col in required_cols if col not in patches.obs.columns]

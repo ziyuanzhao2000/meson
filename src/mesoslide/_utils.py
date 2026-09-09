@@ -1,7 +1,9 @@
 import os
 import csv
 import heapq
+import shutil
 import xml.etree.ElementTree as ET
+from pathlib import Path
 from tqdm import tqdm
 from collections import defaultdict
 from typing import Optional, Sequence, Union
@@ -13,6 +15,9 @@ from shapely.geometry import Polygon
 import cv2
 import tifffile 
 import anndata as ad
+import spatialdata as sd
+from xarray.core.dataarray import DataArray
+from xarray.core.datatree import DataTree
 
 
 
@@ -131,16 +136,55 @@ def get_optimal_chunk_size(image):
     return (chunksize[0], chunksize[1]*2, chunksize[2]*2)
     # return (3, 512, 512)
 
-# a. write a backup copy of the data
-# def overwrite_element(sdata, name, new_name='_temp'):
-#     sdata[new_name] = sdata[name]
-#     sdata.write_element(new_name)
-#     # b. rewrite the original data
-#     sdata.delete_element_from_disk(name)
-#     sdata.write_element(name)
-#     # c. remove the backup copy
-#     del sdata[new_name]
-#     sdata.delete_element_from_disk(new_name)
+
+# Pyramid/element helpers, relocated here from _legacy/_readwrite.py: that module is
+# gitignored, so tracked modules importing from it broke on a fresh checkout.
+
+def get_base_level(image: "DataTree | DataArray"):
+    if isinstance(image, DataTree):
+        return sd.get_pyramid_levels(image, n=0)
+    else:
+        return image
+
+
+def get_top_level(image: "DataTree | DataArray"):
+    if isinstance(image, DataTree):
+        return sd.get_pyramid_levels(image, n=len(image)-1)
+    else:
+        return image
+
+
+def get_scaling_factor(image: "DataTree | DataArray", level=-1):
+    if level == -1:
+        base_shape = get_base_level(image).shape
+        top_shape = get_top_level(image).shape
+        return np.array(base_shape[1:]) / np.array(top_shape[1:])
+    else:
+        base_shape = get_base_level(image).shape
+        level_shape = sd.get_pyramid_levels(image, n=level).shape
+        return np.array(base_shape[1:]) / np.array(level_shape[1:])
+
+
+def overwrite_element(sdata, name) -> None:
+    """Rewrite an element in place: stage a copy, drop the original, move it back."""
+    if sdata.path is None:
+        raise ValueError("sdata.path must be set (e.g., via sdata.write(path)) before overwriting.")
+    tmp_name = f"{name}__tmp_overwrite"
+    new_element = sdata[name]
+    sdata[tmp_name] = new_element
+    sdata.write_element(tmp_name)
+    group_path = Path(sdata.path) / sdata.locate_element(sdata[name])[0]
+    del sdata[name]
+
+    if group_path.exists():
+        shutil.rmtree(group_path)
+    else:
+        raise FileNotFoundError(f"Expected Zarr group for element '{name}' not found at {group_path}")
+
+    tmp_path = Path(sdata.path) / sdata.locate_element(sdata[tmp_name])[0]
+    shutil.move(str(tmp_path), str(group_path))
+    sdata[name] = new_element
+    del sdata[tmp_name]
 
 ### Code written by Soheil (Soheil_RastgouTalemi@hms.harvard.edu)
 def xml2csv(xml_file_path):

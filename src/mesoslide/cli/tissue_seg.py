@@ -8,8 +8,8 @@ from skimage.filters.rank import entropy
 from skimage.filters import threshold_otsu
 from skimage.measure import label
 from skimage.morphology import remove_small_objects
-from meson._tifffile_wsi import TiffFile
-from meson.preprocessing._normalize_mIF import channelwise_tissue_segmentation
+from mesoslide.tools._legacy._tifffile_wsi import TiffFile
+from mesoslide.preprocessing._normalize_mIF import channelwise_tissue_segmentation
 
 tissue_segmentation = channelwise_tissue_segmentation
 

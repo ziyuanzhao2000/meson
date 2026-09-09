@@ -5,7 +5,7 @@ import torch
 from tqdm import tqdm
 
 if TYPE_CHECKING:
-    from meson.tools.segmenters import TokenClusterizer
+    from mesoslide.tools.segmenters import TokenClusterizer
 
 def extract_saliency_maps(
     patches_array: Union[np.ndarray, List[np.ndarray]],
@@ -57,7 +57,7 @@ def extract_saliency_maps(
 
     Examples
     --------
-    >>> from meson.preprocessing import extract_patches, extract_saliency_maps
+    >>> from mesoslide.preprocessing import extract_patches, extract_saliency_maps
     >>>
     >>> patches = extract_patches(sdata, patch_table, channel_first=True)
     >>> maps = extract_saliency_maps(patches, clusterizers=[c1, c2])

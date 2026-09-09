@@ -1,6 +1,6 @@
 [project]
 name = "mesoslide"
-version = "0.2.1"
+version = "0.2.2"
 description = "A package for mesoscale tissue analysis using multiomics data"
 authors = [{ name = "Ziyuan Zhao", email = "ziyuanzhao@fas.harvard.edu" }]
 readme = "README.md"
@@ -17,9 +17,8 @@ dependencies = [
 ]
 
 [project.scripts]
-mesoslide = "mesoslide:main"
-tissue-seg = "meson.cli.tissue_seg:main"
-chn-norm   = "meson.cli.chn_norm:main"
+tissue-seg = "mesoslide.cli.tissue_seg:main"
+chn-norm   = "mesoslide.cli.chn_norm:main"
 
 [build-system]
 requires = ["uv_build>=0.12.5,<0.13.0"]
@@ -30,5 +29,6 @@ ezslide = { path = "/n/scratch/users/z/ziz531/ezslide", editable = true }
 
 [dependency-groups]
 dev = [
+    "distinctipy>=1.3.4",
     "ipykernel>=7.3.0",
 ]

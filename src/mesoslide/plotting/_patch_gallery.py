@@ -5,14 +5,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from meson.preprocessing._extract_patches import extract_patches
-from meson.preprocessing._extract_saliency_maps import extract_saliency_maps
+from mesoslide.preprocessing._extract_patches import extract_patches
+from mesoslide.preprocessing._extract_saliency_maps import extract_saliency_maps
 from ._image_grid import _plot_image_grid
 
 if TYPE_CHECKING:
     from spatialdata import SpatialData
     import anndata as ad
-    from meson.tools.segmenters import TokenClusterizer
+    from mesoslide.tools.segmenters import TokenClusterizer
 
 def plot_patch_gallery_with_saliency(
     patches: "ad.AnnData",

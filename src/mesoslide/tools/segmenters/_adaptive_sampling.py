@@ -14,7 +14,7 @@ Key change from v1:
       (after processing all current boundary cells).
 """
 import numpy as np
-from meson.tools._legacy._embed_patch import embed_patch
+from mesoslide.tools._legacy._embed_patch import embed_patch
 import torch
 import pickle
 from pathlib import Path
@@ -23,10 +23,10 @@ from dataclasses import dataclass
 
 from tqdm import tqdm
 from skimage.filters import sobel
-from meson._interpolation import interpolate_edt, interpolate_multiclass, interpolate_linear
+from mesoslide._interpolation import interpolate_edt, interpolate_multiclass, interpolate_linear
 import heapq
 
-from meson._readwrite import get_base_level
+from mesoslide._utils import get_base_level
 from collections import deque
 
 

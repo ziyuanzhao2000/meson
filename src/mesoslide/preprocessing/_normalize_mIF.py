@@ -13,7 +13,7 @@ from skimage.filters import threshold_otsu
 from skimage.measure import label
 from skimage.morphology import remove_small_objects
 from scipy.ndimage import binary_dilation
-from meson._tifffile_wsi import TiffFile
+from mesoslide.tools._legacy._tifffile_wsi import TiffFile
 
 def channelwise_tissue_segmentation(wsi_path, out_path, channel_idx, mpp):
     wsi_handle = TiffFile(wsi_path)

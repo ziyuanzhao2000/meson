@@ -3,8 +3,8 @@ import shutil
 import zarr
 import numpy as np
 from numcodecs import Zstd
-from meson._tifffile_wsi import TiffFile
-from meson.preprocessing._normalize_mIF import channelwise_normalization
+from mesoslide.tools._legacy._tifffile_wsi import TiffFile
+from mesoslide.preprocessing._normalize_mIF import channelwise_normalization
 
 
 def finalize_to_zip(out_path):

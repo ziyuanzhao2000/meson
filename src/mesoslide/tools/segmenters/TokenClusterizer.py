@@ -31,8 +31,8 @@ class TokenClusterizer:
     
     Examples
     --------
-    >>> from meson.tools.embedders._legacy import UNIEmbedder
-    >>> from meson.tools.segmenters import TokenClusterizer
+    >>> from mesoslide.tools.embedders._legacy import UNIEmbedder
+    >>> from mesoslide.tools.segmenters import TokenClusterizer
     >>> import torch
     >>> import joblib
     >>> 
@@ -191,7 +191,7 @@ class TokenClusterizer:
         >>> masks = clusterizer(patches)
         
         >>> # Method 2: From patch table
-        >>> top_patches_df = meson.select_top_patches(sdata, ...)
+        >>> top_patches_df = mesoslide.select_top_patches(sdata, ...)
         >>> masks = clusterizer(top_patches_df, sdata=sdata)
         """
         # Handle DataFrame input - extract patches
@@ -200,7 +200,7 @@ class TokenClusterizer:
                 raise ValueError("sdata must be provided when images is a DataFrame")
             
             # Import here to avoid circular dependency
-            from meson.preprocessing import extract_patches
+            from mesoslide.preprocessing import extract_patches
             
             if show_progress:
                 print(f"Extracting {len(images)} patches...")
@@ -303,8 +303,8 @@ class TokenClusterizer:
         >>> # Now the clusterizer will use this ordering when rasterizing
         >>> masks = clusterizer(images)
         """
-        from meson._patch_selector import select_top_patches, select_negative_patches
-        from meson.preprocessing import extract_patches
+        from mesoslide._patch_selector import select_top_patches, select_negative_patches
+        from mesoslide.preprocessing import extract_patches
         
         if show_progress:
             print(f"Selecting patches for feature '{feature_name}'...")
