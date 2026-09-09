@@ -170,7 +170,8 @@ def embed_patch(
             "y": bounds["miny"].to_numpy(),
             "library_id": pd.Categorical([tile_key] * n_tiles),
         })
-        obs.index = obs["tile_id"].astype(str)
+        obs["tile_id"] = obs["tile_id"].astype(str)
+        obs.index = obs["tile_id"]
         table = TableModel.parse(
             AnnData(obs=obs),
             region=tile_key, region_key="library_id", instance_key="tile_id",
