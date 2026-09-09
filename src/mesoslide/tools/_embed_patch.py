@@ -174,8 +174,10 @@ def embed_patch(
         # tiles element's own dtype: SpatialData matches instance_key values
         # against the element index, and a str/int mismatch makes the table look
         # unrelated to its shapes (spatialdata_plot then refuses to render it).
+        # Assign from a bare array so the index inherits no name -- an index
+        # named after a column whose values differ is rejected on write.
         # This mirrors wsidata.io.add_features.
-        obs.index = obs["tile_id"].astype(str)
+        obs.index = obs["tile_id"].astype(str).to_numpy()
         table = TableModel.parse(
             AnnData(obs=obs),
             region=tile_key, region_key="library_id", instance_key="tile_id",

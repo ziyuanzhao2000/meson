@@ -8,6 +8,10 @@ from mesoslide._deprecated import ELEMENT_NAME_HINT, deprecated_kwargs, drop, re
 
 DEFAULT_IMAGE_KEY = "wsi"
 
+# Private obs column the .X -> .obs bridge writes into, kept distinct from the
+# feature name so spatialdata_plot never sees the value in both places.
+_RENDER_COLUMN = "_mesoslide_render_value"
+
 
 def _align_instance_ids(table, element):
     """Make the table's instance_key dtype match the element's index dtype.
@@ -119,11 +123,17 @@ def plot_feature_map(
         )
 
     # spatialdata_plot colours shapes by an .obs column; bridge from .X when the
-    # feature is a var name (SAE scores live there).
+    # feature is a var name (SAE scores live there). The bridged column gets a
+    # private name and lands on a copy: reusing `feature_name` would make the
+    # value ambiguous between .obs and .var, and writing it back would mutate
+    # the caller's table as a side effect of drawing a picture.
+    render_table, color_key = table, feature_name
     if feature_name not in table.obs.columns:
         if feature_name in table.var_names:
             from mesoslide._utils import copy_feature_score_to_obs
-            copy_feature_score_to_obs(table, feature_name)
+            render_table = table.copy()
+            color_key = _RENDER_COLUMN
+            copy_feature_score_to_obs(render_table, feature_name, obs_colname=color_key)
         else:
             raise KeyError(
                 f"Feature '{feature_name}' is in neither {table_key}.obs nor its "
@@ -148,7 +158,7 @@ def plot_feature_map(
     view = spatialdata.SpatialData(
         images={image_key: wsi.images[image_key]},
         shapes={tile_key: wsi.shapes[tile_key]},
-        tables={table_key: _align_instance_ids(table, wsi.shapes[tile_key])},
+        tables={table_key: _align_instance_ids(render_table, wsi.shapes[tile_key])},
     )
 
     coordinate_system = (
@@ -159,7 +169,7 @@ def plot_feature_map(
     view.pl.render_images(element=image_key, norm=norm) \
         .pl.render_shapes(
             element=tile_key,
-            color=feature_name,
+            color=color_key,
             cmap=cmap,
             fill_alpha=fill_alpha,
             method=method,
