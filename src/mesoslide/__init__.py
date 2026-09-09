@@ -4,8 +4,6 @@ import importlib
 __getattr__, __dir__, _ = lazy.attach(__name__, 
     submodules = ['preprocessing', 'tools', 'plotting'],
     submod_attrs = {
-        '_readwrite': ['SpatialData', 'export_patch', 'read_zarr', 'overwrite_element'],
-        '_wsi': ['add_wsi', 'read_wsi'],
         '_settings': ['settings'],
         '_interpolation': ['interpolate_edt', 'interpolate_multiclass', 
                            'interpolate_linear', 'interpolate_patch_max'],
