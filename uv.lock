@@ -1885,12 +1885,13 @@ wheels = [
 
 [[package]]
 name = "mesoslide"
-version = "0.4.0"
+version = "0.5.0"
 source = { editable = "." }
 dependencies = [
     { name = "ezslide" },
     { name = "lazyslide" },
     { name = "lazyslide-models" },
+    { name = "scipy" },
     { name = "spatialdata" },
     { name = "spatialdata-plot" },
     { name = "tifffile" },
@@ -1909,6 +1910,7 @@ requires-dist = [
     { name = "ezslide", editable = "/n/scratch/users/z/ziz531/ezslide" },
     { name = "lazyslide", specifier = ">=0.12.0" },
     { name = "lazyslide-models", specifier = ">=0.0.4" },
+    { name = "scipy" },
     { name = "spatialdata", specifier = ">=0.8" },
     { name = "spatialdata-plot" },
     { name = "tifffile", specifier = ">=2025.5.21" },

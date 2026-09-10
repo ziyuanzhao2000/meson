@@ -1,7 +1,8 @@
-"""feature_extraction's table contract, and its dense/reducer mode."""
+"""feature_extraction's table contract, and its dense/reducer and sparse modes."""
 
 import numpy as np
 import pytest
+from scipy.sparse import csr_matrix
 
 import mesoslide as ms
 
@@ -201,3 +202,137 @@ class TestDenseMode:
             reducer=self._mean_reducer, batch_size=16, device="cpu", save=False,
         )
         assert np.array_equal(table.obsm["pooled_only"], pooled_alone)
+
+
+class TestSparseMode:
+    """feature_extraction(sparse=True, sparse_transform=...)."""
+
+    @staticmethod
+    def _double_transform(pooled):
+        return csr_matrix(pooled[:, :2] * 2)
+
+    def test_sparse_features_shape_and_values(self, one_slide, stub_encoder):
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="stubsparse",
+            sparse=True, sparse_transform=self._double_transform,
+            batch_size=16, device="cpu", save=False,
+        )
+        table = one_slide.tables["tiles_table"]
+        pooled = table.obsm["stubsparse"]
+        assert table.X.shape == (table.n_obs, 2)
+        assert list(table.var_names) == ["stubsparse_sparse_0", "stubsparse_sparse_1"]
+        assert np.allclose(table.X.toarray(), pooled[:, :2] * 2)
+
+    def test_sparse_key_added_overrides_the_default_prefix(self, one_slide, stub_encoder):
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="stubsparse2",
+            sparse=True, sparse_transform=self._double_transform,
+            sparse_key_added="custom_prefix",
+            batch_size=16, device="cpu", save=False,
+        )
+        table = one_slide.tables["tiles_table"]
+        assert list(table.var_names) == ["custom_prefix_0", "custom_prefix_1"]
+
+    def test_already_cached_prefix_is_left_untouched(self, one_slide, stub_encoder):
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="stubsparse3",
+            sparse=True, sparse_transform=self._double_transform,
+            batch_size=16, device="cpu", save=False,
+        )
+        table = one_slide.tables["tiles_table"]
+        sentinel = csr_matrix(np.full((table.n_obs, 2), -1.0, dtype=np.float32))
+        table.X = sentinel
+
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="stubsparse3",
+            sparse=True, sparse_transform=self._double_transform,
+            batch_size=16, device="cpu", save=False,
+        )
+        # need_sparse is False (already cached), so feature_extraction returns
+        # before ever touching the table -- the same object, sentinel intact.
+        table = one_slide.tables["tiles_table"]
+        assert np.array_equal(table.X.toarray(), sentinel.toarray())
+
+    def test_overwrite_replaces_only_its_own_prefix(self, one_slide, stub_encoder):
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="stubsparse4",
+            sparse=True, sparse_transform=self._double_transform,
+            sparse_key_added="prefix_a",
+            batch_size=16, device="cpu", save=False,
+        )
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="stubsparse4",
+            sparse=True, sparse_transform=lambda pooled: csr_matrix(pooled[:, :1] * 3),
+            sparse_key_added="prefix_b",
+            batch_size=16, device="cpu", save=False,
+        )
+        table = one_slide.tables["tiles_table"]
+        assert set(table.var_names) == {"prefix_a_0", "prefix_a_1", "prefix_b_0"}
+
+        cols_b = [i for i, v in enumerate(table.var_names) if v.startswith("prefix_b_")]
+        prefix_b_before = table.X[:, cols_b].toarray()
+
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="stubsparse4",
+            sparse=True, sparse_transform=self._double_transform,
+            sparse_key_added="prefix_a",
+            batch_size=16, device="cpu", save=False,
+            overwrite=True,
+        )
+        table = one_slide.tables["tiles_table"]
+        cols_b_after = [i for i, v in enumerate(table.var_names) if v.startswith("prefix_b_")]
+        assert np.array_equal(table.X[:, cols_b_after].toarray(), prefix_b_before)
+        assert {v for v in table.var_names if v.startswith("prefix_a_")} == {"prefix_a_0", "prefix_a_1"}
+
+    def test_requires_a_sparse_transform(self, one_slide, stub_encoder):
+        with pytest.raises(ValueError, match="sparse_transform"):
+            ms.tl.feature_extraction(
+                one_slide, stub_encoder, key_added="stubsparse_notransform",
+                sparse=True, batch_size=16, device="cpu", save=False,
+            )
+
+    def test_transform_output_shape_is_validated(self, one_slide, stub_encoder):
+        bad_transform = lambda pooled: csr_matrix(pooled[:1, :2])  # wrong n_tiles
+        with pytest.raises(ValueError, match="sparse_transform must return"):
+            ms.tl.feature_extraction(
+                one_slide, stub_encoder, key_added="stubsparse_badshape",
+                sparse=True, sparse_transform=bad_transform,
+                batch_size=16, device="cpu", save=False,
+            )
+
+    def test_pooled_result_is_unaffected_by_sparse_mode(self, one_slide, stub_encoder):
+        table = one_slide.tables["tiles_table"]
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="pooled_only_sparse",
+            batch_size=16, device="cpu", save=False,
+        )
+        pooled_alone = table.obsm["pooled_only_sparse"].copy()
+        del table.obsm["pooled_only_sparse"]
+
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="pooled_only_sparse", sparse=True,
+            sparse_transform=self._double_transform,
+            batch_size=16, device="cpu", save=False,
+        )
+        table = one_slide.tables["tiles_table"]
+        assert np.array_equal(table.obsm["pooled_only_sparse"], pooled_alone)
+
+    def test_sparse_only_call_skips_the_model_when_pooled_is_cached(self, one_slide, stub_encoder):
+        """A sparse-only call against an already-embedded slide must not re-run the encoder."""
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="cached_pooled",
+            batch_size=16, device="cpu", save=False,
+        )
+
+        calls = []
+        orig_encode = stub_encoder.encode_image
+        stub_encoder.encode_image = lambda *a, **k: calls.append(1) or orig_encode(*a, **k)
+        try:
+            ms.tl.feature_extraction(
+                one_slide, stub_encoder, key_added="cached_pooled", sparse=True,
+                sparse_transform=self._double_transform,
+                batch_size=16, device="cpu", save=False,
+            )
+        finally:
+            stub_encoder.encode_image = orig_encode
+        assert calls == []

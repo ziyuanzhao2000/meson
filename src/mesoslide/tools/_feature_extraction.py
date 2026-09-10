@@ -5,17 +5,17 @@ Runs a lazyslide-models vision encoder over the tiles of an ezslide/wsidata
 AnnData table (`slide.tables[table_key]`, default `f"{tile_key}_table"`), one
 `obsm` entry per model. The table is stored under a key distinct from the
 tiles shapes element (`tile_key`) because SpatialData requires element names
-to be unique across *all* element types, not just within one. `.X` is left
-untouched so it stays free for interpretable features (e.g. a sparse
-autoencoder) computed downstream, per AnnData's own layering convention --
+to be unique across *all* element types, not just within one. `.X` holds a
+sparse feature matrix derived from a pooled embedding via `sparse=True` (e.g.
+a sparse autoencoder), per AnnData's own layering convention --
 `sc.pp.neighbors(table, use_rep=key_added)` redirects scanpy's graph/
 clustering calls onto a given `obsm` entry without needing them in `.X`.
 
 Named `feature_extraction` to match lazyslide's own `zs.tl.feature_extraction`.
 `embed_patch` is kept as a deprecated alias.
 
-The SAE and KMeans post-processing branches previously handled by this module
-have moved, unchanged, to `mesoslide.tools._legacy._embed_patch`.
+The KMeans post-processing branch previously handled by this module has
+moved, unchanged, to `mesoslide.tools._legacy._embed_patch`.
 """
 
 from __future__ import annotations
@@ -28,11 +28,13 @@ import numpy as np
 import pandas as pd
 import torch
 from anndata import AnnData
+from scipy.sparse import csr_matrix, hstack, issparse
 from spatialdata.models import TableModel
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 if TYPE_CHECKING:
+    import scipy.sparse as sp
     from lazyslide_models.base import ImageModel
     from wsidata import WSIData
 
@@ -95,6 +97,45 @@ def _validate_reduced_shape(reduced, tokens_shape: tuple) -> torch.Tensor:
     return reduced
 
 
+def _validate_sparse_shape(matrix, n_tiles: int):
+    """Check a sparse_transform's output has one row per tile."""
+    if matrix.shape[0] != n_tiles:
+        raise ValueError(
+            f"sparse_transform must return a matrix of shape ({n_tiles}, M) "
+            f"-- one row per tile -- got {tuple(matrix.shape)}."
+        )
+
+
+def _write_sparse_features(table: AnnData, prefix: str, matrix) -> AnnData:
+    """Write `matrix` into table.X under var names f"{prefix}_0", f"{prefix}_1", ...
+
+    Any existing columns under this prefix are replaced; columns from other
+    prefixes (other sparse_transform calls, or other keys) are preserved.
+    Rebuilds the AnnData rather than mutating in place, since X and var_names
+    must change together -- AnnData validates each against the other's
+    current shape, so assigning them one at a time is rejected.
+    """
+    matrix = matrix if issparse(matrix) else csr_matrix(matrix)
+    new_vars = [f"{prefix}_{i}" for i in range(matrix.shape[1])]
+
+    existing_vars = list(table.var_names)
+    diff_vars = [v for v in existing_vars if not v.startswith(f"{prefix}_")]
+
+    base = table.X
+    base = csr_matrix((table.n_obs, 0)) if base is None else csr_matrix(base)
+    if len(diff_vars) < len(existing_vars):
+        keep_cols = [i for i, v in enumerate(existing_vars) if v in diff_vars]
+        base = base[:, keep_cols]
+
+    return AnnData(
+        X=hstack([base, matrix]).tocsr(),
+        obs=table.obs,
+        var=pd.DataFrame(index=pd.Index(diff_vars + new_vars)),
+        obsm=dict(table.obsm),
+        uns=dict(table.uns),
+    )
+
+
 def feature_extraction(
     slide: "WSIData",
     model: "str | ImageModel",
@@ -105,6 +146,9 @@ def feature_extraction(
     dense: bool = False,
     reducer: "Callable[[torch.Tensor], torch.Tensor] | None" = None,
     dense_key_added: str | None = None,
+    sparse: bool = False,
+    sparse_transform: "Callable[[np.ndarray], sp.spmatrix] | None" = None,
+    sparse_key_added: str | None = None,
     batch_size: int = 32,
     num_workers: int = 0,  # >0 uses multiprocessing_context="spawn" below, since
                             # tensorstore-backed readers aren't fork-safe
@@ -166,6 +210,21 @@ def feature_extraction(
         the model's own `grid_size` when a spatial layout is needed -- token
         order is row-major (`k = row * grid_w + col`), matching timm's own
         patch-token flattening.
+    sparse
+        Also derive a sparse feature matrix from the pooled embedding
+        (`table.obsm[key_added]`) via `sparse_transform`, and write it into
+        `table.X`.
+    sparse_transform
+        Required when `sparse=True` and the result still needs computing.
+        Maps the entire table's pooled embedding, `(N_tiles, D)`, to a sparse
+        feature matrix, `(N_tiles, M)` (e.g. a sparse autoencoder's
+        `.transform()`). Called once per call, not per batch -- unlike
+        `reducer`, it never sees a live `torch.Tensor` mid-loop, and owns any
+        device placement it needs internally.
+    sparse_key_added
+        Prefix for the new `var` names, written as `f"{sparse_key_added}_{i}"`
+        for `i` in `range(M)`. Defaults to `f"{key_added}_sparse"`, mirroring
+        `dense_key_added`'s `f"{key_added}_dense"` default.
     device
         Torch device to run the model on. Defaults to "cuda" if available,
         else "cpu".
@@ -176,9 +235,10 @@ def feature_extraction(
         Run the forward pass under `torch.autocast` (CUDA only).
     overwrite
         Recompute even if a key is already present in the table. Applies
-        independently to `key_added` and `dense_key_added`: an already-cached
-        one is left untouched unless `overwrite=True`, even while the other is
-        being (re)computed.
+        independently to `key_added`, `dense_key_added`, and the
+        `sparse_key_added` var-name prefix: an already-cached one is left
+        untouched unless `overwrite=True`, even while another is being
+        (re)computed.
     save
         Persist the updated table back to the slide's Zarr store via
         `slide.write_element`, which requires `slide` to already be backed
@@ -189,91 +249,121 @@ def feature_extraction(
 
     device = device or ("cuda" if torch.cuda.is_available() else "cpu")
 
-    model, model_name = _resolve_model(model, model_path=model_path, token=token)
-    key_added = key_added or model_name
+    resolved = None  # lazily set to (model_obj, model_name); avoids loading the
+                      # model at all for a sparse-only call against a cached slide
+
+    def resolve_model():
+        nonlocal resolved
+        if resolved is None:
+            resolved = _resolve_model(model, model_path=model_path, token=token)
+        return resolved
+
+    if key_added is None:
+        _, key_added = resolve_model()
     table_key = table_key or f"{tile_key}_table"
     dense_key = dense_key_added or f"{key_added}_dense"
+    sparse_key = sparse_key_added or f"{key_added}_sparse"
 
     table = slide.tables.get(table_key)
     need_pooled = overwrite or table is None or key_added not in table.obsm
     need_dense = dense and (overwrite or table is None or dense_key not in table.obsm)
+    need_sparse = sparse and (
+        overwrite or table is None
+        or not any(v.startswith(f"{sparse_key}_") for v in table.var_names)
+    )
 
-    if not need_pooled and not need_dense:
+    if not need_pooled and not need_dense and not need_sparse:
         return slide
 
-    if need_dense:
-        if reducer is None:
-            raise ValueError(
-                "dense=True requires a reducer callable that maps per-token "
-                "embeddings (B, N_tokens, D) to per-token scalars (B, N_tokens); "
-                "pass reducer=..."
-            )
-        _require_dense_capable(model, model_name)
-
-    model.to(device)
-    model.model.eval()
-    transform = model.get_transform()
-
-    dataset = ezslide.tile_images(
-        slide,
-        tile_key=tile_key,
-        transform=transform,
-        block=block,
-        num_workers=num_workers,
-        cache_size=cache_size,
-    )
-    loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-        multiprocessing_context="spawn" if num_workers > 0 else None,
-    )
-
-    n_tiles = len(dataset)
-    amp_on = bool(amp) and "cuda" in str(device)
-    pooled_outputs, dense_outputs = [], []
-
-    with torch.inference_mode():
-        for batch in tqdm(loader, desc=f"Embedding tiles with {model_name}"):
-            image = batch["image"].to(device, non_blocking=True)
-            with torch.autocast(device_type=device, dtype=torch.float16, enabled=amp_on):
-                if need_pooled:
-                    pooled_outputs.append(model.encode_image(image).float().cpu().numpy())
-                if need_dense:
-                    patch_tokens = model.encode_image_dense(image).patch_tokens
-                    reduced = _validate_reduced_shape(
-                        reducer(patch_tokens), patch_tokens.shape
-                    )
-                    dense_outputs.append(reduced.float().cpu().numpy())
-
-    if table is None:
-        tiles = slide[tile_key]
-        bounds = tiles.bounds
-        obs = pd.DataFrame({
-            "tile_id": tiles["tile_id"].to_numpy() if "tile_id" in tiles.columns
-                       else np.arange(n_tiles),
-            "tissue_id": tiles["tissue_id"].to_numpy() if "tissue_id" in tiles.columns
-                         else 0,
-            "x": bounds["minx"].to_numpy(),
-            "y": bounds["miny"].to_numpy(),
-            "library_id": pd.Categorical([tile_key] * n_tiles),
-        })
-        # Index must be str for AnnData, but the tile_id *column* has to keep the
-        # tiles element's own dtype: SpatialData matches instance_key values
-        # against the element index, and a str/int mismatch makes the table look
-        # unrelated to its shapes (spatialdata_plot then refuses to render it).
-        # Assign from a bare array so the index inherits no name -- an index
-        # named after a column whose values differ is rejected on write.
-        # This mirrors wsidata.io.add_features.
-        obs.index = obs["tile_id"].astype(str).to_numpy()
-        table = TableModel.parse(
-            AnnData(obs=obs),
-            region=tile_key, region_key="library_id", instance_key="tile_id",
+    if need_sparse and sparse_transform is None:
+        raise ValueError(
+            "sparse=True requires a sparse_transform callable that maps the "
+            "pooled embedding (N_tiles, D) to a sparse feature matrix "
+            "(N_tiles, M); pass sparse_transform=..."
         )
-        slide.tables[table_key] = table
 
-    if need_pooled:
-        table.obsm[key_added] = np.vstack(pooled_outputs).astype(np.float32)
-    if need_dense:
-        table.obsm[dense_key] = np.vstack(dense_outputs).astype(np.float32)
+    if need_pooled or need_dense:
+        model, model_name = resolve_model()
+
+        if need_dense:
+            if reducer is None:
+                raise ValueError(
+                    "dense=True requires a reducer callable that maps per-token "
+                    "embeddings (B, N_tokens, D) to per-token scalars (B, N_tokens); "
+                    "pass reducer=..."
+                )
+            _require_dense_capable(model, model_name)
+
+        model.to(device)
+        model.model.eval()
+        transform = model.get_transform()
+
+        dataset = ezslide.tile_images(
+            slide,
+            tile_key=tile_key,
+            transform=transform,
+            block=block,
+            num_workers=num_workers,
+            cache_size=cache_size,
+        )
+        loader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
+            multiprocessing_context="spawn" if num_workers > 0 else None,
+        )
+
+        n_tiles = len(dataset)
+        amp_on = bool(amp) and "cuda" in str(device)
+        pooled_outputs, dense_outputs = [], []
+
+        with torch.inference_mode():
+            for batch in tqdm(loader, desc=f"Embedding tiles with {model_name}"):
+                image = batch["image"].to(device, non_blocking=True)
+                with torch.autocast(device_type=device, dtype=torch.float16, enabled=amp_on):
+                    if need_pooled:
+                        pooled_outputs.append(model.encode_image(image).float().cpu().numpy())
+                    if need_dense:
+                        patch_tokens = model.encode_image_dense(image).patch_tokens
+                        reduced = _validate_reduced_shape(
+                            reducer(patch_tokens), patch_tokens.shape
+                        )
+                        dense_outputs.append(reduced.float().cpu().numpy())
+
+        if table is None:
+            tiles = slide[tile_key]
+            bounds = tiles.bounds
+            obs = pd.DataFrame({
+                "tile_id": tiles["tile_id"].to_numpy() if "tile_id" in tiles.columns
+                           else np.arange(n_tiles),
+                "tissue_id": tiles["tissue_id"].to_numpy() if "tissue_id" in tiles.columns
+                             else 0,
+                "x": bounds["minx"].to_numpy(),
+                "y": bounds["miny"].to_numpy(),
+                "library_id": pd.Categorical([tile_key] * n_tiles),
+            })
+            # Index must be str for AnnData, but the tile_id *column* has to keep the
+            # tiles element's own dtype: SpatialData matches instance_key values
+            # against the element index, and a str/int mismatch makes the table look
+            # unrelated to its shapes (spatialdata_plot then refuses to render it).
+            # Assign from a bare array so the index inherits no name -- an index
+            # named after a column whose values differ is rejected on write.
+            # This mirrors wsidata.io.add_features.
+            obs.index = obs["tile_id"].astype(str).to_numpy()
+            table = TableModel.parse(
+                AnnData(obs=obs),
+                region=tile_key, region_key="library_id", instance_key="tile_id",
+            )
+
+        if need_pooled:
+            table.obsm[key_added] = np.vstack(pooled_outputs).astype(np.float32)
+        if need_dense:
+            table.obsm[dense_key] = np.vstack(dense_outputs).astype(np.float32)
+
+    if need_sparse:
+        matrix = sparse_transform(table.obsm[key_added])
+        _validate_sparse_shape(matrix, len(table))
+        table = _write_sparse_features(table, sparse_key, matrix)
+
+    slide.tables[table_key] = table
 
     if save:
         slide.write_element(table_key, overwrite=True)
