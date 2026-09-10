@@ -494,12 +494,12 @@ def adaptive_sample_wsi(
     if patch_table is None:
         raise ValueError(
             f"Slide '{slide_id}' has no table '{table_key}'; run "
-            "mesoslide.tl.embed_patch on it first."
+            "mesoslide.tl.feature_extraction on it first."
         )
     if embedding_key not in patch_table.obsm:
         raise ValueError(
             f"'{embedding_key}' not in {table_key}.obsm "
-            f"(have: {list(patch_table.obsm)}). Run mesoslide.tl.embed_patch "
+            f"(have: {list(patch_table.obsm)}). Run mesoslide.tl.feature_extraction "
             f"with key_added='{embedding_key}'."
         )
     if image_key not in wsi.images:

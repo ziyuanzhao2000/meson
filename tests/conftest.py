@@ -15,6 +15,7 @@ import os
 import numpy as np
 import pandas as pd
 import pytest
+import torch
 
 TILE_PX = 128
 SLIDE_SHAPE = (1024, 1536)  # (h, w)
@@ -63,38 +64,84 @@ def _build_store(tmpdir, name: str, seed: int, shape=SLIDE_SHAPE):
     return store
 
 
+class StubEncoder:
+    """Minimal ImageModel: enough surface for feature_extraction, no downloads."""
+
+    name = "stub"
+
+    def __init__(self):
+        self.model = torch.nn.Identity()
+
+    def to(self, device):
+        return self
+
+    def get_transform(self):
+        return None
+
+    def encode_image(self, batch):
+        flat = batch.reshape(batch.shape[0], -1).float()
+        return flat[:, :8] / 255.0
+
+
+class StubViTEncoder:
+    """A dense-capable stub: grid_size/patch_size/encode_image_dense, no downloads.
+
+    encode_image_dense is deterministic and independent of image content --
+    token k's embedding is a constant-k vector across every embedding
+    dimension, so a mean-reducer recovers exactly k, and tests can assert
+    against that without depending on real pixel values.
+    """
+
+    name = "vit-stub"
+    grid_size = (2, 2)
+    patch_size = (64, 64)
+    num_prefix_tokens = 1
+    embed_dim = 4
+
+    def __init__(self):
+        self.model = torch.nn.Identity()
+
+    def to(self, device):
+        return self
+
+    def try_compile(self, **kwargs):
+        pass
+
+    def get_transform(self):
+        return None
+
+    def encode_image(self, batch):
+        flat = batch.reshape(batch.shape[0], -1).float()
+        return flat[:, :self.embed_dim] / 255.0
+
+    def encode_image_dense(self, batch):
+        from lazyslide_models.base import DenseTokens
+
+        b = batch.shape[0]
+        n_tokens = self.grid_size[0] * self.grid_size[1]
+        token_idx = torch.arange(n_tokens, dtype=torch.float32)
+        patch_tokens = (
+            token_idx.view(1, n_tokens, 1)
+            .expand(b, n_tokens, self.embed_dim)
+            .clone()
+        )
+        cls_token = torch.zeros(b, self.embed_dim)
+        return DenseTokens(cls_token=cls_token, patch_tokens=patch_tokens)
+
+
 def _add_features(store, seed: int):
     """Attach a deterministic per-tile embedding and score columns to a store.
 
-    Goes through mesoslide.tl.embed_patch with a stub encoder so the table is
-    built by the real code path, then persists it.
+    Goes through mesoslide.tl.feature_extraction with a stub encoder so the
+    table is built by the real code path, then persists it.
     """
     import ezslide
-    import torch
 
     import mesoslide as ms
 
-    class _StubEncoder:
-        """Minimal ImageModel: enough surface for embed_patch, no downloads."""
-
-        name = "stub"
-
-        def __init__(self):
-            self.model = torch.nn.Identity()
-
-        def to(self, device):
-            return self
-
-        def get_transform(self):
-            return None
-
-        def encode_image(self, batch):
-            flat = batch.reshape(batch.shape[0], -1).float()
-            return flat[:, :8] / 255.0
-
     wsi = ezslide.read_wsi(store, attach_images=True)
-    ms.tl.embed_patch(
-        wsi, _StubEncoder(), key_added="stub_embedding",
+    ms.tl.feature_extraction(
+        wsi, StubEncoder(), key_added="stub_embedding",
         batch_size=8, num_workers=0, device="cpu", save=False,
     )
     table = wsi.tables["tiles_table"]
@@ -154,6 +201,18 @@ def open_cohort(manifest):
     yield slides
     for wsi in slides.values():
         wsi.close()
+
+
+@pytest.fixture
+def stub_encoder():
+    """A plain, non-ViT stub encoder -- no grid_size/encode_image_dense."""
+    return StubEncoder()
+
+
+@pytest.fixture
+def vit_stub_encoder():
+    """A dense-capable stub encoder for feature_extraction(dense=True) tests."""
+    return StubViTEncoder()
 
 
 # ---------------------------------------------------------------------------

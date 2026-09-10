@@ -6,7 +6,7 @@ hardcoded bicubic+CenterCrop transform for every timm-backed model it wraps
 what that checkpoint's own timm `pretrained_cfg` declares (e.g. UNI's
 pretrained_cfg says bilinear interpolation, crop_pct=1 -- no crop at all).
 This builds a corrected, config-driven replacement and applies it per-model-
-instance to models resolved by mesoslide.tools.embed_patch, without mutating
+instance to models resolved by mesoslide.tools.feature_extraction, without mutating
 lazyslide_models' global state or touching models that already override
 get_transform themselves (HOptimus, H0Mini, PathOrchestra).
 """

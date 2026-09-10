@@ -95,3 +95,18 @@ def test_current_api_emits_no_deprecation_warnings(manifest):
     with warnings.catch_warnings():
         warnings.simplefilter("error", DeprecationWarning)
         ms.select_top_patches(manifest, "score", n=5)
+
+
+def test_embed_patch_is_a_deprecated_alias_with_identical_output(one_slide, stub_encoder):
+    """embed_patch -> feature_extraction: same warning pattern, bit-identical output."""
+    with pytest.warns(DeprecationWarning, match="feature_extraction"):
+        ms.tl.embed_patch(
+            one_slide, stub_encoder, key_added="via_alias",
+            batch_size=8, device="cpu", save=False,
+        )
+    ms.tl.feature_extraction(
+        one_slide, stub_encoder, key_added="via_current",
+        batch_size=8, device="cpu", save=False,
+    )
+    table = one_slide.tables["tiles_table"]
+    assert np.array_equal(table.obsm["via_alias"], table.obsm["via_current"])

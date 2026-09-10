@@ -105,7 +105,7 @@ def extract_patches(
     -----
     This is for reading a *selected subset*. To iterate every tile of a slide,
     use ``ezslide.tile_images(wsi, tile_key=...)`` (block-deduping, and what
-    :func:`mesoslide.tl.embed_patch` uses) or ``wsi.iter.tile_images(key)``.
+    :func:`mesoslide.tl.feature_extraction` uses) or ``wsi.iter.tile_images(key)``.
     """
     slide_map = _resolve_slides(slides)
     single = set(slide_map) == {None}
@@ -115,7 +115,7 @@ def extract_patches(
     if missing:
         raise ValueError(
             f"patches.obs missing required columns: {missing}. "
-            "These come from the tile table written by mesoslide.tl.embed_patch; "
+            "These come from the tile table written by mesoslide.tl.feature_extraction; "
             f"got: {list(patches.obs.columns)}"
         )
 

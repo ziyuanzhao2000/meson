@@ -124,5 +124,5 @@ class TestSlideSource:
 
     def test_missing_table_names_the_fix(self, one_slide):
         del one_slide.tables["tiles_table"]
-        with pytest.raises(KeyError, match="embed_patch"):
+        with pytest.raises(KeyError, match="feature_extraction"):
             list(SlideSource(one_slide))

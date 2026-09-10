@@ -45,7 +45,7 @@ SLIDE_ID = "slide_id"
 def tile_table_key(tile_key: str = DEFAULT_TILE_KEY) -> str:
     """Name of the AnnData table annotating ``tile_key``.
 
-    Mirrors the default in :func:`mesoslide.tools.embed_patch`: it cannot be
+    Mirrors the default in :func:`mesoslide.tools.feature_extraction`: it cannot be
     ``tile_key`` itself, because SpatialData requires element names to be unique
     across all element types and ``tile_key`` already names the tiles shapes.
     """
@@ -248,7 +248,7 @@ def _require_table(wsi: "WSIData", table_key: str, slide_id: str) -> "AnnData":
     if table is None:
         raise KeyError(
             f"Slide '{slide_id}' has no table '{table_key}'. Run "
-            f"mesoslide.tl.embed_patch (or lazyslide.pp.tile_tissues) on it first; "
+            f"mesoslide.tl.feature_extraction (or lazyslide.pp.tile_tissues) on it first; "
             f"available tables: {list(wsi.tables)}"
         )
     return table
