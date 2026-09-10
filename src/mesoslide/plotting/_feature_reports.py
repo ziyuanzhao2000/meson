@@ -15,7 +15,7 @@ from mesoslide._deprecated import (
     ELEMENT_NAME_HINT, SLIDES_HINT, deprecated_kwargs, drop, removed,
 )
 from ._utils import get_transparent_colormap, resize_image_to_fit
-from ._feature_map import plot_feature_map, DEFAULT_IMAGE_KEY
+from ._feature_map import plot_feature_map
 
 if TYPE_CHECKING:
     from wsidata import WSIData
@@ -58,7 +58,7 @@ def plot_feature_spatial_distribution(
     *,
     output_path: Optional[str] = None,
     tile_key: str = DEFAULT_TILE_KEY,
-    image_key: str = DEFAULT_IMAGE_KEY,
+    image_size: int = 2000,
     cmap: Union[str, LinearSegmentedColormap] = 'transparent_to_green',
     fill_alpha: float = 0.3,
     nrows: Optional[int] = None,
@@ -79,16 +79,18 @@ def plot_feature_spatial_distribution(
     Parameters
     ----------
     slides : slides_table, WSIData, list of WSIData, or {slide_id: WSIData}
-        The cohort. A manifest DataFrame is streamed one slide at a time
-        (images attached automatically); pre-opened slides must already carry
-        image data (``ezslide.read_wsi(store, attach_images=True)``).
+        The cohort. `plot_feature_map`'s background is read lazily via each
+        slide's `wsi.reader`, so `attach_images=True` is not required either
+        way this is passed.
     feature_name : str
         Feature to plot, e.g. 'UNI_SAE_42' or 'kmeans_label_3'. An .obs column
         of the tile table, or a .var name in its .X.
     output_path : str, optional
         Directory to save the composite figure into. Not saved if None.
     tile_key : str, default='tiles'
-    image_key : str, default='wsi'
+    image_size : int, default=2000
+        Max dimension of each panel's background thumbnail; see
+        :func:`mesoslide.plotting.plot_feature_map`.
     cmap : str or LinearSegmentedColormap, default='transparent_to_green'
         'transparent_to_green' / '_red' / '_blue', a matplotlib colormap name,
         or a colormap instance.
@@ -134,7 +136,7 @@ def plot_feature_spatial_distribution(
                     wsi,
                     feature_name,
                     tile_key=tile_key,
-                    image_key=image_key,
+                    image_size=image_size,
                     cmap=cmap,
                     fill_alpha=fill_alpha,
                     figsize=figsize_per_image,
