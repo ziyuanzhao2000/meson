@@ -1,11 +1,9 @@
 import os
 import io
-import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Union, Optional
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
 from matplotlib.colors import LinearSegmentedColormap
 from tqdm import tqdm
 from PIL import Image
@@ -22,13 +20,17 @@ if TYPE_CHECKING:
 
 
 def _iter_plot_slides(slides, tile_key):
-    """Yield (slide_id, wsi) with images attached, from whatever `slides` is."""
+    """Yield (slide_id, wsi) from whatever `slides` is.
+
+    Images are not attached: `plot_feature_map` reads the background via
+    `wsi.reader`/`get_thumbnail`, which works regardless of `attach_images`.
+    """
     import pandas as pd
     from wsidata import WSIData
     from mesoslide._slides import iter_slides, slide_id_from
 
     if isinstance(slides, pd.DataFrame):
-        yield from iter_slides(slides, attach_images=True)
+        yield from iter_slides(slides, attach_images=False)
         return
     if isinstance(slides, WSIData):
         slides = [slides]
@@ -56,7 +58,7 @@ def plot_feature_spatial_distribution(
     slides,
     feature_name: str,
     *,
-    output_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
     tile_key: str = DEFAULT_TILE_KEY,
     image_size: int = 2000,
     cmap: Union[str, LinearSegmentedColormap] = 'transparent_to_green',
@@ -85,7 +87,7 @@ def plot_feature_spatial_distribution(
     feature_name : str
         Feature to plot, e.g. 'UNI_SAE_42' or 'kmeans_label_3'. An .obs column
         of the tile table, or a .var name in its .X.
-    output_path : str, optional
+    output_dir : str, optional
         Directory to save the composite figure into. Not saved if None.
     tile_key : str, default='tiles'
     image_size : int, default=2000
@@ -114,7 +116,7 @@ def plot_feature_spatial_distribution(
     --------
     >>> import mesoslide as ms
     >>> ms.plotting.plot_feature_spatial_distribution(
-    ...     manifest, 'UNI_SAE_42', output_path='reports/', ncols=3
+    ...     manifest, 'UNI_SAE_42', output_dir='reports/', ncols=3
     ... )
     """
     if isinstance(cmap, str):
@@ -123,90 +125,80 @@ def plot_feature_spatial_distribution(
         else:
             cmap = plt.get_cmap(cmap)
 
-    temp_dir = tempfile.mkdtemp()
-    image_paths = []
+    rendered_images = []
 
-    try:
-        rendered = 0
-        for slide_id, wsi in tqdm(
-            _iter_plot_slides(slides, tile_key), desc="Rendering slides"
-        ):
-            try:
-                fig = plot_feature_map(
-                    wsi,
-                    feature_name,
-                    tile_key=tile_key,
-                    image_size=image_size,
-                    cmap=cmap,
-                    fill_alpha=fill_alpha,
-                    figsize=figsize_per_image,
-                    colorbar=colorbar,
-                    title=str(slide_id) if show_titles else '',
-                    method='datashader' if datashader_method else 'rasterize',
-                    datashader_reduction='max',
-                    return_ax=False,
-                )
-            except (KeyError, ValueError) as e:
-                print(f"Warning: skipping slide {slide_id!r}: {e}")
-                continue
-
-            img_path = os.path.join(temp_dir, f'plot_{rendered:03d}.png')
-            fig.savefig(img_path, dpi=dpi, bbox_inches='tight')
-            image_paths.append(img_path)
-            plt.close(fig)
-            rendered += 1
-
-        if not image_paths:
-            raise ValueError(
-                f"No slide could be rendered for feature '{feature_name}'."
+    for slide_id, wsi in tqdm(
+        _iter_plot_slides(slides, tile_key), desc="Rendering slides"
+    ):
+        try:
+            fig = plot_feature_map(
+                wsi,
+                feature_name,
+                tile_key=tile_key,
+                image_size=image_size,
+                cmap=cmap,
+                fill_alpha=fill_alpha,
+                figsize=figsize_per_image,
+                colorbar=colorbar,
+                title=str(slide_id) if show_titles else '',
+                method='datashader' if datashader_method else 'matplotlib',
+                datashader_reduction='max',
+                return_ax=False,
             )
+        except (KeyError, ValueError) as e:
+            print(f"Warning: skipping slide {slide_id!r}: {e}")
+            continue
 
-        if nrows is None:
-            nrows = int(np.ceil(len(image_paths) / ncols))
+        buf = io.BytesIO()
+        fig.savefig(buf, dpi=dpi, format='png')
+        plt.close(fig)
+        buf.seek(0)
+        rendered_images.append(Image.open(buf))
 
-        fig, axes = plt.subplots(
-            nrows, ncols,
-            figsize=(figsize_per_image[0] * ncols, figsize_per_image[1] * nrows)
+    if not rendered_images:
+        raise ValueError(
+            f"No slide could be rendered for feature '{feature_name}'."
         )
 
-        if nrows == 1 and ncols == 1:
-            axes = np.array([[axes]])
-        elif nrows == 1:
-            axes = axes.reshape(1, -1)
-        elif ncols == 1:
-            axes = axes.reshape(-1, 1)
+    if nrows is None:
+        nrows = int(np.ceil(len(rendered_images) / ncols))
 
-        axes_flat = axes.flatten()
+    fig, axes = plt.subplots(
+        nrows, ncols,
+        figsize=(figsize_per_image[0] * ncols, figsize_per_image[1] * nrows)
+    )
 
-        for i, img_path in enumerate(image_paths):
-            axes_flat[i].imshow(mpimg.imread(img_path))
-            axes_flat[i].axis('off')
+    if nrows == 1 and ncols == 1:
+        axes = np.array([[axes]])
+    elif nrows == 1:
+        axes = axes.reshape(1, -1)
+    elif ncols == 1:
+        axes = axes.reshape(-1, 1)
 
-        for i in range(len(image_paths), len(axes_flat)):
-            axes_flat[i].axis('off')
-            axes_flat[i].set_visible(False)
+    axes_flat = axes.flatten()
 
-        plt.tight_layout()
+    for i, image in enumerate(rendered_images):
+        axes_flat[i].imshow(image)
+        axes_flat[i].axis('off')
 
-        if output_path is not None:
-            Path(output_path).mkdir(parents=True, exist_ok=True)
-            output_file = os.path.join(
-                output_path, f'{feature_name}_spatial_distribution.png'
-            )
-            fig.savefig(output_file, bbox_inches='tight', dpi=dpi)
-            print(f"Saved: {output_file}")
+    for i in range(len(rendered_images), len(axes_flat)):
+        axes_flat[i].axis('off')
+        axes_flat[i].set_visible(False)
 
-        if return_fig:
-            return fig
-        plt.close(fig)
-        return None
+    plt.tight_layout()
 
-    finally:
-        for path in image_paths:
-            if os.path.exists(path):
-                os.remove(path)
-        if os.path.exists(temp_dir):
-            os.rmdir(temp_dir)
+    if output_dir is not None:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        output_file = os.path.join(
+            output_dir, f'{feature_name}_spatial_distribution.png'
+        )
+        fig.savefig(output_file, bbox_inches='tight', dpi=dpi)
+        print(f"Saved: {output_file}")
+
+    if return_fig:
+        return fig
+    plt.close(fig)
+    return None
 
 
 def create_feature_pdf(

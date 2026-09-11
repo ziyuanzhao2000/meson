@@ -26,7 +26,7 @@ def plot_patch_gallery_with_saliency(
     slides=None,
     patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     saliency_maps: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
-    output_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
     filename_prefix: str = 'patch_gallery_saliency',
     tile_key: str = DEFAULT_TILE_KEY,
     samples_per_figure: int = 100,
@@ -70,7 +70,7 @@ def plot_patch_gallery_with_saliency(
         np.ndarray shape: (N, K, H, W); list: N elements of (K, H, W).
         If provided, clusterizers are not called (but their feature_names are
         still used for row labels if clusterizers is also given).
-    output_path : str, optional
+    output_dir : str, optional
         Directory to save figures. Required when n_patches > samples_per_figure.
     filename_prefix : str, default='patch_gallery_saliency'
     samples_per_figure : int, default=100
@@ -106,7 +106,7 @@ def plot_patch_gallery_with_saliency(
     >>> slides = ms.open_slides(manifest)
     >>> plot_patch_gallery_with_saliency(
     ...     patches, clusterizers=[c1, c2], slides=slides,
-    ...     output_path='output/saliency'
+    ...     output_dir='output/saliency'
     ... )
     >>>
     >>> # Pre-computed (extract once, plot many times)
@@ -121,7 +121,7 @@ def plot_patch_gallery_with_saliency(
     ...     clusterizers=[c1, c2],   # still used for row labels
     ...     patches_array=np.load("imgs.npy"),
     ...     saliency_maps=np.load("maps.npy"),
-    ...     output_path='output/saliency'
+    ...     output_dir='output/saliency'
     ... )
     """
     
@@ -141,10 +141,10 @@ def plot_patch_gallery_with_saliency(
     n_patches = len(patch_df)
     n_pages = int(np.ceil(n_patches / samples_per_figure))
 
-    if n_pages > 1 and output_path is None:
+    if n_pages > 1 and output_dir is None:
         raise ValueError(
             f"Dataset has {n_patches} patches requiring {n_pages} pages. "
-            "Please provide output_path for multi-page figures."
+            "Please provide output_dir for multi-page figures."
         )
 
     
@@ -292,10 +292,10 @@ def plot_patch_gallery_with_saliency(
             fig.text(-0.01, y, label, fontsize=12,
                      rotation=90, va="center", ha="center")
 
-        if output_path is not None:
-            Path(output_path).mkdir(parents=True, exist_ok=True)
+        if output_dir is not None:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
             fp = os.path.join(
-                output_path,
+                output_dir,
                 f'{filename_prefix}_samples_{start_idx+1}-{end_idx}.png'
             )
             fig.savefig(fp, bbox_inches='tight', dpi=dpi)
@@ -316,7 +316,7 @@ def plot_patch_gallery(
     patches: "ad.AnnData",
     slides=None,
     patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
-    output_path: Optional[str] = None,
+    output_dir: Optional[str] = None,
     filename_prefix: str = 'patch_gallery',
     tile_key: str = DEFAULT_TILE_KEY,
     samples_per_figure: int = 100,
@@ -347,7 +347,7 @@ def plot_patch_gallery(
     patches_array : np.ndarray or list of np.ndarray, optional
         Pre-extracted patches, channel-last (N, H, W, C) or list of (H, W, C).
         If provided, slides is not used for extraction.
-    output_path : str, optional
+    output_dir : str, optional
     filename_prefix : str
     samples_per_figure : int
     patches_per_row : int
@@ -371,11 +371,11 @@ def plot_patch_gallery(
     --------
     >>> # Automatic extraction
     >>> slides = ms.open_slides(manifest)
-    >>> plot_patch_gallery(patches, slides=slides, output_path='output/gallery')
+    >>> plot_patch_gallery(patches, slides=slides, output_dir='output/gallery')
     >>>
     >>> # Pre-computed
     >>> imgs = extract_patches(patches, slides, channel_first=False)
-    >>> plot_patch_gallery(patches, patches_array=imgs, output_path='output/gallery')
+    >>> plot_patch_gallery(patches, patches_array=imgs, output_dir='output/gallery')
     """
     if patches_array is None and slides is None:
         raise ValueError("Either slides or patches_array must be provided.")
@@ -393,10 +393,10 @@ def plot_patch_gallery(
     n_patches = len(patch_df)
     n_pages = int(np.ceil(n_patches / samples_per_figure))
 
-    if n_pages > 1 and output_path is None:
+    if n_pages > 1 and output_dir is None:
         raise ValueError(
             f"Dataset has {n_patches} patches requiring {n_pages} pages. "
-            "Please provide output_path for multi-page figures."
+            "Please provide output_dir for multi-page figures."
         )
 
     # Full-dataset extraction (once, before paging)
@@ -453,11 +453,11 @@ def plot_patch_gallery(
         if title and n_pages == 1:
             fig.suptitle(title, fontsize=16)
 
-        if output_path is not None:
-            Path(output_path).mkdir(parents=True, exist_ok=True)
+        if output_dir is not None:
+            Path(output_dir).mkdir(parents=True, exist_ok=True)
             fp = os.path.join(
-                output_path,
-                f'{filename_prefix}_samples_{start_idx+1}-{end_idx}.png'
+                output_dir,
+                f'{filename_prefix}_patches_{start_idx+1}-{end_idx}.png'
             )
             fig.savefig(fp, bbox_inches='tight', dpi=dpi)
             print(f"Saved: {fp}")

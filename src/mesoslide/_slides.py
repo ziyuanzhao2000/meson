@@ -32,6 +32,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Mapping, Optional, Sequence, Union
 
+# Re-exported for mesoslide's existing public API (ms.iter_slides,
+# ms.open_slides) and reused internally by concat_slides/SlideSource below.
+# These are generic "walk a cohort of WSI stores" utilities with no
+# mesoslide-specific (tile-table/AnnData-schema) assumptions, so they live in
+# ezslide now, one layer below mesoslide's schema-specific code.
+from ezslide import SLIDE_ID, resolve_manifest, iter_slides, open_slides  # noqa: F401
+
 if TYPE_CHECKING:
     import pandas as pd
     from anndata import AnnData
@@ -39,7 +46,6 @@ if TYPE_CHECKING:
 
 
 DEFAULT_TILE_KEY = "tiles"
-SLIDE_ID = "slide_id"
 
 
 def tile_table_key(tile_key: str = DEFAULT_TILE_KEY) -> str:
@@ -70,108 +76,6 @@ def _is_wsidata(obj) -> bool:
 def _is_slides_table(obj) -> bool:
     import pandas as pd
     return isinstance(obj, pd.DataFrame)
-
-
-def _resolve_manifest(slides_table, store_col, slide_id_col):
-    """Normalise a cohort manifest to a list of ``(slide_id, store)`` pairs."""
-    if store_col not in slides_table.columns:
-        raise ValueError(
-            f"slides_table has no '{store_col}' column; pass store_col= to name "
-            f"the column holding the .zarr store paths. Got: {list(slides_table.columns)}"
-        )
-    stores = slides_table[store_col].tolist()
-    if slide_id_col in slides_table.columns:
-        ids = [str(v) for v in slides_table[slide_id_col]]
-    else:
-        ids = [Path(str(s)).stem for s in stores]
-    return list(zip(ids, stores))
-
-
-def iter_slides(
-    slides_table: "pd.DataFrame",
-    *,
-    store_col: str = "store",
-    slide_id_col: str = SLIDE_ID,
-    attach_images: bool = False,
-    close: bool = True,
-) -> Iterator[tuple[str, "WSIData"]]:
-    """Yield ``(slide_id, wsi)`` one slide at a time, closing each before advancing.
-
-    This is the default way to touch a cohort. Peak memory is one slide, not the
-    whole cohort -- see the module docstring for why that is worth the extra
-    pass over the stores.
-
-    Parameters
-    ----------
-    slides_table
-        DataFrame with one row per slide. Must have a column of Zarr store paths
-        (``store_col``). A ``slide_id`` column is used if present, otherwise ids
-        are derived from the store filenames.
-    store_col
-        Column holding the ``.zarr`` store paths written by ``wsi.write()``.
-    slide_id_col
-        Column holding slide ids.
-    attach_images
-        Reattach the WSI pixels. Needed for anything that reads image data
-        (patch extraction, plotting); unnecessary for table-only work.
-    close
-        Close each slide's reader after yielding. Set False only if the caller
-        keeps references to the yielded slides beyond the loop body.
-
-    Yields
-    ------
-    (slide_id, wsi) : (str, WSIData)
-
-    Examples
-    --------
-    >>> import pandas as pd, mesoslide as ms
-    >>> manifest = pd.DataFrame({"store": sorted(glob("cohort/*.zarr"))})
-    >>> for slide_id, wsi in ms.iter_slides(manifest):
-    ...     table = wsi.tables["tiles_table"]
-    """
-    import ezslide
-
-    for slide_id, store in _resolve_manifest(slides_table, store_col, slide_id_col):
-        wsi = ezslide.read_wsi(store, attach_images=attach_images)
-        try:
-            yield slide_id, wsi
-        finally:
-            if close:
-                try:
-                    wsi.close()
-                except Exception:
-                    # A reader that never attached (attach_images=False on some
-                    # backends) has nothing to detach; not worth failing the loop.
-                    pass
-
-
-def open_slides(
-    slides_table: "pd.DataFrame",
-    *,
-    store_col: str = "store",
-    slide_id_col: str = SLIDE_ID,
-    attach_images: bool = True,
-) -> dict[str, "WSIData"]:
-    """Open a whole cohort at once, returning ``{slide_id: WSIData}``.
-
-    The eager counterpart to :func:`iter_slides`, for callers that need random
-    access to pixels across slides -- patch extraction and galleries, where the
-    rows being read come from many slides interleaved.
-
-    This is cheaper than it sounds: a ``WSIData`` holds a lazy reader plus the
-    slide's tables, so the cost is the tables, not the pixels. It is the tile
-    *reads* that are expensive, and those stay bounded by the selected subset.
-    """
-    return {
-        slide_id: wsi
-        for slide_id, wsi in iter_slides(
-            slides_table,
-            store_col=store_col,
-            slide_id_col=slide_id_col,
-            attach_images=attach_images,
-            close=False,
-        )
-    }
 
 
 def concat_slides(
@@ -216,7 +120,7 @@ def concat_slides(
 
     import ezslide
 
-    for slide_id, store in _resolve_manifest(slides_table, store_col, slide_id_col):
+    for slide_id, store in resolve_manifest(slides_table, store_col, slide_id_col):
         wsi = ezslide.read_wsi(store)
         try:
             table = _require_table(wsi, table_key, slide_id)

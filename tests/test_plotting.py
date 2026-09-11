@@ -81,7 +81,7 @@ class TestSpatialDistribution:
     def test_renders_a_grid_over_a_mapping(self, open_cohort, tmp_path):
         fig = ms.plotting.plot_feature_spatial_distribution(
             open_cohort, "score", ncols=3, figsize_per_image=(3, 2), dpi=40,
-            return_fig=True, output_path=str(tmp_path), show_titles=True,
+            return_fig=True, output_dir=str(tmp_path), show_titles=True,
         )
         assert len(fig.axes) == 3
         assert (tmp_path / "score_spatial_distribution.png").exists()
@@ -110,7 +110,7 @@ class TestPatchGallery:
     def test_writes_a_gallery_from_slides(self, manifest, open_cohort, tmp_path):
         sel = ms.select_random_patches(manifest, 6, random_state=3)
         ms.plotting.plot_patch_gallery(
-            sel, slides=open_cohort, output_path=str(tmp_path),
+            sel, slides=open_cohort, output_dir=str(tmp_path),
             filename_prefix="g", patches_per_row=3, show_slide_ids=True,
             progress_bar=False, dpi=40,
         )
@@ -121,7 +121,7 @@ class TestPatchGallery:
         imgs = ms.pp.extract_patches(sel, open_cohort, channel_first=False,
                                      progress_bar=False)
         ms.plotting.plot_patch_gallery(
-            sel, patches_array=imgs, output_path=str(tmp_path),
+            sel, patches_array=imgs, output_dir=str(tmp_path),
             filename_prefix="pre", patches_per_row=2, progress_bar=False, dpi=40,
         )
         assert list(tmp_path.glob("pre_samples_*.png"))
