@@ -46,7 +46,9 @@ class TestSelectTop:
             [w.tables["tiles_table"].obs["score"].to_numpy() for w in open_cohort.values()]
         )
         expected = np.sort(every)[::-1][:10]
-        got = ms.select_top_patches(manifest, "score", n=10).obs["_feature_score"].to_numpy()
+        got = ms.select_top_patches(
+            manifest, "score", n=10, take_every=1
+        ).obs["_feature_score"].to_numpy()
         assert np.allclose(got, expected)
 
     def test_annotates_rank_and_feature(self, manifest):
@@ -79,6 +81,27 @@ class TestSelectTop:
     def test_unknown_feature_names_the_slide(self, manifest):
         with pytest.raises(KeyError, match="slide="):
             ms.select_top_patches(manifest, "no_such_feature", n=5)
+
+    def test_top_fraction_restricts_to_top_percent(self, one_table):
+        dense = ms.select_top_patches(one_table, "score", n=None, min_score=-1, take_every=1)
+        num_qualifying = dense.n_obs
+        out = ms.select_top_patches(one_table, "score", n=5, top_fraction=0.1)
+        top_count = max(1, int(np.ceil(0.1 * num_qualifying)))
+        assert out.n_obs == min(5, top_count)
+        threshold = np.sort(dense.obs["_feature_score"].to_numpy())[::-1][top_count - 1]
+        assert np.all(out.obs["_feature_score"].to_numpy() >= threshold)
+
+    def test_top_fraction_requires_n(self, one_table):
+        with pytest.raises(ValueError, match="n is required"):
+            ms.select_top_patches(one_table, "score", n=None, top_fraction=0.1)
+
+    def test_top_fraction_rejects_take_every(self, one_table):
+        with pytest.raises(ValueError, match="mutually exclusive"):
+            ms.select_top_patches(one_table, "score", n=5, top_fraction=0.1, take_every=2)
+
+    def test_top_fraction_out_of_range_rejected(self, one_table):
+        with pytest.raises(ValueError, match="top_fraction must be"):
+            ms.select_top_patches(one_table, "score", n=5, top_fraction=0)
 
 
 # --- the other selectors ----------------------------------------------------

@@ -8,10 +8,10 @@ from tqdm import tqdm
 from PIL import Image
 
 from mesoslide._slides import DEFAULT_TILE_KEY
-from ._utils import (
-    get_transparent_colormap, resize_image_to_fit, _finish_plot, _load_image_source,
-)
+from mesoslide._patch_selector import select_top_patches
+from ._utils import get_transparent_colormap, resize_image_to_fit, _finish_plot, _load_image_source
 from ._feature_map import plot_feature_map
+from ._patch_gallery import plot_patch_gallery
 
 if TYPE_CHECKING:
     from wsidata import WSIData
@@ -39,6 +39,18 @@ def _iter_plot_slides(slides, tile_key):
         yield slide_id_from(wsi), wsi
 
 
+def _count_plot_slides(slides) -> int:
+    """How many slides `_iter_plot_slides` will yield, without opening any of them."""
+    import pandas as pd
+    from wsidata import WSIData
+
+    if isinstance(slides, (pd.DataFrame, dict)):
+        return len(slides)
+    if isinstance(slides, WSIData):
+        return 1
+    return len(list(slides))
+
+
 def _render_feature_grid(
     slides,
     feature_name: str,
@@ -46,7 +58,7 @@ def _render_feature_grid(
     tile_key: str = DEFAULT_TILE_KEY,
     image_size: int = 2000,
     cmap: Union[str, LinearSegmentedColormap] = 'transparent_to_green',
-    fill_alpha: float = 0.3,
+    fill_alpha: float = 1.0,
     nrows: Optional[int] = None,
     ncols: int = 5,
     figsize_per_image: tuple = (8, 6),
@@ -58,12 +70,12 @@ def _render_feature_grid(
 
     Renders each slide with :func:`mesoslide.plotting.plot_feature_map` and
     composites the results into a single grid figure. Used internally by
-    :func:`create_feature_pdf` for its top panel. Caller owns the returned
+    :func:`create_feature_report` for its top panel. Caller owns the returned
     (open) figure -- must close it.
     """
     if isinstance(cmap, str):
         if cmap in ('transparent_to_green', 'transparent_to_red', 'transparent_to_blue'):
-            cmap = get_transparent_colormap(cmap.split('_')[-1], alpha=fill_alpha)
+            cmap = get_transparent_colormap(cmap.split('_')[-1], alpha=0.5)
         else:
             cmap = plt.get_cmap(cmap)
 
@@ -125,71 +137,105 @@ def _render_feature_grid(
         axes_flat[i].axis('off')
         axes_flat[i].set_visible(False)
 
-    plt.tight_layout()
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0.02, hspace=0.02)
     return fig
 
 
-def create_feature_pdf(
+def create_feature_report(
     slides,
     feature_name: str,
-    bottom_image,
     *,
     output_path: Optional[str] = None,
     return_buffer: bool = False,
     tile_key: str = DEFAULT_TILE_KEY,
     image_size: int = 2000,
     cmap: Union[str, LinearSegmentedColormap] = 'transparent_to_green',
-    fill_alpha: float = 0.3,
+    fill_alpha: float = 1.0,
     ncols: int = 5,
-    nrows: Optional[int] = None,
-    figsize_per_image: tuple = (8, 6),
+    nrows: Optional[int] = 2,
+    figsize_per_image: Optional[tuple] = None,
     colorbar: bool = False,
     show_titles: bool = False,
+    gallery_cmap: str = 'tab10',
+    gallery_nrows: int = 2,
+    top_fraction: float = 0.1,
+    patches_per_row: int = 10,
+    patch_display_size: float = 2.0,
+    show_slide_ids: bool = False,
+    show_scores: bool = False,
+    group_col: Optional[str] = None,
+    border_alpha: float = 1.0,
+    border_extend: float = 0.1,
     page_width_inches: float = 13.33,
     page_height_inches: float = 7.5,
     image_dpi: int = 300,
     margin_dots: int = 150,
+    progress_bar: bool = True,
 ) -> Optional[io.BytesIO]:
     """
-    Create a one-page PDF report for one feature: a grid of each slide's
-    feature map (top) and a supplied patch gallery image (bottom), arranged
-    vertically on a landscape page.
+    Create a one-page PDF report for one feature: a patch gallery (top) and
+    a grid of each slide's feature map (bottom), arranged vertically on a
+    landscape page.
 
     Parameters
     ----------
     slides : slides_table, WSIData, list of WSIData, or {slide_id: WSIData}
-        The cohort for the top panel. See :func:`mesoslide.plotting.plot_feature_map`.
+        The cohort for the bottom panel and for selecting/extracting the
+        top panel's patches.
     feature_name : str
-        Feature to plot in the top panel, and shown as the page title.
-    bottom_image : str, Path, io.BytesIO, PIL.Image, or matplotlib Figure
-        Image for the bottom of the page (e.g. from
-        :func:`mesoslide.plotting.plot_patch_gallery`).
+        Feature to plot in the bottom panel, to select the top panel's
+        patches by, and shown as the page title.
     output_path : str, optional
         Path to save the PDF to. Not saved if None.
     return_buffer : bool, default=False
         Return an in-memory PDF BytesIO.
     tile_key : str, default='tiles'
     image_size : int, default=2000
-        Max dimension of each top-panel slide's background thumbnail; see
+        Max dimension of each bottom-panel slide's background thumbnail; see
         :func:`mesoslide.plotting.plot_feature_map`.
     cmap : str or LinearSegmentedColormap, default='transparent_to_green'
-    fill_alpha : float, default=0.3
+        Feature-map colormap for the bottom panel.
+    fill_alpha : float, default=1.0
     ncols : int, default=5
-    nrows : int, optional
-        Grid rows for the top panel. Derived from ncols if None.
-    figsize_per_image : tuple, default=(8, 6)
+    nrows : int, default=2
+        Grid columns and rows for the bottom panel. If nrows is None, it is
+        computed from ncols and the number of slides.
+    figsize_per_image : tuple, optional
+        Per-slide figure size for the bottom panel. Computed automatically
+        from the space left below the (already-sized) top panel if None.
     colorbar : bool, default=False
     show_titles : bool, default=False
-        Label each top-panel slide with its slide id.
+        Label each bottom-panel slide with its slide id.
+    gallery_cmap : str, default='tab10'
+        Border colormap for the top panel; see :func:`plot_patch_gallery`'s
+        ``cmap``.
+    gallery_nrows : int, default=2
+        Row count for the top panel's patch gallery grid. Together with
+        ``patches_per_row`` this determines how many patches are selected
+        (``gallery_nrows * patches_per_row``, or fewer if not enough
+        qualifying patches exist).
+    top_fraction : float, default=0.1
+        Passed to :func:`mesoslide.select_top_patches` to restrict the top
+        panel's patches to the top fraction of qualifying, score-sorted
+        patches before evenly sampling ``gallery_nrows * patches_per_row``
+        of them.
+    patches_per_row : int, default=10
+    patch_display_size : float, default=2.0
+    show_slide_ids : bool, default=False
+    show_scores : bool, default=False
+    group_col : str, optional
+        Column in patches.obs for the top panel's border colour-coding.
+    border_alpha : float, default=1.0
+    border_extend : float, default=0.1
     page_width_inches : float, default=13.33
         Page width in inches (13.33 = 16:9 aspect ratio).
     page_height_inches : float, default=7.5
         Page height in inches (7.5 = 16:9 aspect ratio).
     image_dpi : int, default=300
-        DPI used both to render the top panel and to size images on the
-        page (assumes both images were rendered at this DPI).
+        DPI used to render both panels and to size images on the page.
     margin_dots : int, default=150
         Margin size in dots/pixels.
+    progress_bar : bool, default=True
 
     Returns
     -------
@@ -197,11 +243,10 @@ def create_feature_pdf(
 
     Examples
     --------
-    >>> from mesoslide.plotting import create_feature_pdf, plot_patch_gallery
+    >>> from mesoslide.plotting import create_feature_report
     >>>
-    >>> bottom = plot_patch_gallery(patches, slides=slides, return_buffer=True)[0]
-    >>> create_feature_pdf(
-    ...     slides, 'UNI_SAE_42', bottom,
+    >>> create_feature_report(
+    ...     slides, 'UNI_SAE_42',
     ...     output_path='feature_00017_report.pdf',
     ... )
 
@@ -209,68 +254,91 @@ def create_feature_pdf(
     -----
     Images are automatically resized to fit within the page while
     maintaining aspect ratio. The scaling accounts for conversion
-    between points (PDF units) and dots (image units).
+    between points (PDF units) and dots (image units). The patch gallery
+    is forced onto a single page regardless of how many patches are given.
     """
     if output_path is None and not return_buffer:
         raise ValueError("Provide output_path and/or return_buffer=True.")
 
-    # reportlab is only needed for the PDF path, so it is imported here rather
-    # than at module scope -- otherwise this module cannot be imported
-    # without it installed unless create_feature_pdf is actually used.
     from reportlab.pdfgen import canvas
     from reportlab.lib.utils import ImageReader
     from reportlab.lib.units import inch
 
-    top_fig = _render_feature_grid(
-        slides, feature_name, tile_key=tile_key, image_size=image_size, cmap=cmap,
-        fill_alpha=fill_alpha, figsize_per_image=figsize_per_image, colorbar=colorbar,
-        show_titles=show_titles, ncols=ncols, nrows=nrows, dpi=image_dpi,
-    )
-    # Reuses the same _finish_plot helper as plot_patch_gallery, rather than
-    # hand-rolling the same savefig-to-buffer-and-close steps again here.
-    top_buf = _finish_plot(top_fig, None, show=False, return_buffer=True, dpi=image_dpi)
-
-    # Set up page dimensions
-    page_width = page_width_inches * inch  # Convert to points
+    page_width = page_width_inches * inch 
     page_height = page_height_inches * inch
 
-    # Create PDF canvas directly into an in-memory buffer
     pdf_buffer = io.BytesIO()
     c = canvas.Canvas(pdf_buffer, pagesize=(page_width, page_height))
 
-    # Scale factor: 72 points per inch / image_dpi dots per inch
     scale_factor = 72 / image_dpi
     c.scale(scale_factor, scale_factor)
 
-    # Convert page dimensions to dots
     page_width_dots = page_width / scale_factor
     page_height_dots = page_height / scale_factor
 
-    # Define margins and available space
     available_width = page_width_dots - 2 * margin_dots
-    available_height = page_height_dots - 3 * margin_dots  # Extra margin for spacing
-    max_image_height = available_height
-
-    # Load and process top image
+    available_height = page_height_dots - 2 * margin_dots 
+    middle_gap = 0
+    patches = select_top_patches(
+        slides, feature_name,
+        n=gallery_nrows * patches_per_row, top_fraction=top_fraction, tile_key=tile_key,
+    )
+    n_patches = len(patches.obs)
+    top_buf = plot_patch_gallery(
+        patches, slides=slides,
+        samples_per_figure=max(n_patches, 1), patches_per_row=patches_per_row,
+        patch_display_size=patch_display_size, show_slide_ids=show_slide_ids,
+        show_scores=show_scores, group_col=group_col, border_alpha=border_alpha,
+        border_extend=border_extend, cmap=gallery_cmap, dpi=image_dpi,
+        return_buffer=True, progress_bar=progress_bar,
+    )[0]
     top_img = _load_image_source(top_buf)
-    top_img_resized, top_width, top_height = resize_image_to_fit(
-        top_img, int(available_width), int(max_image_height)
-    )
+    top_width = available_width
+    top_height = top_img.height * (available_width / top_img.width)
 
-    # Load and process bottom image
-    bottom_img = _load_image_source(bottom_image)
+    height_budget = available_height -  middle_gap
+    min_bottom_height = 0.3 * height_budget
+    if height_budget - top_height < min_bottom_height:
+        top_height = height_budget - min_bottom_height
+        top_width = top_img.width * (top_height / top_img.height)
+    top_img_resized = top_img.resize((int(top_width), int(top_height)), Image.Resampling.LANCZOS)
+
+    remaining_height = height_budget - top_height
+    if figsize_per_image is None:
+        n_rows_effective = nrows if nrows is not None else int(np.ceil(
+            _count_plot_slides(slides) / ncols
+        ))
+        figsize_per_image = (
+            (available_width / image_dpi) / ncols,
+            (remaining_height / image_dpi) / max(n_rows_effective, 1),
+        )
+
+    num_slides = nrows * ncols if nrows is not None else len(slides)
+    if num_slides == len(slides):
+        slides_subset = slides
+    else:
+        import itertools
+        # skip-N sampling to reduce the number of slides to fit in the grid
+        skip = max(1, len(slides) // num_slides)
+        slides_subset = dict(itertools.islice(slides.items(), None, None, skip))
+    
+    bottom_fig = _render_feature_grid(
+        slides_subset, feature_name, tile_key=tile_key, image_size=image_size, cmap=cmap,
+        fill_alpha=fill_alpha, figsize_per_image=figsize_per_image, colorbar=colorbar,
+        show_titles=show_titles, ncols=ncols, nrows=nrows, dpi=image_dpi,
+    )
+    bottom_buf = _finish_plot(bottom_fig, None, show=False, return_buffer=True, dpi=image_dpi)
+    bottom_img = _load_image_source(bottom_buf)
     bottom_img_resized, bottom_width, bottom_height = resize_image_to_fit(
-        bottom_img, int(available_width), int(max_image_height)
+        bottom_img, int(available_width), int(remaining_height)
     )
 
-    # Calculate positions (center images horizontally)
     top_x = margin_dots + (available_width - top_width) / 2
     top_y = page_height_dots - margin_dots - top_height
 
     bottom_x = margin_dots + (available_width - bottom_width) / 2
     bottom_y = margin_dots
 
-    # Convert PIL images to ImageReader objects
     top_img_buffer = io.BytesIO()
     top_img_resized.save(top_img_buffer, format='PNG')
     top_img_buffer.seek(0)
@@ -281,17 +349,14 @@ def create_feature_pdf(
     bottom_img_buffer.seek(0)
     bottom_img_reader = ImageReader(bottom_img_buffer)
 
-    # Draw images on PDF
     c.drawImage(top_img_reader, top_x, top_y, width=top_width, height=top_height)
     c.drawImage(bottom_img_reader, bottom_x, bottom_y, width=bottom_width, height=bottom_height)
 
-    # Add feature name as title
-    c.setFont("Helvetica-Bold", 16)
+    c.setFont("Helvetica-Bold", 60)
     title_x = page_width_dots / 2
     title_y = page_height_dots - 100
     c.drawCentredString(title_x, title_y, f"Feature: {feature_name}")
 
-    # Save PDF
     c.save()
     pdf_buffer.seek(0)
 

@@ -180,7 +180,7 @@ def get_transparent_colormap(
     # Create colormap
     cmap = LinearSegmentedColormap.from_list(
         name,
-        [(1, 1, 1, 0), (*rgb, alpha)],
+        [(1, 1, 1, alpha), (*rgb, 1.0)],
         N=256
     )
     

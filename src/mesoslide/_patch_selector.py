@@ -311,7 +311,8 @@ def select_top_patches(
     *,
     tile_key: str = DEFAULT_TILE_KEY,
     min_score: Optional[float] = None,
-    take_every: Optional[int] = 1,
+    take_every: Optional[int] = None,
+    top_fraction: Optional[float] = None,
 ) -> ad.AnnData:
     """
     Select top-scoring patches for a feature across slides, globally sorted
@@ -323,13 +324,20 @@ def select_top_patches(
     feature_name : str
     n : int, optional
         Hard cap on output size. None returns all qualifying patches (after stride).
+        Required when top_fraction is set.
     tile_key : str
     min_score : float, optional
-        Minimum score threshold; defaults to 0 when n is None, -inf otherwise.
+        Minimum score threshold; defaults to 0 when n is None or top_fraction is
+        set, -inf otherwise.
     take_every : int, optional
         Stride through the score-sorted list before applying the n cap.
-        None auto-computes a stride that spreads the selection over the whole
-        qualifying range.
+        None (default) auto-computes a stride that spreads the selection over
+        the whole qualifying range. Mutually exclusive with top_fraction.
+    top_fraction : float, optional
+        Restrict selection to the top fraction (0, 1] of qualifying (score >
+        min_score) patches, e.g. 0.1 keeps only the top 10% by score. take_every
+        is then auto-derived to spread n picks evenly across that restricted
+        pool. Mutually exclusive with take_every; requires n.
 
     Returns
     -------
@@ -343,8 +351,19 @@ def select_top_patches(
     if n == 0:
         return _empty_result(source)
 
+    if top_fraction is not None:
+        if not (0 < top_fraction <= 1):
+            raise ValueError("top_fraction must be in (0, 1].")
+        if take_every is not None:
+            raise ValueError("top_fraction and take_every are mutually exclusive.")
+        if n is None:
+            raise ValueError("n is required when top_fraction is set.")
+
     if min_score is None:
-        min_score = 0.0 if n is None else float("-inf")
+        if top_fraction is not None:
+            min_score = 0.0
+        else:
+            min_score = 0.0 if n is None else float("-inf")
 
     scores, codes, rows, slide_order = _scored_candidates(
         source, feature_name, lambda s: np.where(s > min_score)[0]
@@ -354,6 +373,11 @@ def select_top_patches(
 
     order = np.argsort(-scores, kind="stable")
     scores, codes, rows = scores[order], codes[order], rows[order]
+
+    if top_fraction is not None:
+        top_count = max(1, int(np.ceil(top_fraction * len(scores))))
+        scores, codes, rows = scores[:top_count], codes[:top_count], rows[:top_count]
+        take_every = max(1, top_count // n)
 
     if take_every is None:
         take_every = max(1, len(scores) // n) if n is not None else 1

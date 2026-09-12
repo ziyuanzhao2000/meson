@@ -11,7 +11,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
             'MARKER_COLOR_DEFAULTS',
             'get_marker_colormap',
         ],
-        '_feature_reports': ['create_feature_pdf'],
+        '_feature_reports': ['create_feature_report'],
         '_patch_gallery': [
             'plot_patch_gallery',
             'plot_patch_gallery_with_saliency',
