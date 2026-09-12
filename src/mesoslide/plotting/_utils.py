@@ -1,3 +1,4 @@
+import io
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
@@ -283,3 +284,40 @@ def resize_image_to_fit(image: Image.Image, max_width: int, max_height: int) -> 
     # Resize image
     resized_image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
     return resized_image, new_width, new_height
+
+
+def _finish_plot(fig, ax, show=True, save=None, return_fig=False, return_buffer=False, dpi=200):
+    """Shared save/return tail for figure-producing plotting functions.
+
+    save: explicit file path or None -- saves there if given. return_buffer:
+    also/instead return an in-memory PNG BytesIO. show=False closes the
+    figure after any save/buffer step. Precedence when multiple outputs are
+    requested: buffer > fig > (None if show else ax).
+    """
+    if save is not None:
+        fig.savefig(save, bbox_inches="tight", dpi=dpi)
+    buf = None
+    if return_buffer:
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", dpi=dpi)
+        buf.seek(0)
+    if not show:
+        plt.close(fig)
+    if return_buffer:
+        return buf
+    if return_fig:
+        return fig, ax
+    return None if show else ax
+
+
+def _load_image_source(source):
+    """Load an image for embedding, from a path, an open buffer, a PIL
+    Image, or a Figure (rendered to PNG in memory)."""
+    if isinstance(source, plt.Figure):
+        buf = io.BytesIO()
+        source.savefig(buf, format='png')
+        buf.seek(0)
+        return Image.open(buf)
+    if isinstance(source, Image.Image):
+        return source
+    return Image.open(source)  # str, Path, or io.BytesIO all work directly

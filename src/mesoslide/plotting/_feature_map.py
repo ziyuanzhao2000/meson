@@ -2,15 +2,19 @@
 
 import math
 
+import numpy as np
+from matplotlib.cm import ScalarMappable
 from matplotlib.colors import LinearSegmentedColormap, Normalize
 import matplotlib.pyplot as plt
 
+from mesoslide._interpolation import interpolate_patch_max
 from mesoslide._slides import DEFAULT_TILE_KEY, tile_table_key
 from mesoslide._deprecated import ELEMENT_NAME_HINT, deprecated_kwargs, drop, removed
 
-# Private obs column the .X -> .obs bridge writes into, kept distinct from the
-# feature name so spatialdata_plot never sees the value in both places.
-_RENDER_COLUMN = "_mesoslide_render_value"
+_RENDERING_HINT = (
+    "plot_feature_map no longer renders via spatialdata_plot; there is only "
+    "one rendering path now (a rasterized max-over-overlap heatmap)."
+)
 
 
 def _axes_device_px(ax):
@@ -28,7 +32,7 @@ def _axes_device_px(ax):
     return max(1.0, pos.width * fw * fig.dpi), max(1.0, pos.height * fh * fig.dpi)
 
 
-def _render_slide_background(ax, wsi, *, image_size=2000, oversample=1.5, norm=None):
+def _render_slide_background(ax, wsi, *, image_size=2000, oversample=1.5):
     """Draw a display-resolution slide image behind the tile overlay.
 
     Reads via wsi.reader.get_region at the pyramid level that resolves the
@@ -45,9 +49,6 @@ def _render_slide_background(ax, wsi, *, image_size=2000, oversample=1.5, norm=N
     axes_px_w, axes_px_h = _axes_device_px(ax)
     level, downsample = resolve_display_level(props, axes_px_w, axes_px_h, oversample=oversample)
 
-    # Safety ceiling on the read's pixel dimensions, mirroring lazyslide's
-    # img_bytes_limit role but expressed in the "max dimension" unit this
-    # function has always documented.
     while (
         (w0 / downsample > image_size or h0 / downsample > image_size)
         and level < props.n_level - 1
@@ -59,72 +60,67 @@ def _render_slide_background(ax, wsi, *, image_size=2000, oversample=1.5, norm=N
     dh = max(1, math.ceil(h0 / downsample))
     image = wsi.reader.get_region(0, 0, dw, dh, level=level)
 
-    if norm is not None:
-        image = norm(image)
     ax.imshow(image, extent=[0, w0, h0, 0], origin="upper", zorder=-100)
-    # Force the full-slide extent regardless of what .pl.show() autoscaled
-    # the axes to from the shapes alone (typically a tighter tiles bbox).
+    # Force the full-slide extent regardless of what the tile overlay
+    # autoscaled the axes to.
     ax.set_xlim(0, w0)
     ax.set_ylim(h0, 0)
 
 
-def _prepare_render_table(table, tiles, feature_name):
-    """Return ``(table_to_render, color_key)``, copying only ``.obs``, only if needed.
+def _tile_centers_and_values(wsi, tile_key, table_key, feature_name):
+    """Return (xs, ys, values, patch_size) for the tile overlay.
 
-    Colouring needs either a ``.var`` name bridged into ``.obs`` (SAE scores
-    live in ``.X``) or the table's instance_key dtype aligned with the tiles
-    index (older stores hold it as str while the tiles GeoDataFrame indexes
-    on int, and SpatialData matches the two by value). Both only ever read
-    ``.X``/write ``.obs``, so when either is needed, a single AnnData is
-    rebuilt that duplicates just ``.obs`` and shares everything else (``.X``,
-    ``.obsm``, ``.varm``, ``.layers``) by reference -- avoiding a full deep
-    copy of per-slide embeddings (~0.2 GB) for what is otherwise a picture.
-    Returns the original table unchanged (no copy) when neither is needed.
+    xs/ys are level-0 pixel tile-center coordinates (interpolate_patch_max's
+    convention); values come straight from the table's .obs column or its
+    .X (via a .var name) -- read-only, no copy or mutation of the table,
+    since nothing here needs an obs column for a downstream library to find.
     """
-    color_key = feature_name
-    needs_bridge = False
-    if feature_name not in table.obs.columns:
-        if feature_name in table.var_names:
-            needs_bridge = True
-            color_key = _RENDER_COLUMN
-        else:
-            raise KeyError(
-                f"Feature '{feature_name}' is in neither the tile table's .obs "
-                f"nor its .var_names."
-            )
+    if tile_key not in wsi.shapes:
+        raise ValueError(
+            f"Slide has no tiles element '{tile_key}'. Available shapes: {list(wsi.shapes)}"
+        )
 
-    attrs = table.uns.get("spatialdata_attrs", {})
-    instance_key = attrs.get("instance_key")
-    aligned = None
+    table = wsi.tables.get(table_key)
+    if table is None:
+        raise ValueError(
+            f"Slide has no table '{table_key}'. Available tables: {list(wsi.tables)}"
+        )
+
+    if feature_name in table.obs.columns:
+        values = table.obs[feature_name].to_numpy()
+    elif feature_name in table.var_names:
+        x = table[:, feature_name].X
+        values = x.toarray()[:, 0] if hasattr(x, "toarray") else np.asarray(x).reshape(-1)
+    else:
+        raise KeyError(
+            f"Feature '{feature_name}' is in neither {table_key}.obs nor its "
+            f".var_names."
+        )
+
+    tiles = wsi.shapes[tile_key]
+    spec = wsi.tile_spec(tile_key)
+    if spec.base_width != spec.base_height:
+        raise ValueError(
+            f"plot_feature_map requires square tiles; got base_width="
+            f"{spec.base_width}, base_height={spec.base_height}."
+        )
+    patch_size = spec.base_width
+
+    instance_key = table.uns.get("spatialdata_attrs", {}).get("instance_key")
     if instance_key is not None and instance_key in table.obs.columns:
-        target = tiles.index.dtype
-        if table.obs[instance_key].dtype != target:
-            try:
-                aligned = table.obs[instance_key].astype(target)
-            except (TypeError, ValueError):
-                aligned = None
+        tile_ids = table.obs[instance_key].to_numpy()
+        try:
+            tile_ids = tile_ids.astype(tiles.index.dtype)
+        except (TypeError, ValueError):
+            pass
+        bounds = tiles.loc[tile_ids].bounds
+    else:
+        # No instance_key to join on; fall back to row order matching tiles.
+        bounds = tiles.bounds
 
-    if not needs_bridge and aligned is None:
-        return table, color_key
-
-    import anndata as ad
-
-    prepared = ad.AnnData(
-        X=table.X,
-        obs=table.obs.copy(),
-        var=table.var,
-        uns=table.uns,
-        obsm=table.obsm,
-        varm=table.varm,
-        layers=table.layers,
-    )
-    if aligned is not None:
-        prepared.obs[instance_key] = aligned
-    if needs_bridge:
-        from mesoslide._utils import copy_feature_score_to_obs
-        copy_feature_score_to_obs(prepared, feature_name, obs_colname=color_key)
-
-    return prepared, color_key
+    xs = bounds["minx"].to_numpy() + patch_size / 2
+    ys = bounds["miny"].to_numpy() + patch_size / 2
+    return xs, ys, values, patch_size
 
 
 @deprecated_kwargs(
@@ -133,6 +129,8 @@ def _prepare_render_table(table, tiles, feature_name):
     ),
     bbox_postfix=drop('_grid_point_bbox', ELEMENT_NAME_HINT),
     patch_postfix=drop('_grid_point_patch', ELEMENT_NAME_HINT),
+    method=drop('datashader', _RENDERING_HINT),
+    datashader_reduction=drop('max', _RENDERING_HINT),
 )
 def plot_feature_map(
     wsi,
@@ -143,17 +141,20 @@ def plot_feature_map(
     image_size=2000,
     oversample=1.5,
     cmap=None,
-    fill_alpha=0.7,
+    fill_alpha=1.0,
     figsize=(10, 10),
     colorbar=False,
     title=None,
     norm=None,
-    method='datashader',
-    datashader_reduction='max',
     return_ax=False,
 ):
     """
     Plot a per-tile feature as an overlay on the slide image.
+
+    Renders by rasterizing tile scores onto a display-resolution canvas
+    (``interpolate_patch_max``, highest score wins on overlap) rather than
+    through spatialdata_plot -- this scales with the rendered figure size,
+    not the number of tiles.
 
     Parameters
     ----------
@@ -163,10 +164,10 @@ def plot_feature_map(
         whether or not the slide was opened with ``attach_images=True``.
     feature_name : str
         Feature to colour by. Either an .obs column of the tile table or a
-        .var name in its .X -- in the latter case the scores are copied into
-        .obs first, since spatialdata_plot cannot read .X by var name here.
+        .var name read from its .X.
     tile_key : str, default='tiles'
-        Tile shapes element; also what the overlay is drawn from.
+        Tile shapes element; also what the overlay is drawn from. Tiles
+        must be square.
     table_key : str, optional
         Tile table name. Defaults to ``f"{tile_key}_table"``.
     image_size : int, default=2000
@@ -179,86 +180,78 @@ def plot_feature_map(
         crispness. Larger is sharper but slower.
     cmap : matplotlib colormap, optional
         Defaults to transparent-to-green.
-    fill_alpha : float, default=0.7
+    fill_alpha : float, default=1.0
+        Multiplies the colormap's own alpha channel (the default cmap is
+        already transparent at low values).
     figsize : tuple, default=(10, 10)
     colorbar : bool, default=False
     title : str, optional
         Defaults to the slide's filename.
     norm : matplotlib Normalize, optional
-        Defaults to Normalize(vmin=0, vmax=255).
-    method : str, default='datashader'
-    datashader_reduction : str, default='max'
+        Defaults to Normalize(vmin=0, vmax=<feature's max value>), so the
+        highest-scoring tile always reaches full color regardless of scale.
     return_ax : bool, default=False
 
     Returns
     -------
     fig, or (fig, ax) when return_ax=True
     """
-    from spatialdata_plot import pl  # noqa: F401  (registers the .pl accessor)
-
     table_key = table_key or tile_table_key(tile_key)
-
-    if tile_key not in wsi.shapes:
-        raise ValueError(
-            f"Slide has no tiles element '{tile_key}'. Available shapes: {list(wsi.shapes)}"
-        )
-
-    table = wsi.tables.get(table_key)
-    if table is None:
-        raise ValueError(
-            f"Slide has no table '{table_key}'. Available tables: {list(wsi.tables)}"
-        )
-
-    render_table, color_key = _prepare_render_table(table, wsi.shapes[tile_key], feature_name)
+    xs, ys, values, patch_size = _tile_centers_and_values(wsi, tile_key, table_key, feature_name)
 
     if cmap is None:
         cmap = LinearSegmentedColormap.from_list(
             'transparent_to_green', [(1, 1, 1, 0), (0, 1, 0, 1)], N=256
         )
     if norm is None:
-        norm = Normalize(vmin=0, vmax=255)
+        vmax = float(np.nanmax(values)) if len(values) else 1.0
+        norm = Normalize(vmin=0, vmax=vmax if vmax > 0 else 1.0)
     if title is None:
         title = wsi.name
 
-    coordinate_system = (
-        "global" if "global" in wsi.coordinate_systems else wsi.coordinate_systems[0]
-    )
+    props = wsi.properties
+    h0, w0 = props.shape
 
     fig, ax = plt.subplots(figsize=figsize)
+    axes_px_w, axes_px_h = _axes_device_px(ax)
 
-    # Render directly on wsi -- no throwaway SpatialData. A shapes-only
-    # render never looks up wsi's image element by name, so the fact that
-    # WSIData excludes it from name-based lookup (write() skips the pixels)
-    # never comes up here. table_name is explicit because a real wsi --
-    # unlike the old throwaway view -- may have more than one table
-    # annotating tile_key (e.g. a bridged feature table alongside tiles_table).
-    render_kwargs = dict(
-        element=tile_key,
-        color=color_key,
-        table_name=table_key,
-        cmap=cmap,
-        fill_alpha=fill_alpha,
-        method=method,
-        datashader_reduction=datashader_reduction,
-    )
-    show_kwargs = dict(
-        coordinate_systems=coordinate_system, title=title, colorbar=colorbar, ax=ax
-    )
+    # The color canvas is computed directly into an array, not read from the
+    # slide file, so -- unlike the background image -- it isn't constrained
+    # to an existing pyramid level: use the continuous display-target
+    # downsample directly, capped by image_size the same way.
+    canvas_downsample = max(1.0, w0 / image_size, h0 / image_size)
+    if axes_px_w and axes_px_h:
+        canvas_downsample = max(
+            canvas_downsample, w0 / (axes_px_w * oversample), h0 / (axes_px_h * oversample)
+        )
 
-    if render_table is table:
-        wsi.pl.render_shapes(**render_kwargs).pl.show(**show_kwargs)
-    else:
-        # Temporarily swap in the prepared table so render_shapes sees the
-        # bridged/aligned column without mutating the caller's table. Not
-        # safe for concurrent calls on the same wsi from multiple threads.
-        wsi.tables[table_key] = render_table
-        try:
-            wsi.pl.render_shapes(**render_kwargs).pl.show(**show_kwargs)
-        finally:
-            wsi.tables[table_key] = table
+    sm = ScalarMappable(norm=norm, cmap=cmap)
+    # Skip samples whose score maps to a fully transparent color -- with the
+    # default transparent-to-green cmap that is every exactly-zero score,
+    # which for a sparse feature (e.g. most SAE activations) is most tiles.
+    # Safe generally: only skipped when doing so is visually identical to
+    # painting it (this cmap already renders a real 0 as invisible).
+    zero_is_invisible = sm.to_rgba(0.0)[3] < 1e-9
+    keep = (values != 0) if zero_is_invisible else np.ones(len(values), dtype=bool)
 
-    _render_slide_background(ax, wsi, image_size=image_size, oversample=oversample, norm=norm)
+    samples = dict(zip(
+        zip(xs[keep].astype(int).tolist(), ys[keep].astype(int).tolist()),
+        values[keep].tolist(),
+    ))
+    canvas = interpolate_patch_max(samples, h0, w0, patch_size, downsample=canvas_downsample)
 
+    rgba = sm.to_rgba(canvas)  # float (H, W, 4) in [0, 1]; keeps cmap's own alpha ramp
+    rgba[..., 3] *= fill_alpha
+    rgba[np.isnan(canvas), 3] = 0  # background is always fully transparent
+    ax.imshow(rgba, extent=[0, w0, h0, 0], origin="upper", zorder=-99)
+    ax.set_axis_off()  # no ticks, no spines, no frame
+    
+    if colorbar:
+        fig.colorbar(sm, ax=ax)
+
+    _render_slide_background(ax, wsi, image_size=image_size, oversample=oversample)
+
+    ax.set_title(title)
     ax.set_xticklabels([])
     ax.set_yticklabels([])
 

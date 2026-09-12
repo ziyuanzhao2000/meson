@@ -1,4 +1,4 @@
-import os
+import io
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple, Union, List
 import numpy as np
@@ -10,6 +10,7 @@ from mesoslide._deprecated import SLIDES_HINT, deprecated_kwargs, removed, renam
 from mesoslide.preprocessing._extract_patches import extract_patches
 from mesoslide.preprocessing._extract_saliency_maps import extract_saliency_maps
 from ._image_grid import _plot_image_grid
+from ._utils import _finish_plot
 
 if TYPE_CHECKING:
     import anndata as ad
@@ -26,8 +27,7 @@ def plot_patch_gallery_with_saliency(
     slides=None,
     patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     saliency_maps: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
-    output_dir: Optional[str] = None,
-    filename_prefix: str = 'patch_gallery_saliency',
+    output_path: Optional[str] = None,
     tile_key: str = DEFAULT_TILE_KEY,
     samples_per_figure: int = 100,
     patches_per_row: int = 10,
@@ -37,10 +37,11 @@ def plot_patch_gallery_with_saliency(
     title: Optional[str] = None,
     dpi: int = 300,
     return_fig: bool = False,
+    return_buffer: bool = False,
     progress_bar: bool = True,
     saliency_alpha_power: float = 1.0,
     batch_size: int = 16,
-) -> Optional[Tuple[plt.Figure, np.ndarray]]:
+) -> Optional[Union[Tuple[plt.Figure, np.ndarray], List[io.BytesIO]]]:
     """
     Create a gallery of patches with H&E images and token cluster saliency maps.
 
@@ -70,9 +71,10 @@ def plot_patch_gallery_with_saliency(
         np.ndarray shape: (N, K, H, W); list: N elements of (K, H, W).
         If provided, clusterizers are not called (but their feature_names are
         still used for row labels if clusterizers is also given).
-    output_dir : str, optional
-        Directory to save figures. Required when n_patches > samples_per_figure.
-    filename_prefix : str, default='patch_gallery_saliency'
+    output_path : str, optional
+        File path to save to. Required when n_patches > samples_per_figure
+        unless return_buffer=True. For multiple pages, the patch range is
+        inserted before the extension (e.g. ``gallery_1-100.png``).
     samples_per_figure : int, default=100
     patches_per_row : int, default=10
     patch_display_size : float, default=2.0
@@ -83,7 +85,10 @@ def plot_patch_gallery_with_saliency(
         Figure suptitle (single-page only).
     dpi : int, default=300
     return_fig : bool, default=False
-        Return (fig, axes) for single-page figures.
+        Return (fig, axes) -- only when there is exactly one page.
+    return_buffer : bool, default=False
+        Return a list of in-memory PNG buffers, one per page (always a
+        list, even for a single page).
     progress_bar : bool, default=True
     saliency_alpha_power : float, default=1.0
         Exponent applied to normalised cluster values for alpha contrast.
@@ -92,8 +97,7 @@ def plot_patch_gallery_with_saliency(
 
     Returns
     -------
-    (fig, axes) or None
-        Returned only when return_fig=True and a single page is produced.
+    (fig, axes), a list of buffers, or None
 
     Raises
     ------
@@ -106,7 +110,7 @@ def plot_patch_gallery_with_saliency(
     >>> slides = ms.open_slides(manifest)
     >>> plot_patch_gallery_with_saliency(
     ...     patches, clusterizers=[c1, c2], slides=slides,
-    ...     output_dir='output/saliency'
+    ...     output_path='output/saliency.png'
     ... )
     >>>
     >>> # Pre-computed (extract once, plot many times)
@@ -121,7 +125,7 @@ def plot_patch_gallery_with_saliency(
     ...     clusterizers=[c1, c2],   # still used for row labels
     ...     patches_array=np.load("imgs.npy"),
     ...     saliency_maps=np.load("maps.npy"),
-    ...     output_dir='output/saliency'
+    ...     output_path='output/saliency.png'
     ... )
     """
     
@@ -141,10 +145,10 @@ def plot_patch_gallery_with_saliency(
     n_patches = len(patch_df)
     n_pages = int(np.ceil(n_patches / samples_per_figure))
 
-    if n_pages > 1 and output_dir is None:
+    if n_pages > 1 and output_path is None and not return_buffer:
         raise ValueError(
             f"Dataset has {n_patches} patches requiring {n_pages} pages. "
-            "Please provide output_dir for multi-page figures."
+            "Please provide output_path and/or return_buffer=True for multi-page figures."
         )
 
     
@@ -203,7 +207,9 @@ def plot_patch_gallery_with_saliency(
         list(saliency_maps) if isinstance(saliency_maps, np.ndarray)
         else saliency_maps
     )
-    
+
+    buffers = [] if return_buffer else None
+
     for page_idx in range(n_pages):
         start_idx = page_idx * samples_per_figure
         end_idx = min(start_idx + samples_per_figure, n_patches)
@@ -292,21 +298,30 @@ def plot_patch_gallery_with_saliency(
             fig.text(-0.01, y, label, fontsize=12,
                      rotation=90, va="center", ha="center")
 
-        if output_dir is not None:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            fp = os.path.join(
-                output_dir,
-                f'{filename_prefix}_samples_{start_idx+1}-{end_idx}.png'
-            )
-            fig.savefig(fp, bbox_inches='tight', dpi=dpi)
-            print(f"Saved: {fp}")
+        fp = None
+        if output_path is not None:
+            fp = output_path if n_pages == 1 else _paged_path(output_path, start_idx, end_idx)
+            Path(fp).parent.mkdir(parents=True, exist_ok=True)
 
-        if n_pages == 1 and return_fig:
+        keep_alive = n_pages == 1 and return_fig and not return_buffer
+        result = _finish_plot(fig, axes, show=keep_alive, save=fp,
+                               return_fig=False, return_buffer=return_buffer, dpi=dpi)
+        if fp is not None:
+            print(f"Saved: {fp}")
+        if return_buffer:
+            buffers.append(result)
+        if n_pages == 1 and return_fig and not return_buffer:
             return fig, axes
 
-        plt.close(fig)
-
+    if return_buffer:
+        return buffers
     return None
+
+def _paged_path(output_path: str, start_idx: int, end_idx: int) -> str:
+    """Derive a per-page file path by inserting the patch range before the extension."""
+    p = Path(output_path)
+    return str(p.with_name(f"{p.stem}_{start_idx + 1}-{end_idx}{p.suffix}"))
+
 
 @deprecated_kwargs(
     sdata=removed(SLIDES_HINT),
@@ -316,8 +331,7 @@ def plot_patch_gallery(
     patches: "ad.AnnData",
     slides=None,
     patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
-    output_dir: Optional[str] = None,
-    filename_prefix: str = 'patch_gallery',
+    output_path: Optional[str] = None,
     tile_key: str = DEFAULT_TILE_KEY,
     samples_per_figure: int = 100,
     patches_per_row: int = 10,
@@ -331,8 +345,9 @@ def plot_patch_gallery(
     title: Optional[str] = None,
     dpi: int = 300,
     return_fig: bool = False,
+    return_buffer: bool = False,
     progress_bar: bool = True,
-) -> Optional[Tuple[plt.Figure, np.ndarray]]:
+) -> Optional[Union[Tuple[plt.Figure, np.ndarray], List[io.BytesIO]]]:
     """
     Create a grid gallery of tissue patches.
 
@@ -347,8 +362,9 @@ def plot_patch_gallery(
     patches_array : np.ndarray or list of np.ndarray, optional
         Pre-extracted patches, channel-last (N, H, W, C) or list of (H, W, C).
         If provided, slides is not used for extraction.
-    output_dir : str, optional
-    filename_prefix : str
+    output_path : str, optional
+        File path to save to. For multiple pages, the patch range is
+        inserted before the extension (e.g. ``gallery_1-100.png``).
     samples_per_figure : int
     patches_per_row : int
     patch_display_size : float
@@ -361,21 +377,25 @@ def plot_patch_gallery(
     title : str, optional
     dpi : int
     return_fig : bool
+        Return (fig, axes) -- only when there is exactly one page.
+    return_buffer : bool
+        Return a list of in-memory PNG buffers, one per page (always a
+        list, even for a single page).
     progress_bar : bool
 
     Returns
     -------
-    (fig, axes) or None
+    (fig, axes), a list of buffers, or None
 
     Examples
     --------
     >>> # Automatic extraction
     >>> slides = ms.open_slides(manifest)
-    >>> plot_patch_gallery(patches, slides=slides, output_dir='output/gallery')
+    >>> plot_patch_gallery(patches, slides=slides, output_path='output/gallery.png')
     >>>
     >>> # Pre-computed
     >>> imgs = extract_patches(patches, slides, channel_first=False)
-    >>> plot_patch_gallery(patches, patches_array=imgs, output_dir='output/gallery')
+    >>> plot_patch_gallery(patches, patches_array=imgs, output_path='output/gallery.png')
     """
     if patches_array is None and slides is None:
         raise ValueError("Either slides or patches_array must be provided.")
@@ -393,10 +413,10 @@ def plot_patch_gallery(
     n_patches = len(patch_df)
     n_pages = int(np.ceil(n_patches / samples_per_figure))
 
-    if n_pages > 1 and output_dir is None:
+    if n_pages > 1 and output_path is None and not return_buffer:
         raise ValueError(
             f"Dataset has {n_patches} patches requiring {n_pages} pages. "
-            "Please provide output_dir for multi-page figures."
+            "Please provide output_path and/or return_buffer=True for multi-page figures."
         )
 
     # Full-dataset extraction (once, before paging)
@@ -415,6 +435,8 @@ def plot_patch_gallery(
         list(patches_array) if isinstance(patches_array, np.ndarray)
         else patches_array
     )
+
+    buffers = [] if return_buffer else None
 
     for page_idx in range(n_pages):
         start_idx = page_idx * samples_per_figure
@@ -453,20 +475,23 @@ def plot_patch_gallery(
         if title and n_pages == 1:
             fig.suptitle(title, fontsize=16)
 
-        if output_dir is not None:
-            Path(output_dir).mkdir(parents=True, exist_ok=True)
-            fp = os.path.join(
-                output_dir,
-                f'{filename_prefix}_patches_{start_idx+1}-{end_idx}.png'
-            )
-            fig.savefig(fp, bbox_inches='tight', dpi=dpi)
-            print(f"Saved: {fp}")
+        fp = None
+        if output_path is not None:
+            fp = output_path if n_pages == 1 else _paged_path(output_path, start_idx, end_idx)
+            Path(fp).parent.mkdir(parents=True, exist_ok=True)
 
-        if n_pages == 1 and return_fig:
+        keep_alive = n_pages == 1 and return_fig and not return_buffer
+        result = _finish_plot(fig, axs, show=keep_alive, save=fp,
+                               return_fig=False, return_buffer=return_buffer, dpi=dpi)
+        if fp is not None:
+            print(f"Saved: {fp}")
+        if return_buffer:
+            buffers.append(result)
+        if n_pages == 1 and return_fig and not return_buffer:
             return fig, axs
 
-        plt.close(fig)
-
+    if return_buffer:
+        return buffers
     return None
 
 def plot_feature_gallery(

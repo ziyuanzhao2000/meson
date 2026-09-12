@@ -7,6 +7,7 @@ dense array via several strategies:
 - :func:`interpolate_edt`        – binary foreground/background EDT
 - :func:`interpolate_multiclass` – multi-class Voronoi via single EDT pass
 - :func:`interpolate_linear`     – continuous values via scipy griddata
+- :func:`interpolate_patch_max`  – fixed-size squares, highest score wins on overlap
 """
 from typing import Dict, Tuple, Optional, List, Union
 
@@ -217,55 +218,77 @@ def interpolate_patch_max(
     height: int,
     width: int,
     patch_size: int,
-    downsample: int = 1,
+    downsample: float = 1,
+    background: float = np.nan,
 ) -> np.ndarray:
     """
     Rasterize sparse sample scores by painting filled squares of size
-    ``patch_size`` centred on each sample coordinate.  Patches are drawn
-    in ascending score order so the highest score wins on overlap.
+    ``patch_size`` centred on each sample coordinate. Highest score wins
+    on overlap.
+
+    Vectorized: one ``np.maximum.at`` scatter over every sample at once,
+    not a per-sample loop, so cost scales with ``(patch_size / downsample)
+    ** 2`` per sample rather than with how many samples there are -- keep
+    ``downsample`` large enough that each patch covers only a handful of
+    output pixels (e.g. display resolution) for this to stay cheap
+    regardless of sample count.
 
     Parameters
     ----------
     samples : Dict[Tuple[int, int], float]
-        Dictionary mapping (x, y) pixel coordinates to scalar scores.
+        Dictionary mapping (x, y) pixel coordinates (patch centers) to
+        scalar scores.
     height : int
         Full-resolution canvas height.
     width : int
         Full-resolution canvas width.
     patch_size : int
         Side length (in full-resolution pixels) of each painted square.
-    downsample : int, default=1
+    downsample : float, default=1
         Factor by which to downsample the canvas before painting.
         Coordinates and patch_size are scaled accordingly.
+    background : float, default=nan
+        Value assigned to pixels no patch covers. Defaults to NaN so it is
+        distinguishable from a real score of exactly 0.
 
     Returns
     -------
     out : np.ndarray, shape (out_height, out_width), dtype float32
-        Rasterized score map; background pixels are 0.
+        Rasterized score map; uncovered pixels are ``background``.
     """
-    out_height = height // downsample
-    out_width  = width  // downsample
-    half       = (patch_size // downsample) // 2
+    out_height = int(round(height / downsample))
+    out_width = int(round(width / downsample))
+    half = max(1, int(round((patch_size / downsample) / 2)))
 
-    out = np.zeros((out_height, out_width), dtype=np.float32)
+    out = np.full((out_height, out_width), background, dtype=np.float32)
+    if not samples:
+        return out
 
-    # Sort ascending so highest score is painted last (wins on overlap)
-    coords  = np.array(list(samples.keys()))   # (N, 2)  col=x, row=y
-    scores  = np.array(list(samples.values()), dtype=np.float32)  # (N,)
-    order   = np.argsort(scores)
+    coords = np.asarray(list(samples.keys()), dtype=np.float64)  # (N, 2) col=x, row=y
+    scores = np.asarray(list(samples.values()), dtype=np.float32)
 
-    for idx in order:
-        x, y = coords[idx]
-        score = scores[idx]
+    xi = np.round(coords[:, 0] / downsample).astype(np.int64)
+    yi = np.round(coords[:, 1] / downsample).astype(np.int64)
 
-        xi = int(round(x / downsample))
-        yi = int(round(y / downsample))
+    offsets = np.arange(-half, half)
+    dy, dx = np.meshgrid(offsets, offsets, indexing="ij")
+    dy = dy.ravel()
+    dx = dx.ravel()
 
-        x0 = max(xi - half, 0)
-        x1 = min(xi + half, out_width  - 1)
-        y0 = max(yi - half, 0)
-        y1 = min(yi + half, out_height - 1)
+    all_y = (yi[:, None] + dy[None, :]).ravel()
+    all_x = (xi[:, None] + dx[None, :]).ravel()
+    all_s = np.repeat(scores, dy.size)
 
-        out[y0:y1, x0:x1] = score
+    valid = (all_x >= 0) & (all_x < out_width) & (all_y >= 0) & (all_y < out_height)
+    all_y = all_y[valid]
+    all_x = all_x[valid]
+    all_s = all_s[valid]
+
+    # Accumulate into -inf, not `out` (which may hold NaN): max(nan, x) is
+    # nan, which would poison every painted cell on the first update.
+    acc = np.full((out_height, out_width), -np.inf, dtype=np.float32)
+    np.maximum.at(acc, (all_y, all_x), all_s)
+    painted = acc > -np.inf
+    out[painted] = acc[painted]
 
     return out

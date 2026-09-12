@@ -77,26 +77,88 @@ class TestFeatureMap:
         assert ms.plotting.plot_feature_map(one_slide, "score") is not None
 
 
-class TestSpatialDistribution:
-    def test_renders_a_grid_over_a_mapping(self, open_cohort, tmp_path):
-        fig = ms.plotting.plot_feature_spatial_distribution(
+class TestFeatureGrid:
+    """`_render_feature_grid` -- create_feature_pdf's internal top panel."""
+
+    def test_renders_a_grid_over_a_mapping(self, open_cohort):
+        from mesoslide.plotting._feature_reports import _render_feature_grid
+
+        fig = _render_feature_grid(
             open_cohort, "score", ncols=3, figsize_per_image=(3, 2), dpi=40,
-            return_fig=True, output_dir=str(tmp_path), show_titles=True,
+            show_titles=True,
         )
         assert len(fig.axes) == 3
-        assert (tmp_path / "score_spatial_distribution.png").exists()
+        plt.close(fig)
 
-    def test_streams_a_manifest(self, manifest, tmp_path):
-        fig = ms.plotting.plot_feature_spatial_distribution(
+    def test_streams_a_manifest(self, manifest):
+        from mesoslide.plotting._feature_reports import _render_feature_grid
+
+        fig = _render_feature_grid(
             manifest, "score", ncols=2, figsize_per_image=(3, 2), dpi=40,
-            return_fig=True,
         )
         assert fig is not None
+        plt.close(fig)
 
     def test_raises_when_nothing_could_be_rendered(self, open_cohort):
-        with pytest.raises(ValueError, match="No slide could be rendered"):
-            ms.plotting.plot_feature_spatial_distribution(open_cohort, "no_such_feature")
+        from mesoslide.plotting._feature_reports import _render_feature_grid
 
+        with pytest.raises(ValueError, match="No slide could be rendered"):
+            _render_feature_grid(open_cohort, "no_such_feature")
+
+
+class TestPatchGallery:
+    def test_writes_a_gallery_from_slides(self, manifest, open_cohort, tmp_path):
+        sel = ms.select_random_patches(manifest, 6, random_state=3)
+        out = tmp_path / "g.png"
+        ms.plotting.plot_patch_gallery(
+            sel, slides=open_cohort, output_path=str(out),
+            patches_per_row=3, show_slide_ids=True,
+            progress_bar=False, dpi=40,
+        )
+        assert out.exists()
+
+    def test_accepts_pre_extracted_images(self, manifest, open_cohort, tmp_path):
+        sel = ms.select_random_patches(manifest, 4, random_state=4)
+        imgs = ms.pp.extract_patches(sel, open_cohort, channel_first=False,
+                                     progress_bar=False)
+        out = tmp_path / "pre.png"
+        ms.plotting.plot_patch_gallery(
+            sel, patches_array=imgs, output_path=str(out),
+            patches_per_row=2, progress_bar=False, dpi=40,
+        )
+        assert out.exists()
+
+    def test_needs_slides_or_images(self, one_table):
+        with pytest.raises(ValueError, match="Either slides or patches_array"):
+            ms.plotting.plot_patch_gallery(one_table[:2], progress_bar=False)
+
+    def test_return_buffer_gives_a_list_of_png_buffers(self, manifest, open_cohort):
+        from PIL import Image
+
+        sel = ms.select_random_patches(manifest, 4, random_state=4)
+        bufs = ms.plotting.plot_patch_gallery(
+            sel, slides=open_cohort, return_buffer=True, progress_bar=False, dpi=40,
+        )
+        assert isinstance(bufs, list) and len(bufs) == 1
+        assert Image.open(bufs[0]).size[0] > 0
+
+    def test_multi_page_return_buffer_without_output_path(self, manifest, open_cohort):
+        sel = ms.select_random_patches(manifest, 6, random_state=3)
+        bufs = ms.plotting.plot_patch_gallery(
+            sel, slides=open_cohort, samples_per_figure=2, return_buffer=True,
+            progress_bar=False, dpi=40,
+        )
+        assert isinstance(bufs, list) and len(bufs) == 3
+
+    def test_multi_page_needs_an_output(self, manifest, open_cohort):
+        sel = ms.select_random_patches(manifest, 6, random_state=3)
+        with pytest.raises(ValueError, match="output_path"):
+            ms.plotting.plot_patch_gallery(
+                sel, slides=open_cohort, samples_per_figure=2, progress_bar=False,
+            )
+
+
+class TestCreateFeaturePdf:
     def test_imports_without_reportlab(self):
         """Only create_feature_pdf needs it, and it is not a declared dependency."""
         import inspect
@@ -105,27 +167,46 @@ class TestSpatialDistribution:
 
         assert "reportlab" not in inspect.getsource(mod).split("def create_feature_pdf")[0]
 
+    def test_requires_an_output(self, open_cohort):
+        with pytest.raises(ValueError, match="output_path"):
+            ms.plotting.create_feature_pdf(open_cohort, "score", None)
 
-class TestPatchGallery:
-    def test_writes_a_gallery_from_slides(self, manifest, open_cohort, tmp_path):
-        sel = ms.select_random_patches(manifest, 6, random_state=3)
-        ms.plotting.plot_patch_gallery(
-            sel, slides=open_cohort, output_dir=str(tmp_path),
-            filename_prefix="g", patches_per_row=3, show_slide_ids=True,
-            progress_bar=False, dpi=40,
-        )
-        assert list(tmp_path.glob("g_samples_*.png"))
-
-    def test_accepts_pre_extracted_images(self, manifest, open_cohort, tmp_path):
+    def test_full_pipeline_saves_a_valid_pdf(self, manifest, open_cohort, tmp_path):
         sel = ms.select_random_patches(manifest, 4, random_state=4)
-        imgs = ms.pp.extract_patches(sel, open_cohort, channel_first=False,
-                                     progress_bar=False)
-        ms.plotting.plot_patch_gallery(
-            sel, patches_array=imgs, output_dir=str(tmp_path),
-            filename_prefix="pre", patches_per_row=2, progress_bar=False, dpi=40,
+        bottom = ms.plotting.plot_patch_gallery(
+            sel, slides=open_cohort, return_buffer=True, progress_bar=False, dpi=40,
+        )[0]
+        out = tmp_path / "report.pdf"
+        ms.plotting.create_feature_pdf(
+            open_cohort, "score", bottom, output_path=str(out),
+            ncols=2, figsize_per_image=(3, 2), image_dpi=40, margin_dots=10,
         )
-        assert list(tmp_path.glob("pre_samples_*.png"))
+        assert out.exists()
+        assert out.read_bytes()[:4] == b"%PDF"
 
-    def test_needs_slides_or_images(self, one_table):
-        with pytest.raises(ValueError, match="Either slides or patches_array"):
-            ms.plotting.plot_patch_gallery(one_table[:2], progress_bar=False)
+    def test_return_buffer_with_no_output_path(self, manifest, open_cohort, tmp_path):
+        sel = ms.select_random_patches(manifest, 4, random_state=4)
+        bottom = ms.plotting.plot_patch_gallery(
+            sel, slides=open_cohort, return_buffer=True, progress_bar=False, dpi=40,
+        )[0]
+        buf = ms.plotting.create_feature_pdf(
+            open_cohort, "score", bottom, return_buffer=True,
+            ncols=2, figsize_per_image=(3, 2), image_dpi=40, margin_dots=10,
+        )
+        assert buf.getvalue()[:4] == b"%PDF"
+        assert not any(tmp_path.iterdir())  # nothing written anywhere
+
+    def test_bottom_image_accepts_path_pil_and_figure(self, open_cohort, tmp_path):
+        from PIL import Image
+
+        path_bottom = tmp_path / "bottom.png"
+        fig = plt.figure()
+        fig.savefig(path_bottom)
+        plt.close(fig)
+
+        for bottom in (str(path_bottom), Image.open(path_bottom), plt.figure()):
+            buf = ms.plotting.create_feature_pdf(
+                open_cohort, "score", bottom, return_buffer=True,
+                ncols=2, figsize_per_image=(3, 2), image_dpi=40, margin_dots=10,
+            )
+            assert buf.getvalue()[:4] == b"%PDF"

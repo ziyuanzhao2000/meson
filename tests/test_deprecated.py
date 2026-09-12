@@ -64,32 +64,6 @@ def test_show_image_names_forwards_to_show_slide_ids(one_table):
                                            show_image_names=True, progress_bar=False)
 
 
-class TestFeatureReports:
-    @pytest.mark.parametrize("kw,val", [("image_names", ["a"]),
-                                        ("feature_prefix", "UNI_SAE"),
-                                        ("feature_idx", 3)])
-    def test_removed_kwargs(self, kw, val):
-        fn = ms.plotting.plot_feature_spatial_distribution
-        with pytest.raises(TypeError, match="has been removed"):
-            fn([], "score", **{kw: val})
-
-    def test_feature_prefix_explains_the_collapse(self):
-        fn = ms.plotting.plot_feature_spatial_distribution
-        with pytest.raises(TypeError, match="collapse to a single feature_name"):
-            fn([], "score", feature_prefix="UNI_SAE")
-
-    def test_point_name_warns_at_its_default(self):
-        fn = ms.plotting.plot_feature_spatial_distribution
-        with pytest.warns(DeprecationWarning, match="point_name"):
-            with pytest.raises(Exception):
-                fn([], "score", point_name="grid_point")
-
-    def test_point_name_rejects_other_values(self):
-        fn = ms.plotting.plot_feature_spatial_distribution
-        with pytest.raises(ValueError, match="can no longer be honoured"):
-            fn([], "score", point_name="something_else")
-
-
 def test_current_api_emits_no_deprecation_warnings(manifest):
     """The replacement path must itself be warning-free."""
     with warnings.catch_warnings():
