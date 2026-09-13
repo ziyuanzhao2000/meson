@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Optional, Sequence, Union
+from tqdm import tqdm
 
 import numpy as np
 import anndata as ad
@@ -513,7 +514,7 @@ def select_exemplar_patches(
     source = _source(slides, tile_key, "select_exemplar_patches")
 
     per_feature = []
-    for feature_name in feature_names:
+    for feature_name in tqdm(feature_names):
         adata = select_top_patches(
             source,
             feature_name,

@@ -36,44 +36,26 @@ class SAEFeatureSelector:
         self._n_obs = 0
         self._max = None
 
-    def compute_activation_stats(self, adata, feature_prefix, num_features):
+    def compute_activation_stats(self, slides, feature_prefix, num_features, *,
+                                  tile_key="tiles", progress=True):
         """
-        Compute per-feature activation frequency and peak score.
-        This is the expensive step -- only needs to be run once.
+        Compute per-feature activation frequency and peak score, one slide at
+        a time. This is the expensive step -- only needs to be run once.
 
-        Parameters
-        ----------
-        adata : AnnData
-            Patch-level AnnData with sparse SAE embeddings in .X
-        feature_prefix : str
-            Prefix of feature columns, e.g. 'UNI_SAE'
-        num_features : int
-            Total number of SAE features
-
-        See Also
-        --------
-        fit_slides : the same statistics streamed over a cohort.
-        """
-        self.start(num_features)
-        self.accumulate(adata, feature_prefix, num_features)
-        return self.finalize()
-
-    def fit_slides(self, slides, feature_prefix, num_features, *,
-                   tile_key="tiles", progress=True):
-        """
-        Compute activation statistics over a cohort, one slide at a time.
-
-        Exactly equivalent to concatenating every slide and calling
-        :meth:`compute_activation_stats`, but peak memory is one slide.
         Both statistics reduce associatively over rows: the peak score is a
         max, and the active fraction is a sum of nonzero counts over a sum of
-        row counts.
+        row counts. That makes this exact whether `slides` is a single
+        in-memory table or a cohort streamed from a manifest -- peak memory
+        is one slide regardless.
 
         Parameters
         ----------
         slides : slides_table, AnnData, WSIData, or sequence/mapping of either
+            Patch-level table(s) with sparse SAE embeddings in .X.
         feature_prefix : str
+            Prefix of feature columns, e.g. 'UNI_SAE'
         num_features : int
+            Total number of SAE features
         tile_key : str, default='tiles'
         progress : bool
 
@@ -100,10 +82,10 @@ class SAEFeatureSelector:
         self._is_fitted = False
         return self
 
-    def accumulate(self, adata, feature_prefix, num_features, progress=True):
+    def accumulate(self, table, feature_prefix, num_features, progress=True):
         """Fold one patch table into the running statistics."""
         feature_names = [f"{feature_prefix}_{i}" for i in range(num_features)]
-        X_csc = adata[:, feature_names].X.tocsc()
+        X_csc = table[:, feature_names].X.tocsc()
         n = X_csc.shape[0]
         if n == 0:
             return self

@@ -106,7 +106,7 @@ class SAEFeatureClusterer:
     Examples
     --------
     >>> clusterer = SAEFeatureClusterer()
-    >>> clusterer.compute_iou(all_patches, feature_prefix='UNI_SAE',
+    >>> clusterer.compute_iou(slides, feature_prefix='UNI_SAE',
     ...                       feature_indices=selected_idx)
     >>> clusterer.cluster(threshold=25, criterion='maxclust')
     >>> clusterer.plot_heatmap()
@@ -130,56 +130,34 @@ class SAEFeatureClusterer:
 
     # ── public API ─────────────────────────────────────────────────────────
 
-    def compute_iou(self, adata, feature_prefix: str,
-                    feature_indices: np.ndarray) -> "SAEFeatureClusterer":
+    def compute_iou(self, slides, feature_prefix: str,
+                    feature_indices: np.ndarray, *,
+                    tile_key: str = "tiles",
+                    progress: bool = True) -> "SAEFeatureClusterer":
         """
-        Compute two pairwise IoU matrices from one patch table.
+        Compute two pairwise IoU matrices over one or more patch tables, one
+        slide at a time.
 
         - iou_soft_   : every nonzero activation counts as active (soft)
         - iou_strict_ : only activations above high_activation_threshold count;
                         used as the clustering distance
 
-        Parameters
-        ----------
-        adata : AnnData
-            Patch-level AnnData with sparse SAE embeddings in .X.
-        feature_prefix : str
-            Column prefix, e.g. 'UNI_SAE'.
-        feature_indices : np.ndarray of int
-            Indices of the selected features (output of SAEFeatureSelector).
-
-        See Also
-        --------
-        fit_slides : the same computation streamed over a cohort, without
-            concatenating it.
-        """
-        feature_names = [f'{feature_prefix}_{i}' for i in feature_indices]
-        col_max = self._column_max(adata, feature_names)
-        self._start(feature_indices, col_max)
-        self._accumulate(adata, feature_names)
-        return self._finalize()
-
-    def fit_slides(self, slides, feature_prefix: str,
-                   feature_indices: np.ndarray, *,
-                   tile_key: str = "tiles",
-                   progress: bool = True) -> "SAEFeatureClusterer":
-        """
-        Compute the IoU matrices over a cohort, one slide at a time.
-
-        Exactly equivalent to concatenating every slide and calling
-        :meth:`compute_iou`, but never holds more than one slide's ``.X``.
         Both quantities involved are sums over rows -- the pairwise
         intersection and the per-feature column sums -- so accumulating them
-        slide by slide is exact, not an approximation.
-
-        Two passes are needed: the first for the max-normalisation constant
-        (an associative max over slides), the second for the accumulation.
+        slide by slide is exact, not an approximation. Two passes are needed:
+        the first for the max-normalisation constant (an associative max over
+        slides), the second for the accumulation. Peak memory is one slide's
+        ``.X``, regardless of whether `slides` is a single in-memory table or
+        a cohort streamed from a manifest.
 
         Parameters
         ----------
         slides : slides_table, AnnData, WSIData, or sequence/mapping of either
+            Patch-level table(s) with sparse SAE embeddings in .X.
         feature_prefix : str
+            Column prefix, e.g. 'UNI_SAE'.
         feature_indices : np.ndarray of int
+            Indices of the selected features (output of SAEFeatureSelector).
         tile_key : str, default='tiles'
         progress : bool
 
@@ -211,8 +189,8 @@ class SAEFeatureClusterer:
     # ── accumulation internals ─────────────────────────────────────────────
 
     @staticmethod
-    def _column_max(adata, feature_names) -> np.ndarray:
-        X = adata[:, feature_names].X
+    def _column_max(table, feature_names) -> np.ndarray:
+        X = table[:, feature_names].X
         if X.shape[0] == 0:
             return np.zeros(len(feature_names), dtype=np.float64)
         if issparse(X):
@@ -228,8 +206,8 @@ class SAEFeatureClusterer:
         self._inter_strict = np.zeros((n, n))
         self._sums_strict = np.zeros(n)
 
-    def _accumulate(self, adata, feature_names):
-        X = adata[:, feature_names].X
+    def _accumulate(self, table, feature_names):
+        X = table[:, feature_names].X
         if X.shape[0] == 0:
             return
 
