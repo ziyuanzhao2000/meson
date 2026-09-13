@@ -43,17 +43,17 @@ def batch(parts):
 class TestSelector:
     def test_pct_active_matches_batch(self, parts, batch):
         b = SAEFeatureSelector(n_chunks=7).compute_activation_stats(batch, PREFIX, N_FEATURES)
-        s = SAEFeatureSelector(n_chunks=7).fit_slides(parts, PREFIX, N_FEATURES, progress=False)
+        s = SAEFeatureSelector(n_chunks=7).compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
         assert np.allclose(b.pct_active_, s.pct_active_)
 
     def test_max_score_matches_batch(self, parts, batch):
         b = SAEFeatureSelector().compute_activation_stats(batch, PREFIX, N_FEATURES)
-        s = SAEFeatureSelector().fit_slides(parts, PREFIX, N_FEATURES, progress=False)
+        s = SAEFeatureSelector().compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
         assert np.allclose(b.max_score_, s.max_score_)
 
     def test_selected_indices_match_batch(self, parts, batch):
         b = SAEFeatureSelector().compute_activation_stats(batch, PREFIX, N_FEATURES)
-        s = SAEFeatureSelector().fit_slides(parts, PREFIX, N_FEATURES, progress=False)
+        s = SAEFeatureSelector().compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
         assert np.array_equal(b.get_selected_indices(), s.get_selected_indices())
 
     def test_pct_active_is_a_true_fraction(self, batch):
@@ -79,19 +79,19 @@ class TestClusterer:
     def test_iou_matches_batch(self, parts, batch, matrix):
         idx = np.arange(N_FEATURES)
         b = SAEFeatureClusterer().compute_iou(batch, PREFIX, idx)
-        s = SAEFeatureClusterer().fit_slides(parts, PREFIX, idx, progress=False)
+        s = SAEFeatureClusterer().compute_iou(parts, PREFIX, idx, progress=False)
         assert np.allclose(getattr(b, matrix), getattr(s, matrix))
 
     def test_slide_order_does_not_matter(self, parts):
         """Sums are commutative; the streamed result must be too."""
         idx = np.arange(N_FEATURES)
-        a = SAEFeatureClusterer().fit_slides(parts, PREFIX, idx, progress=False)
-        b = SAEFeatureClusterer().fit_slides(parts[::-1], PREFIX, idx, progress=False)
+        a = SAEFeatureClusterer().compute_iou(parts, PREFIX, idx, progress=False)
+        b = SAEFeatureClusterer().compute_iou(parts[::-1], PREFIX, idx, progress=False)
         assert np.allclose(a.iou_soft_, b.iou_soft_)
 
     def test_clustering_runs_on_streamed_matrices(self, parts):
-        c = SAEFeatureClusterer().fit_slides(parts, PREFIX, np.arange(N_FEATURES),
-                                             progress=False)
+        c = SAEFeatureClusterer().compute_iou(parts, PREFIX, np.arange(N_FEATURES),
+                                              progress=False)
         c.cluster(threshold=4, criterion="maxclust")
         assert len(c.get_cluster_assignments()) == N_FEATURES
         assert len(c.get_reordered_feature_indices()) == N_FEATURES
