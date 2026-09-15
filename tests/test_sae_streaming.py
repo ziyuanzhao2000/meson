@@ -10,8 +10,8 @@ import numpy as np
 import pytest
 import scipy.sparse as sp
 
-from mesoslide.tools.sae import SAEFeatureClusterer, SAEFeatureSelector
-from mesoslide.tools.sae._feature_clusterer import (
+from mesoslide.tools.sparse_coding import FeatureClusterer, FeatureSelector
+from mesoslide.tools.sparse_coding._feature_clusterer import (
     _intersection_and_sums,
     _weighted_iou,
     iou_from_parts,
@@ -42,55 +42,55 @@ def batch(parts):
 
 class TestSelector:
     def test_pct_active_matches_batch(self, parts, batch):
-        b = SAEFeatureSelector(n_chunks=7).compute_activation_stats(batch, PREFIX, N_FEATURES)
-        s = SAEFeatureSelector(n_chunks=7).compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
+        b = FeatureSelector(n_chunks=7).compute_activation_stats(batch, PREFIX, N_FEATURES)
+        s = FeatureSelector(n_chunks=7).compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
         assert np.allclose(b.pct_active_, s.pct_active_)
 
     def test_max_score_matches_batch(self, parts, batch):
-        b = SAEFeatureSelector().compute_activation_stats(batch, PREFIX, N_FEATURES)
-        s = SAEFeatureSelector().compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
+        b = FeatureSelector().compute_activation_stats(batch, PREFIX, N_FEATURES)
+        s = FeatureSelector().compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
         assert np.allclose(b.max_score_, s.max_score_)
 
     def test_selected_indices_match_batch(self, parts, batch):
-        b = SAEFeatureSelector().compute_activation_stats(batch, PREFIX, N_FEATURES)
-        s = SAEFeatureSelector().compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
+        b = FeatureSelector().compute_activation_stats(batch, PREFIX, N_FEATURES)
+        s = FeatureSelector().compute_activation_stats(parts, PREFIX, N_FEATURES, progress=False)
         assert np.array_equal(b.get_selected_indices(), s.get_selected_indices())
 
     def test_pct_active_is_a_true_fraction(self, batch):
         """Not a mean of per-chunk means, which is only right at equal chunk sizes."""
-        sel = SAEFeatureSelector(n_chunks=7).compute_activation_stats(batch, PREFIX, N_FEATURES)
+        sel = FeatureSelector(n_chunks=7).compute_activation_stats(batch, PREFIX, N_FEATURES)
         X = batch[:, [f"{PREFIX}_{i}" for i in range(N_FEATURES)]].X
         expected = np.asarray((X > 0).sum(axis=0)).ravel() / batch.n_obs
         assert np.allclose(sel.pct_active_, expected)
 
     def test_chunking_does_not_change_the_answer(self, batch):
-        a = SAEFeatureSelector(n_chunks=3).compute_activation_stats(batch, PREFIX, N_FEATURES)
-        b = SAEFeatureSelector(n_chunks=97).compute_activation_stats(batch, PREFIX, N_FEATURES)
+        a = FeatureSelector(n_chunks=3).compute_activation_stats(batch, PREFIX, N_FEATURES)
+        b = FeatureSelector(n_chunks=97).compute_activation_stats(batch, PREFIX, N_FEATURES)
         assert np.allclose(a.pct_active_, b.pct_active_)
         assert np.allclose(a.max_score_, b.max_score_)
 
     def test_accumulating_nothing_is_an_error(self):
         with pytest.raises(ValueError, match="No patches"):
-            SAEFeatureSelector().start(N_FEATURES).finalize()
+            FeatureSelector().start(N_FEATURES).finalize()
 
 
 class TestClusterer:
     @pytest.mark.parametrize("matrix", ["iou_soft_", "iou_strict_"])
     def test_iou_matches_batch(self, parts, batch, matrix):
         idx = np.arange(N_FEATURES)
-        b = SAEFeatureClusterer().compute_iou(batch, PREFIX, idx)
-        s = SAEFeatureClusterer().compute_iou(parts, PREFIX, idx, progress=False)
+        b = FeatureClusterer().compute_iou(batch, PREFIX, idx)
+        s = FeatureClusterer().compute_iou(parts, PREFIX, idx, progress=False)
         assert np.allclose(getattr(b, matrix), getattr(s, matrix))
 
     def test_slide_order_does_not_matter(self, parts):
         """Sums are commutative; the streamed result must be too."""
         idx = np.arange(N_FEATURES)
-        a = SAEFeatureClusterer().compute_iou(parts, PREFIX, idx, progress=False)
-        b = SAEFeatureClusterer().compute_iou(parts[::-1], PREFIX, idx, progress=False)
+        a = FeatureClusterer().compute_iou(parts, PREFIX, idx, progress=False)
+        b = FeatureClusterer().compute_iou(parts[::-1], PREFIX, idx, progress=False)
         assert np.allclose(a.iou_soft_, b.iou_soft_)
 
     def test_clustering_runs_on_streamed_matrices(self, parts):
-        c = SAEFeatureClusterer().compute_iou(parts, PREFIX, np.arange(N_FEATURES),
+        c = FeatureClusterer().compute_iou(parts, PREFIX, np.arange(N_FEATURES),
                                               progress=False)
         c.cluster(threshold=4, criterion="maxclust")
         assert len(c.get_cluster_assignments()) == N_FEATURES
@@ -98,7 +98,7 @@ class TestClusterer:
 
     def test_guards_before_fitting(self):
         with pytest.raises(RuntimeError, match="compute_iou"):
-            SAEFeatureClusterer().get_cluster_assignments()
+            FeatureClusterer().get_cluster_assignments()
 
 
 class TestKernelSplit:

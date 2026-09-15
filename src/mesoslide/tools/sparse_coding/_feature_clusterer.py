@@ -88,12 +88,12 @@ def _weighted_iou(X):
     return iou_from_parts(inter, col_sums)
 
 
-class SAEFeatureClusterer:
+class FeatureClusterer:
     """
-    Computes pairwise IoU between selected SAE features, clusters them
+    Computes pairwise IoU between selected sparse-coding features (SAE or LLC), clusters them
     hierarchically, and provides plotting helpers.
 
-    Follows a fit/cluster pattern analogous to SAEFeatureSelector:
+    Follows a fit/cluster pattern analogous to FeatureSelector:
     compute_iou() is the expensive step; cluster() and plotting are cheap.
 
     Parameters
@@ -105,7 +105,7 @@ class SAEFeatureClusterer:
 
     Examples
     --------
-    >>> clusterer = SAEFeatureClusterer()
+    >>> clusterer = FeatureClusterer()
     >>> clusterer.compute_iou(slides, feature_prefix='UNI_SAE',
     ...                       feature_indices=selected_idx)
     >>> clusterer.cluster(threshold=25, criterion='maxclust')
@@ -133,7 +133,7 @@ class SAEFeatureClusterer:
     def compute_iou(self, slides, feature_prefix: str,
                     feature_indices: np.ndarray, *,
                     tile_key: str = "tiles",
-                    progress: bool = True) -> "SAEFeatureClusterer":
+                    progress: bool = True) -> "FeatureClusterer":
         """
         Compute two pairwise IoU matrices over one or more patch tables, one
         slide at a time.
@@ -153,11 +153,11 @@ class SAEFeatureClusterer:
         Parameters
         ----------
         slides : slides_table, AnnData, WSIData, or sequence/mapping of either
-            Patch-level table(s) with sparse SAE embeddings in .X.
+            Patch-level table(s) with sparse SAE/LLC embeddings in .X.
         feature_prefix : str
             Column prefix, e.g. 'UNI_SAE'.
         feature_indices : np.ndarray of int
-            Indices of the selected features (output of SAEFeatureSelector).
+            Indices of the selected features (output of FeatureSelector).
         tile_key : str, default='tiles'
         progress : bool
 
@@ -234,7 +234,7 @@ class SAEFeatureClusterer:
             setattr(self, inter_acc, getattr(self, inter_acc) + inter)
             setattr(self, sums_acc, getattr(self, sums_acc) + sums)
 
-    def _finalize(self) -> "SAEFeatureClusterer":
+    def _finalize(self) -> "FeatureClusterer":
         self.iou_soft_ = iou_from_parts(self._inter_soft, self._sums_soft)
         self.iou_strict_ = iou_from_parts(self._inter_strict, self._sums_strict)
         self._is_fitted = True
@@ -245,7 +245,7 @@ class SAEFeatureClusterer:
         threshold: float = 1.0,
         criterion: str = 'distance',
         linkage_method: str = 'average',
-    ) -> "SAEFeatureClusterer":
+    ) -> "FeatureClusterer":
         """
         Hierarchically cluster features using 1 - iou_strict_ as distances.
 

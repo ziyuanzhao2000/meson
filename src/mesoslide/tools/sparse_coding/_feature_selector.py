@@ -4,9 +4,10 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-class SAEFeatureSelector:
+class FeatureSelector:
     """
-    Selects informative SAE features based on activation frequency and score magnitude.
+    Selects informative sparse-coding features (SAE or LLC) based on
+    activation frequency and score magnitude.
 
     Follows a fit/select pattern: compute_activation_stats() is the expensive step,
     after which thresholds can be adjusted freely without recomputation.

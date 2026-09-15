@@ -6,7 +6,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from torch.optim import Adam
 from tqdm import tqdm
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.utils.validation import check_is_fitted
+from sklearn.utils.validation import check_is_fitted, validate_data
 from sklearn.utils import check_random_state
 import numpy as np
 import scipy.sparse as sp
@@ -203,13 +203,14 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
         self.num_steps = num_steps
         self.min_lambda = min_lambda
         self.max_lambda = max_lambda
-        # self.epsilon = epsilon
         self.learning_rate = learning_rate
         self.target_sparsity = target_sparsity
         self.random_state = random_state
 
     def fit(self, X, y=None, *,
             obsm_key=None, tile_key="tiles",
+            device = None,
+            fraction: float = 1.0,
             verbose: "int | bool" = False):
         if obsm_key is not None:
             from mesoslide._slides import SlideSource
@@ -217,13 +218,22 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
             X = np.vstack([table.obsm[obsm_key] for _, table in source])
 
         self.random_state_ = check_random_state(self.random_state)
-        X = self._validate_data(X, accept_sparse=False)
+        X = validate_data(self, X, accept_sparse=False)
         assert len(X.shape) == 2 # expect X shape = B x d_emb
+        if not 0 < fraction <= 1:
+            raise ValueError(f"fraction must be in (0, 1], got {fraction}")
+        if fraction < 1:
+            n_samples = round(fraction * len(X))
+            idx = self.random_state_.choice(len(X), size=n_samples, replace=False)
+            X = X[idx]
+        print(X.shape)
         self.embed_dim_ = X.shape[1] * self.expansion_factor
+        torch.manual_seed(int(self.random_state_.randint(0, 2**32 - 1)))
         self.model_ = SimpleAutoencoder(input_dim=X.shape[1],
                                         expansion_factor=self.expansion_factor)
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-        torch.manual_seed(self.random_state_.random(1))
+        if device is None:
+            device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        print(f"Using device: {device}")
         self.scale_factor_, self._training_log = train_simple_sae(
             model=self.model_,
             embeddings=X,
@@ -233,7 +243,6 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
             min_lambda=self.min_lambda,
             max_lambda=self.max_lambda,
             target_sparsity=self.target_sparsity,
-            # epsilon=self.epsilon,
             learning_rate=self.learning_rate,
             verbose=verbose
         )
@@ -263,7 +272,7 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
             return X
 
         check_is_fitted(self)
-        X = self._validate_data(X, accept_sparse=False, reset=False)
+        X = validate_data(self, X, accept_sparse=False, reset=False)
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
         self.model_.to(device)

@@ -1,6 +1,6 @@
 [project]
 name = "mesoslide"
-version = "0.7.0"
+version = "0.8.0"
 description = "A package for mesoscale tissue analysis using multiomics data"
 authors = [{ name = "Ziyuan Zhao", email = "ziyuanzhao@fas.harvard.edu" }]
 readme = "README.md"
@@ -17,6 +17,22 @@ dependencies = [
     "scipy",
     "reportlab>=5.0.1",
 ]
+
+[project.optional-dependencies]
+# Two pins are required beyond cuml-cu13 itself, both discovered by actually
+# installing this extra and running the test suite against it:
+#   - numpy<2.5: cuml-cu13's numba-cuda dependency is in maintenance mode and does
+#     not support numpy>=2.5 (np.row_stack was removed in numpy 2.5; see
+#     https://github.com/NVIDIA/numba-cuda/issues/907, closed not_planned -- an
+#     NVIDIA maintainer there recommends numpy<=2.4 for existing numba-cuda users).
+#     Without this pin, `import cuml` fails at import time.
+#   - numba==0.64.0: cuml-cu13 itself pins numba>=0.60.0,<0.65.0. Left unpinned,
+#     uv's resolver picks numba==0.63.0b1 (a beta) within that window, which is
+#     missing an unrelated numpy>=2.0 fix and broke mesoslide's own numba-jitted
+#     kernel in tools/sparse_coding/_feature_clusterer.py (np.trapz was removed in
+#     numpy 2.0; a later stable numba release restored compatibility). Pinning the
+#     latest *stable* release inside cuml's allowed window avoids both problems.
+gpu-kmeans = ["cuml-cu13>=26.8", "numpy<2.5", "numba==0.64.0"]
 
 [project.scripts]
 tissue-seg = "mesoslide.cli.tissue_seg:main"

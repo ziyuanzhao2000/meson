@@ -75,7 +75,7 @@ def test_sae_streaming_peak_is_flat_in_cohort_size():
     import anndata as ad
     import scipy.sparse as sp
 
-    from mesoslide.tools.sae import SAEFeatureClusterer
+    from mesoslide.tools.sparse_coding import FeatureClusterer
 
     n_feat = 30
 
@@ -89,7 +89,7 @@ def test_sae_streaming_peak_is_flat_in_cohort_size():
         return out
 
     idx = np.arange(n_feat)
-    fit = lambda n: SAEFeatureClusterer().compute_iou(parts(n), "UNI_SAE", idx, progress=False)
+    fit = lambda n: FeatureClusterer().compute_iou(parts(n), "UNI_SAE", idx, progress=False)
     peak_mb(lambda: fit(1))  # warm up numba
     one, many = peak_mb(lambda: fit(1)), peak_mb(lambda: fit(8))
     assert many < one * 3, f"streamed IoU peak grew {many / one:.1f}x from 1 to 8 slides"
