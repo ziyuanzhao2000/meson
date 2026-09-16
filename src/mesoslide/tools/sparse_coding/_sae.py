@@ -36,7 +36,7 @@ class SimpleAutoencoder(nn.Module):
             self.encoder.weight.data = encoder_weights
 
             # Initialize decoder as transpose of encoder
-            self.decoder.weight.data = self.encoder.weight.data.t()
+            self.decoder.weight.data = self.encoder.weight.data.t().clone() # materialize to avoid shared storage
 
             # Initialize biases to zero
             self.encoder.bias.data.zero_()
