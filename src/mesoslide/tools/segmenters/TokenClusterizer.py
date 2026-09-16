@@ -4,7 +4,7 @@ from typing import Optional, Union
 import numpy as np
 import torch
 import cv2
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from sklearn.cluster import KMeans
 
 from mesoslide.tools._model_stage import (

@@ -6,7 +6,7 @@ import torch
 import cv2 
 import os
 import zarr
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 def preprocess_datasets(images, labels=None, positive_class_idx=[0], target_size=448, smooth_size=31, cleanup=0):
     n_samples = len(images)

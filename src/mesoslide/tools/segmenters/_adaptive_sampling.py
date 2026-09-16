@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, List, Union
 from dataclasses import dataclass
 
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from skimage.filters import sobel
 from mesoslide._interpolation import interpolate_edt, interpolate_multiclass, interpolate_linear
 import heapq

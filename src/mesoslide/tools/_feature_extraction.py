@@ -46,7 +46,7 @@ import torch
 from anndata import AnnData
 from scipy.sparse import csr_matrix, hstack, issparse, vstack
 from spatialdata.models import TableModel
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from ._model_stage import (
     CallableStage,

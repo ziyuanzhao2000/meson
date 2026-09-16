@@ -4,7 +4,7 @@ import heapq
 import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from collections import defaultdict
 from typing import Optional, Sequence, Union
 

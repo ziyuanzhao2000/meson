@@ -2,7 +2,7 @@ import os
 import shutil
 import gc
 import numexpr as ne
-from tqdm import tqdm
+from tqdm.auto import tqdm
 import zarr
 import numpy as np
 import cv2

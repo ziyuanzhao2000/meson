@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Optional, Sequence, Union
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 import numpy as np
 import anndata as ad

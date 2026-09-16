@@ -49,6 +49,7 @@ ezslide = { path = "/n/scratch/users/z/ziz531/ezslide", editable = true }
 dev = [
     "distinctipy>=1.3.4",
     "ipykernel>=7.3.0",
+    "ipywidgets>=8.1.7",
     "pytest>=9.1.1",
     "statannotations>=0.7.2",
 ]

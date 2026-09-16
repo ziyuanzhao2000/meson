@@ -3,7 +3,7 @@
 from typing import TYPE_CHECKING, List, Optional, Union
 import warnings
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from mesoslide._slides import (
     DEFAULT_TILE_KEY,

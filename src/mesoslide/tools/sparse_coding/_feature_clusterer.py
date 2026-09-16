@@ -1,5 +1,5 @@
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from scipy.sparse import diags, issparse
 from numba import njit, prange
 from typing import Optional, List, Union, Sequence

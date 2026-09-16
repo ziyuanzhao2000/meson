@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Tuple, Union, List
 import numpy as np
 import matplotlib.pyplot as plt
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from mesoslide._slides import DEFAULT_TILE_KEY, PATCH_IMG_KEY, SLIDE_ID
 from mesoslide._deprecated import SLIDES_HINT, deprecated_kwargs, removed, rename

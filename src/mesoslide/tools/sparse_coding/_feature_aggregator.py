@@ -10,7 +10,7 @@ normalising) finds each feature's cohort-wide max, pass 2 aggregates.
 """
 
 import numpy as np
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from typing import Optional
 
 

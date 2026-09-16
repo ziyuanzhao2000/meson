@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING, Union, Optional
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from PIL import Image
 
 from mesoslide._slides import DEFAULT_TILE_KEY

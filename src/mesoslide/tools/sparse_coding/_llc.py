@@ -7,7 +7,7 @@ from sklearn.utils.validation import check_is_fitted, validate_data
 from sklearn.utils import check_random_state
 import numpy as np
 import scipy.sparse as sp
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from ._kmeans_backends import fit_kmeans_backend
 

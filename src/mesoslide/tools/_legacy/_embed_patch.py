@@ -15,7 +15,7 @@ import numpy as np
 from torch.utils.data import DataLoader, Dataset
 from mesoslide._utils import get_base_level, overwrite_element
 from mesoslide._utils import get_optimal_chunk_size
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from scipy.sparse import csc_array, hstack
 import pandas as pd
 from PIL import Image

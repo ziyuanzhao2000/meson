@@ -4,7 +4,7 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 
 from torch.optim import Adam
-from tqdm import tqdm
+from tqdm.auto import tqdm
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.utils.validation import check_is_fitted
 from sklearn.utils import check_random_state
