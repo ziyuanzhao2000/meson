@@ -50,7 +50,7 @@ def test_table_round_trips_through_a_written_store(cohort):
 
 
 def test_x_y_are_tile_origins(one_slide):
-    """extract_patches reads from these, so they must be the level-0 top-left."""
+    """extract_patch_images reads from these, so they must be the level-0 top-left."""
     table = one_slide.tables["tiles_table"]
     bounds = one_slide.shapes["tiles"].bounds
     assert np.array_equal(table.obs["x"].to_numpy(), bounds["minx"].to_numpy())

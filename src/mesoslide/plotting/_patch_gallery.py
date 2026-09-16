@@ -7,7 +7,7 @@ from tqdm import tqdm
 
 from mesoslide._slides import DEFAULT_TILE_KEY, SLIDE_ID
 from mesoslide._deprecated import SLIDES_HINT, deprecated_kwargs, removed, rename
-from mesoslide.preprocessing._extract_patches import extract_patches
+from mesoslide.preprocessing._extract_patches import extract_patch_images
 from mesoslide.preprocessing._extract_saliency_maps import extract_saliency_maps
 from ._image_grid import _plot_image_grid
 from ._utils import _finish_plot
@@ -41,6 +41,7 @@ def plot_patch_gallery_with_saliency(
     progress_bar: bool = True,
     saliency_alpha_power: float = 1.0,
     batch_size: int = 16,
+    cache: bool = False,
 ) -> Optional[Union[Tuple[plt.Figure, np.ndarray], List[io.BytesIO]]]:
     """
     Create a gallery of patches with H&E images and token cluster saliency maps.
@@ -94,6 +95,10 @@ def plot_patch_gallery_with_saliency(
         Exponent applied to normalised cluster values for alpha contrast.
     batch_size : int, default=16
         Batch size passed to clusterizers during inference.
+    cache : bool, default=False
+        Forwarded to :func:`extract_patch_images`: cache the extracted array
+        in ``patches.obsm['patch_img']`` so later calls on the same `patches`
+        skip re-reading from slides.
 
     Returns
     -------
@@ -114,10 +119,9 @@ def plot_patch_gallery_with_saliency(
     ... )
     >>>
     >>> # Pre-computed (extract once, plot many times)
-    >>> imgs = extract_patches(patches, slides, channel_first=False)
-    >>> maps = extract_saliency_maps(
-    ...     extract_patches(patches, slides, channel_first=True), [c1, c2]
-    ... )
+    >>> patches_cf = extract_patch_images(patches, slides, channel_first=True)
+    >>> imgs = np.moveaxis(patches_cf, 1, -1)
+    >>> maps = extract_saliency_maps(patches_cf, [c1, c2])
     >>> np.save("imgs.npy", imgs); np.save("maps.npy", maps)
     >>>
     >>> plot_patch_gallery_with_saliency(
@@ -169,27 +173,47 @@ def plot_patch_gallery_with_saliency(
 
     import anndata as ad
 
-    if patches_array is None:
+    # patches_cf (channel-first) is extracted at most once, since it's the
+    # canonical cached layout and the source both for clusterizer inference
+    # and (via moveaxis) the channel-last display array.
+    patches_cf = None
+
+    if patches_array is None and saliency_maps is None:
         if progress_bar:
             print("Extracting patches from slides...")
-        patches_array = extract_patches(
-            patches, slides,
-            tile_key=tile_key,
-            channel_first=False,   # (N, H, W, C) for display
-            progress_bar=progress_bar,
-            skip_errors=True,
-        )
-
-    if saliency_maps is None:
-        if progress_bar:
-            print("Extracting patches (channel-first) for clusterizers...")
-        patches_cf = extract_patches(
+        patches_cf = extract_patch_images(
             patches, slides,
             tile_key=tile_key,
             channel_first=True,
             progress_bar=progress_bar,
             skip_errors=True,
+            cache=cache,
         )
+        patches_array = _channel_last(patches_cf)
+    elif patches_array is None:
+        if progress_bar:
+            print("Extracting patches from slides...")
+        patches_array = extract_patch_images(
+            patches, slides,
+            tile_key=tile_key,
+            channel_first=False,   # (N, H, W, C) for display
+            progress_bar=progress_bar,
+            skip_errors=True,
+            cache=cache,
+        )
+
+    if saliency_maps is None:
+        if patches_cf is None:
+            if progress_bar:
+                print("Extracting patches (channel-first) for clusterizers...")
+            patches_cf = extract_patch_images(
+                patches, slides,
+                tile_key=tile_key,
+                channel_first=True,
+                progress_bar=progress_bar,
+                skip_errors=True,
+                cache=cache,
+            )
         saliency_maps = extract_saliency_maps(
             patches_cf,
             clusterizers=clusterizers,
@@ -208,114 +232,156 @@ def plot_patch_gallery_with_saliency(
         else saliency_maps
     )
 
+    # Per-row title text, resolved once from patches.obs
+    patch_titles = []
+    for _, row in patch_df.iterrows():
+        title_parts = []
+        if show_slide_ids:
+            title_parts.append(str(row[SLIDE_ID]))
+        if show_scores:
+            title_parts.append(f"Score: {row.get('score', 0):.3f}")
+        patch_titles.append("\n".join(title_parts) if title_parts else None)
+
     buffers = [] if return_buffer else None
 
     for page_idx in range(n_pages):
         start_idx = page_idx * samples_per_figure
         end_idx = min(start_idx + samples_per_figure, n_patches)
-        batch_df = patch_df.iloc[start_idx:end_idx]
 
         batch_images = patches_list[start_idx:end_idx]   # list of (H, W, C)
         batch_maps = saliency_list[start_idx:end_idx]    # list of (K, H, W)
+        batch_titles = patch_titles[start_idx:end_idx]
 
         if progress_bar and n_pages > 1:
             print(f"Rendering page {page_idx+1}/{n_pages} "
                   f"(patches {start_idx+1}–{end_idx})...")
-
-        n_samples = len(batch_images)
-        n_cols = min(patches_per_row, n_samples)
-        n_rows_per_patch = 1 + n_clusterizers
-        n_rows_total = int(np.ceil(n_samples / patches_per_row)) * n_rows_per_patch
-
-        fig, axes = plt.subplots(
-            n_rows_total, n_cols,
-            figsize=(patch_display_size * n_cols,
-                     patch_display_size * n_rows_total)
-        )
-
-        # Normalise axes to 2-D array
-        if n_rows_total == 1 and n_cols == 1:
-            axes = np.array([[axes]])
-        elif n_rows_total == 1:
-            axes = axes.reshape(1, -1)
-        elif n_cols == 1:
-            axes = axes.reshape(-1, 1)
-
-        for i in range(n_samples):
-            row_base = (i // patches_per_row) * n_rows_per_patch
-            col = i % patches_per_row
-
-            image_display = batch_images[i]          # (H, W, C)
-            patch_meta = batch_df.iloc[i]
-            cluster_maps_i = batch_maps[i]           # (K, H, W) uint8
-
-            # Title for the H&E row
-            title_parts = []
-            if show_slide_ids:
-                title_parts.append(str(patch_meta[SLIDE_ID]))
-            if show_scores:
-                title_parts.append(f"Score: {patch_meta.get('score', 0):.3f}")
-            patch_title = "\n".join(title_parts)
-
-            # H&E row
-            ax_he = axes[row_base, col]
-            ax_he.imshow(image_display)
-            if patch_title:
-                ax_he.set_title(patch_title, fontsize=8)
-            ax_he.axis('off')
-
-            # Saliency rows
-            for k in range(n_clusterizers):
-                cluster_map = cluster_maps_i[k].astype(np.float32)  # (H, W)
-                n_clusters = 3
-                alpha_values = (cluster_map / n_clusters) ** saliency_alpha_power
-
-                overlay = np.zeros((*alpha_values.shape, 4), dtype=np.float32)
-                overlay[..., 3] = alpha_values  # black with variable alpha
-
-                ax_sal = axes[row_base + 1 + k, col]
-                ax_sal.imshow(image_display)
-                ax_sal.imshow(overlay)
-                ax_sal.axis('off')
-
-        # Hide unused axes
-        for i in range(n_samples, n_rows_total // n_rows_per_patch * n_cols):
-            for k in range(n_rows_per_patch):
-                r = (i // n_cols) * n_rows_per_patch + k
-                c = i % n_cols
-                if r < n_rows_total:
-                    axes[r, c].axis('off')
-                    axes[r, c].set_visible(False)
-
-        if title and n_pages == 1:
-            fig.suptitle(title, fontsize=16)
-
-        plt.tight_layout()
-
-        # Row labels on left margin
-        for row_idx, label in enumerate(row_labels):
-            y = 1 - (row_idx + 0.5) / n_rows_per_patch
-            fig.text(-0.01, y, label, fontsize=12,
-                     rotation=90, va="center", ha="center")
 
         fp = None
         if output_path is not None:
             fp = output_path if n_pages == 1 else _paged_path(output_path, start_idx, end_idx)
             Path(fp).parent.mkdir(parents=True, exist_ok=True)
 
-        keep_alive = n_pages == 1 and return_fig and not return_buffer
-        result = _finish_plot(fig, axes, show=keep_alive, save=fp,
-                               return_fig=False, return_buffer=return_buffer, dpi=dpi)
-        if fp is not None:
-            print(f"Saved: {fp}")
+        result = _render_saliency_page(
+            batch_images, batch_maps, batch_titles, row_labels, n_clusterizers,
+            patches_per_row=patches_per_row,
+            patch_display_size=patch_display_size,
+            saliency_alpha_power=saliency_alpha_power,
+            title=title if n_pages == 1 else None,
+            dpi=dpi,
+            output_path=fp,
+            return_fig=return_fig and n_pages == 1,
+            return_buffer=return_buffer,
+        )
+        if n_pages == 1 and return_fig and not return_buffer:
+            return result
         if return_buffer:
             buffers.append(result)
-        if n_pages == 1 and return_fig and not return_buffer:
-            return fig, axes
 
     if return_buffer:
         return buffers
     return None
+
+
+def _channel_last(arr: Union[np.ndarray, List[np.ndarray]]) -> Union[np.ndarray, List[np.ndarray]]:
+    """Convert a channel-first (N, C, H, W) array or list of (C, H, W) to channel-last."""
+    if isinstance(arr, np.ndarray):
+        return np.moveaxis(arr, 1, -1)
+    return [np.moveaxis(p, 0, -1) for p in arr]
+
+
+def _render_saliency_page(
+    images: List[np.ndarray],
+    cluster_maps: List[np.ndarray],
+    patch_titles: List[Optional[str]],
+    row_labels: List[str],
+    n_clusterizers: int,
+    *,
+    patches_per_row: int,
+    patch_display_size: float,
+    saliency_alpha_power: float,
+    title: Optional[str],
+    dpi: int,
+    output_path: Optional[str],
+    return_fig: bool,
+    return_buffer: bool,
+) -> Union[Tuple[plt.Figure, np.ndarray], io.BytesIO, None]:
+    """Render one page of the H&E + saliency-overlay grid from already-extracted arrays."""
+    n_samples = len(images)
+    n_cols = min(patches_per_row, n_samples)
+    n_rows_per_patch = 1 + n_clusterizers
+    n_rows_total = int(np.ceil(n_samples / patches_per_row)) * n_rows_per_patch
+
+    fig, axes = plt.subplots(
+        n_rows_total, n_cols,
+        figsize=(patch_display_size * n_cols,
+                 patch_display_size * n_rows_total)
+    )
+
+    # Normalise axes to 2-D array
+    if n_rows_total == 1 and n_cols == 1:
+        axes = np.array([[axes]])
+    elif n_rows_total == 1:
+        axes = axes.reshape(1, -1)
+    elif n_cols == 1:
+        axes = axes.reshape(-1, 1)
+
+    for i in range(n_samples):
+        row_base = (i // patches_per_row) * n_rows_per_patch
+        col = i % patches_per_row
+
+        image_display = images[i]          # (H, W, C)
+        cluster_maps_i = cluster_maps[i]   # (K, H, W) uint8
+
+        # H&E row
+        ax_he = axes[row_base, col]
+        ax_he.imshow(image_display)
+        if patch_titles[i]:
+            ax_he.set_title(patch_titles[i], fontsize=8)
+        ax_he.axis('off')
+
+        # Saliency rows
+        for k in range(n_clusterizers):
+            cluster_map = cluster_maps_i[k].astype(np.float32)  # (H, W)
+            n_clusters = 3
+            alpha_values = (cluster_map / n_clusters) ** saliency_alpha_power
+
+            overlay = np.zeros((*alpha_values.shape, 4), dtype=np.float32)
+            overlay[..., 3] = alpha_values  # black with variable alpha
+
+            ax_sal = axes[row_base + 1 + k, col]
+            ax_sal.imshow(image_display)
+            ax_sal.imshow(overlay)
+            ax_sal.axis('off')
+
+    # Hide unused axes
+    for i in range(n_samples, n_rows_total // n_rows_per_patch * n_cols):
+        for k in range(n_rows_per_patch):
+            r = (i // n_cols) * n_rows_per_patch + k
+            c = i % n_cols
+            if r < n_rows_total:
+                axes[r, c].axis('off')
+                axes[r, c].set_visible(False)
+
+    if title:
+        fig.suptitle(title, fontsize=16)
+
+    plt.tight_layout()
+
+    # Row labels on left margin
+    for row_idx, label in enumerate(row_labels):
+        y = 1 - (row_idx + 0.5) / n_rows_per_patch
+        fig.text(-0.01, y, label, fontsize=12,
+                 rotation=90, va="center", ha="center")
+
+    keep_alive = return_fig and not return_buffer
+    result = _finish_plot(fig, axes, show=keep_alive, save=output_path,
+                           return_fig=False, return_buffer=return_buffer, dpi=dpi)
+    if output_path is not None:
+        print(f"Saved: {output_path}")
+    if return_fig and not return_buffer:
+        return fig, axes
+    return result
+
 
 def _paged_path(output_path: str, start_idx: int, end_idx: int) -> str:
     """Derive a per-page file path by inserting the patch range before the extension."""
@@ -347,6 +413,7 @@ def plot_patch_gallery(
     return_fig: bool = False,
     return_buffer: bool = False,
     progress_bar: bool = True,
+    cache: bool = False,
 ) -> Optional[Union[Tuple[plt.Figure, np.ndarray], List[io.BytesIO]]]:
     """
     Create a grid gallery of tissue patches.
@@ -382,6 +449,10 @@ def plot_patch_gallery(
         Return a list of in-memory PNG buffers, one per page (always a
         list, even for a single page).
     progress_bar : bool
+    cache : bool, default=False
+        Forwarded to :func:`extract_patch_images`: cache the extracted array
+        in ``patches.obsm['patch_img']`` so later calls on the same `patches`
+        skip re-reading from slides.
 
     Returns
     -------
@@ -394,7 +465,7 @@ def plot_patch_gallery(
     >>> plot_patch_gallery(patches, slides=slides, output_path='output/gallery.png')
     >>>
     >>> # Pre-computed
-    >>> imgs = extract_patches(patches, slides, channel_first=False)
+    >>> imgs = extract_patch_images(patches, slides, channel_first=False)
     >>> plot_patch_gallery(patches, patches_array=imgs, output_path='output/gallery.png')
     """
     if patches_array is None and slides is None:
@@ -423,12 +494,13 @@ def plot_patch_gallery(
     if patches_array is None:
         if progress_bar:
             print("Extracting patches from slides...")
-        patches_array = extract_patches(
+        patches_array = extract_patch_images(
             patches, slides,
             tile_key=tile_key,
             channel_first=False,
             progress_bar=progress_bar,
             skip_errors=True,
+            cache=cache,
         )
 
     patches_list = (

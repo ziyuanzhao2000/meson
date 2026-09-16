@@ -47,6 +47,10 @@ if TYPE_CHECKING:
 
 DEFAULT_TILE_KEY = "tiles"
 
+PATCH_IMG_KEY = "patch_img"
+"""obsm key under which extract_patch_images caches extracted pixel data,
+channel-first (N, C, H, W)."""
+
 
 def tile_table_key(tile_key: str = DEFAULT_TILE_KEY) -> str:
     """Name of the AnnData table annotating ``tile_key``.

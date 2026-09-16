@@ -200,11 +200,11 @@ class TokenClusterizer:
                 raise ValueError("slides must be provided when images is an AnnData")
 
             # Import here to avoid circular dependency
-            from mesoslide.preprocessing import extract_patches
+            from mesoslide.preprocessing import extract_patch_images
 
             if show_progress:
                 print(f"Extracting {len(images)} patches...")
-            images = extract_patches(images, slides)
+            images = extract_patch_images(images, slides)
             
         # Convert to tensor if needed
         if isinstance(images, np.ndarray):
@@ -308,7 +308,7 @@ class TokenClusterizer:
         >>> masks = clusterizer(images)
         """
         from mesoslide._patch_selector import select_top_patches, select_negative_patches
-        from mesoslide.preprocessing import extract_patches
+        from mesoslide.preprocessing import extract_patch_images
 
         if image_slides is None:
             if isinstance(slides, dict):
@@ -346,10 +346,10 @@ class TokenClusterizer:
             print(f"Extracting {len(positive_patches_anndata)} positive and "
                   f"{len(negative_patches_anndata)} negative patches...")
 
-        positive_patches = extract_patches(
+        positive_patches = extract_patch_images(
             positive_patches_anndata, image_slides, tile_key=tile_key,
             channel_first=True, progress_bar=show_progress)
-        negative_patches = extract_patches(
+        negative_patches = extract_patch_images(
             negative_patches_anndata, image_slides, tile_key=tile_key,
             channel_first=True, progress_bar=show_progress)
         

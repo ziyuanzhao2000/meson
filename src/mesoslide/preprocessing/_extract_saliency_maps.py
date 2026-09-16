@@ -57,10 +57,10 @@ def extract_saliency_maps(
 
     Examples
     --------
-    >>> from mesoslide.preprocessing import extract_patches, extract_saliency_maps
+    >>> from mesoslide.preprocessing import extract_patch_images, extract_saliency_maps
     >>>
-    >>> patches = extract_patches(sdata, patch_table, channel_first=True)
-    >>> maps = extract_saliency_maps(patches, clusterizers=[c1, c2])
+    >>> patches_array = extract_patch_images(patches, slides, channel_first=True)
+    >>> maps = extract_saliency_maps(patches_array, clusterizers=[c1, c2])
     >>> print(maps.shape)   # (N, 2, H, W)  dtype=uint8
     >>>
     >>> # If all clusterizers share the same embedder, avoid redundant passes:

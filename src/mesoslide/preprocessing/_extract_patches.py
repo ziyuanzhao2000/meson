@@ -7,6 +7,7 @@ from tqdm import tqdm
 
 from mesoslide._slides import (
     DEFAULT_TILE_KEY,
+    PATCH_IMG_KEY,
     SLIDE_ID,
     slide_id_from,
     tile_table_key,
@@ -47,7 +48,7 @@ def _tile_size(wsi: "WSIData", tile_key: str) -> tuple:
     )
 
 
-def extract_patches(
+def extract_patch_images(
     patches: "ad.AnnData",
     slides,
     *,
@@ -55,13 +56,18 @@ def extract_patches(
     channel_first: bool = True,
     progress_bar: bool = True,
     skip_errors: bool = True,
+    cache: bool = False,
 ) -> Union[np.ndarray, List[np.ndarray]]:
     """
     Read image data for the tiles described by a patch table.
 
-    Coordinates come from ``patches.obs['x']`` / ``['y']`` (a tile's top-left
-    corner at level 0) and the tile size from each slide's own
-    ``wsi.tile_spec(tile_key)``, rather than from per-row bounds columns.
+    If ``patches.obsm[PATCH_IMG_KEY]`` is already populated (e.g. from a
+    previous call with ``cache=True``), it is returned directly (converted to
+    the requested ``channel_first`` layout) and no slide is read.
+
+    Otherwise, coordinates come from ``patches.obs['x']`` / ``['y']`` (a
+    tile's top-left corner at level 0) and the tile size from each slide's
+    own ``wsi.tile_spec(tile_key)``, rather than from per-row bounds columns.
 
     Parameters
     ----------
@@ -81,6 +87,12 @@ def extract_patches(
     progress_bar : bool, default=True
     skip_errors : bool, default=True
         Skip failed reads instead of raising on the first one.
+    cache : bool, default=False
+        Store the extracted array in ``patches.obsm[PATCH_IMG_KEY]``
+        (channel-first) so a later call on the same `patches` object can skip
+        reading from slides. Skipped (with a warning) if `skip_errors` caused
+        rows to be dropped, or if patches have inconsistent shapes, since
+        either case cannot be aligned 1:1 with `.obs`.
 
     Returns
     -------
@@ -99,7 +111,7 @@ def extract_patches(
     >>> import mesoslide as ms
     >>> slides = ms.open_slides(manifest)
     >>> top = ms.select_top_patches(manifest, 'UNI_SAE_123', n=100)
-    >>> imgs = ms.pp.extract_patches(top, slides, channel_first=False)
+    >>> imgs = ms.pp.extract_patch_images(top, slides, channel_first=False)
 
     Notes
     -----
@@ -107,6 +119,10 @@ def extract_patches(
     use ``ezslide.tile_images(wsi, tile_key=...)`` (block-deduping, and what
     :func:`mesoslide.tl.feature_extraction` uses) or ``wsi.iter.tile_images(key)``.
     """
+    if PATCH_IMG_KEY in patches.obsm:
+        cached = patches.obsm[PATCH_IMG_KEY]
+        return np.moveaxis(cached, 1, -1) if not channel_first else cached
+
     slide_map = _resolve_slides(slides)
     single = set(slide_map) == {None}
 
@@ -143,9 +159,10 @@ def extract_patches(
 
         try:
             h, w = sizes[slide_id]
-            # read_region returns (H, W, C) uint8 at level 0
+            # read_region returns (H, W, C) uint8 at level 0; keep channel-first
+            # internally so a cached result is always in the canonical layout.
             arr = wsi.read_region(int(patch.x), int(patch.y), w, h)
-            extracted.append(np.moveaxis(arr, -1, 0) if channel_first else arr)
+            extracted.append(np.moveaxis(arr, -1, 0))
         except Exception as e:
             if skip_errors:
                 msg = f"Warning: Failed to read patch at ({patch.x}, {patch.y}) from {slide_id}: {e}"
@@ -157,13 +174,35 @@ def extract_patches(
         raise ValueError("No patches were successfully extracted")
 
     shapes = [p.shape for p in extracted]
-    if len(set(shapes)) == 1:
-        return np.stack(extracted, axis=0)
+    if len(set(shapes)) != 1:
+        warnings.warn(
+            f"Patches have inconsistent shapes ({len(set(shapes))} distinct shapes). "
+            "Returning a list instead of a stacked array.",
+            UserWarning,
+            stacklevel=2,
+        )
+        if cache:
+            warnings.warn(
+                "cache=True has no effect: patches have inconsistent shapes and "
+                "cannot be aligned 1:1 with patches.obs.",
+                UserWarning,
+                stacklevel=2,
+            )
+        result = extracted
+        return result if channel_first else [np.moveaxis(p, 0, -1) for p in result]
 
-    warnings.warn(
-        f"Patches have inconsistent shapes ({len(set(shapes))} distinct shapes). "
-        "Returning a list instead of a stacked array.",
-        UserWarning,
-        stacklevel=2,
-    )
-    return extracted
+    stacked = np.stack(extracted, axis=0)  # channel-first (N, C, H, W)
+
+    if cache:
+        if len(extracted) == len(patch_df):
+            patches.obsm[PATCH_IMG_KEY] = stacked
+        else:
+            warnings.warn(
+                "cache=True has no effect: skip_errors dropped "
+                f"{len(patch_df) - len(extracted)} row(s), so the result cannot "
+                "be aligned 1:1 with patches.obs.",
+                UserWarning,
+                stacklevel=2,
+            )
+
+    return stacked if channel_first else np.moveaxis(stacked, 1, -1)

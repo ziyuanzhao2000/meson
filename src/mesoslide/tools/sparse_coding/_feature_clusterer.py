@@ -362,7 +362,7 @@ class FeatureClusterer:
         -------
         fig, axs
         """
-        from mesoslide.preprocessing._extract_patches import extract_patches
+        from mesoslide.preprocessing._extract_patches import extract_patch_images
         from mesoslide._patch_selector import select_exemplar_patches
 
         self._check_clustered()
@@ -390,7 +390,7 @@ class FeatureClusterer:
                 n_exemplars=1,
                 tile_key=tile_key,
             )
-            images = extract_patches(
+            images = extract_patch_images(
                 exemplar_adata, image_slides, tile_key=tile_key,
                 channel_first=False, progress_bar=True,
             )

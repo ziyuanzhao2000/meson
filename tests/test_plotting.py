@@ -119,7 +119,7 @@ class TestPatchGallery:
 
     def test_accepts_pre_extracted_images(self, manifest, open_cohort, tmp_path):
         sel = ms.select_random_patches(manifest, 4, random_state=4)
-        imgs = ms.pp.extract_patches(sel, open_cohort, channel_first=False,
+        imgs = ms.pp.extract_patch_images(sel, open_cohort, channel_first=False,
                                      progress_bar=False)
         out = tmp_path / "pre.png"
         ms.plotting.plot_patch_gallery(

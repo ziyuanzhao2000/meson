@@ -70,7 +70,7 @@ def test_extraction_matches_read_region(real_manifest):
     sel = ms.select_random_patches(real_manifest, 5, random_state=0)
     slides = ms.open_slides(real_manifest)
     try:
-        imgs = ms.pp.extract_patches(sel, slides, channel_first=False, progress_bar=False)
+        imgs = ms.pp.extract_patch_images(sel, slides, channel_first=False, progress_bar=False)
         row = sel.obs.iloc[0]
         wsi = slides[row["slide_id"]]
         spec = wsi.tile_spec("tiles")
