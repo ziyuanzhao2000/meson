@@ -1,129 +1,137 @@
+from pathlib import Path
+from typing import Optional, Union
+
 import numpy as np
 import torch
 import cv2
-from typing import Optional, Union
 from tqdm import tqdm
-import anndata
 from sklearn.cluster import KMeans
+
+from mesoslide.tools._model_stage import (
+    CallableStage,
+    ImageModelStage,
+    _require_dense_capable,
+    _resolve_model,
+    iter_array_batches,
+)
+
+
 class TokenClusterizer:
     """
     Token-level clustering and rasterization for vision transformer embeddings.
-    
-    Takes token embeddings from a ViT model, applies KMeans clustering,
-    and upsamples cluster assignments to patch image resolution.
-    
+
+    Takes per-token embeddings from a `lazyslide_models` vision foundation
+    model, applies KMeans clustering, and upsamples cluster assignments to
+    patch image resolution. Its own job is exactly that: fitting/applying the
+    KMeans model and rasterizing the result -- embedding patches into tokens
+    is delegated to `mesoslide.tools._feature_extraction.run_model_stages`,
+    the same engine `feature_extraction`/`extract_cluster_maps` use.
+
     Parameters
     ----------
-    embedder : UNIEmbedder or similar
-        Model with get_token_embeddings() method
-    kmeans : FrequencyRankedKMeans or sklearn KMeans
-        Fitted clustering model
-    token_grid_size : int, default=14
-        Spatial grid size of tokens (14×14 = 196 tokens for ViT-L/16)
+    model : str or lazyslide_models.ImageModel
+        A key into `lazyslide_models.MODEL_REGISTRY` (e.g. "uni2"), an
+        arbitrary timm model name, or an already-instantiated
+        `lazyslide_models` `ImageModel`. Must be ViT-style (exposes
+        `grid_size`, `patch_size`, `encode_image_dense`).
+    kmeans : sklearn.cluster.KMeans or compatible
+        Clustering model; fit lazily by `fit()` if not already fitted.
     interpolation : str, default='nearest'
         Interpolation method for upsampling ('nearest' or 'bilinear')
     cluster_order : np.ndarray, optional
         Custom ordering for cluster IDs. If provided, remaps cluster labels
         according to this order before rasterization.
-    feature_name: xxx
-    device : str, default='cuda'
-        Device for computation
-    
+    feature_name : str, optional
+        Used as this clusterizer's default cache key when run as a stage
+        (see `extract_cluster_maps`) and for row labels in plotting.
+    device : str, optional
+        Torch device for the vision model. Defaults to "cuda" if available,
+        else "cpu".
+    token, model_path
+        Forwarded to model resolution (see `mesoslide.tools._feature_extraction
+        .feature_extraction`).
+
     Examples
     --------
-    >>> from mesoslide.tools.embedders._legacy import UNIEmbedder
     >>> from mesoslide.tools.segmenters import TokenClusterizer
-    >>> import torch
-    >>> import joblib
-    >>> 
-    >>> # Load model and kmeans
-    >>> uni = UNIEmbedder(token='your_hf_token')
-    >>> kmeans = joblib.load('feature_classifier.joblib')
-    >>> 
-    >>> # Create clusterizer
-    >>> clusterizer = TokenClusterizer(
-    >>>     embedder=uni,
-    >>>     kmeans=kmeans,
-    >>>     token_grid_size=14
-    >>> )
-    >>> 
-    >>> # Process batch
+    >>> from sklearn.cluster import KMeans
+    >>>
+    >>> clusterizer = TokenClusterizer(model="uni2", kmeans=KMeans(n_clusters=3))
+    >>>
+    >>> # Process a batch of images directly
     >>> images = torch.randn(8, 3, 224, 224)  # batch of 8 images
     >>> cluster_masks = clusterizer(images, output_size=(224, 224))
     >>> # Returns: (8, 224, 224) uint8 array with cluster IDs
     """
-    
+
     def __init__(
         self,
-        embedder,
+        model,
         kmeans,
-        token_grid_size: int = 14,
+        *,
         interpolation: str = 'nearest',
         cluster_order: Optional[np.ndarray] = None,
         feature_name: str = '',
-        device: str = 'cuda'
+        device: Optional[str] = None,
+        token: Optional[str] = None,
+        model_path: "str | Path | None" = None,
     ):
-        self.embedder = embedder
+        self.model, self.model_name = _resolve_model(model, model_path=model_path, token=token)
+        _require_dense_capable(self.model, self.model_name)
         self.kmeans = kmeans
-        self.token_grid_size = token_grid_size
         self.interpolation = interpolation
         self.cluster_order = cluster_order
         self.feature_name = feature_name
-        self.device = device
-        
-        # Validate interpolation
+        self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+
         if interpolation not in ['nearest', 'bilinear']:
             raise ValueError(f"interpolation must be 'nearest' or 'bilinear', got {interpolation}")
-        
+
         self.cv2_interp = (
-            cv2.INTER_NEAREST_EXACT if interpolation == 'nearest' 
+            cv2.INTER_NEAREST_EXACT if interpolation == 'nearest'
             else cv2.INTER_LINEAR
         )
-    
-    def _cluster_tokens(self, token_embeddings: torch.Tensor) -> np.ndarray:
+
+    def _cluster_tokens(self, token_embeddings) -> np.ndarray:
         """
         Apply KMeans clustering to token embeddings.
-        
+
         Parameters
         ----------
-        token_embeddings : torch.Tensor
+        token_embeddings : torch.Tensor or np.ndarray
             Shape (B, N_tokens, embed_dim)
-        
+
         Returns
         -------
         cluster_maps : np.ndarray
             Shape (B, grid_h, grid_w) with cluster IDs
         """
+        if torch.is_tensor(token_embeddings):
+            token_embeddings = token_embeddings.detach().cpu().numpy()
+        token_embeddings = token_embeddings.astype(np.float64)
+
         B, N, D = token_embeddings.shape
-        assert N == self.token_grid_size ** 2, \
-            f"Expected {self.token_grid_size**2} tokens, got {N}"
-        
-        # Flatten and predict
-        token_embeddings_np = token_embeddings.cpu().numpy().astype(np.float64)
+        gh, gw = self.model.grid_size
+        assert N == gh * gw, f"Expected {gh * gw} tokens ({gh}x{gw} grid), got {N}"
 
         cluster_maps = []
-        
         for i in range(B):
-            flat_tokens = token_embeddings_np[i]  # (N, D)
-            labels = self.kmeans.predict(flat_tokens)
-            
-            # Reshape to grid
-            cluster_map = labels.reshape(self.token_grid_size, self.token_grid_size)
-            cluster_maps.append(cluster_map)
-        
+            labels = self.kmeans.predict(token_embeddings[i])  # (N,)
+            cluster_maps.append(labels.reshape(gh, gw))
+
         return np.array(cluster_maps, dtype=np.uint8)
-    
+
     def _rasterize(self, cluster_maps: np.ndarray, output_size: tuple) -> np.ndarray:
         """
         Upsample cluster maps to target resolution.
-        
+
         Parameters
         ----------
         cluster_maps : np.ndarray
             Shape (B, grid_h, grid_w)
         output_size : tuple
             Target (height, width)
-        
+
         Returns
         -------
         rasterized : np.ndarray
@@ -131,29 +139,41 @@ class TokenClusterizer:
         """
         B = cluster_maps.shape[0]
         H, W = output_size
-        
+
         rasterized = np.zeros((B, H, W), dtype=np.uint8)
-        
+
         for i in range(B):
             cluster_map = cluster_maps[i]
-            
-            # Remap if cluster_order provided
+
             if self.cluster_order is not None:
                 cluster_map = self.cluster_order[cluster_map]
-            
-            # Upsample
+
             upsampled = cv2.resize(
                 cluster_map,
                 (W, H),
                 interpolation=self.cv2_interp
             )
             rasterized[i] = upsampled
-        
+
         return rasterized
-    
+
+    def as_stage(self, *, name: Optional[str] = None, cache: bool = True,
+                 overwrite: bool = False) -> CallableStage:
+        """Wrap this clusterizer's `_cluster_tokens` as a `ModelStage`.
+
+        Used by `extract_cluster_maps` (and `__call__`/`fit()` internally) to
+        feed into `run_model_stages`'s chain, downstream of an
+        `ImageModelStage(dense=True)`.
+        """
+        stage_name = name or self.feature_name or f"cluster_{id(self)}"
+        return CallableStage(
+            self._cluster_tokens, name=stage_name, input_kind="dense",
+            output_kind="dense", cache=cache, overwrite=overwrite, device="cpu",
+        )
+
     def __call__(
         self,
-        images: Union[torch.Tensor, np.ndarray, 'anndata._core.anndata.AnnData'],
+        images,
         slides=None,
         output_size: Optional[tuple] = None,
         batch_size: int = 16,
@@ -161,87 +181,76 @@ class TokenClusterizer:
     ) -> np.ndarray:
         """
         Generate cluster masks for a batch of images.
-        
+
         Parameters
         ----------
         images : torch.Tensor, np.ndarray, or AnnData
             Input images. Can be:
-            - torch.Tensor: (N, C, H, W) in [0, 1]
-            - np.ndarray: (N, H, W, C) in [0, 255]
+            - torch.Tensor: (N, C, H, W)
+            - np.ndarray: (N, C, H, W) or (N, H, W, C)
             - AnnData: selected tiles, with .obs columns x, y (+ slide_id)
         slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
             Required if images is an AnnData. Used to read the tile pixels.
         output_size : tuple, optional
-            Target (height, width) for masks. If None, uses input image size.
+            Target (height, width) for masks. If None, uses each patch's own
+            native size.
         batch_size : int, default=16
             Batch size for processing
         show_progress : bool, default=True
             Whether to show progress bar
-        
+
         Returns
         -------
         cluster_masks : np.ndarray
-            Shape (N, H, W), dtype uint8
-            Each value is a cluster ID
-        
+            Shape (N, H, W), dtype uint8. Each value is a cluster ID.
+
         Examples
         --------
         >>> # Method 1: Direct numpy array
-        >>> patches = np.random.randint(0, 255, (10, 224, 224, 3), dtype=np.uint8)
+        >>> patches = np.random.randint(0, 255, (10, 3, 224, 224), dtype=np.uint8)
         >>> masks = clusterizer(patches)
-        
+
         >>> # Method 2: From a selected patch table
         >>> top = mesoslide.select_top_patches(manifest, 'UNI_SAE_123', n=100)
         >>> masks = clusterizer(top, slides=mesoslide.open_slides(manifest))
         """
-        # Handle AnnData input - read the underlying tiles
-        if hasattr(images, 'obs'):  # It's an AnnData object
+        if hasattr(images, 'obs'):
             if slides is None:
                 raise ValueError("slides must be provided when images is an AnnData")
 
-            # Import here to avoid circular dependency
-            from mesoslide.preprocessing import extract_patch_images
+            from mesoslide.preprocessing._extract_patches import extract_patch_images
+            from mesoslide.tools._feature_extraction import run_model_stages
 
-            if show_progress:
-                print(f"Extracting {len(images)} patches...")
-            images = extract_patch_images(images, slides)
-            
-        # Convert to tensor if needed
-        if isinstance(images, np.ndarray):
-            # Assume (N, C, H, W) uint8 or uint16 format
-            images = torch.from_numpy(images).float() / 255.0
+            if output_size is None:
+                pixels = extract_patch_images(
+                    images, slides, channel_first=True,
+                    progress_bar=show_progress, cache=True,
+                )
+                output_size = tuple(pixels.shape[-2:])
+
+            fm_stage = ImageModelStage(self.model, dense=True, device=self.device)
+            cluster_stage = self.as_stage()
+            table = run_model_stages(
+                images, [fm_stage, cluster_stage], slides=slides,
+                batch_size=batch_size, progress_bar=show_progress, save=False,
+            )
+            cluster_maps = table.obsm[cluster_stage.name]
+            return self._rasterize(cluster_maps, output_size)
 
         if output_size is None:
-            output_size = (images.shape[2], images.shape[3])
-        
-        # Process in batches
+            output_size = (images.shape[-2], images.shape[-1])
+
+        fm_stage = ImageModelStage(self.model, dense=True, device=self.device)
         all_cluster_maps = []
-        n_batches = int(np.ceil(len(images) / batch_size))
-        
-        iterator = range(n_batches)
-        if show_progress:
-            iterator = tqdm(iterator, desc="Clustering patches")
-        
-        self.embedder.model.eval()
-        with torch.inference_mode():
-            for i in iterator:
-                batch = images[i * batch_size:(i + 1) * batch_size].to(self.device)
-                
-                # Get token embeddings
-                token_embeds = self.embedder.get_token_embeddings(batch, remove_cls=True)
-                
-                # Cluster
-                cluster_maps = self._cluster_tokens(token_embeds)
-                all_cluster_maps.append(cluster_maps)
-        
-        # Concatenate all batches
+        batches = iter_array_batches(images, batch_size)
+        iterator = tqdm(batches, desc="Clustering patches") if show_progress else batches
+        for batch in iterator:
+            token_embeds = fm_stage(batch)
+            all_cluster_maps.append(self._cluster_tokens(token_embeds))
         all_cluster_maps = np.concatenate(all_cluster_maps, axis=0)
-        
-        # Rasterize
-        rasterized_masks = self._rasterize(all_cluster_maps, output_size)
-        
-        return rasterized_masks
-    
+
+        return self._rasterize(all_cluster_maps, output_size)
+
     def fit(
         self,
         slides,
@@ -253,21 +262,21 @@ class TokenClusterizer:
         take_every: Union[int, None] = None,
         tile_key: str = 'tiles',
         image_slides=None,
-    ) -> np.ndarray:
+    ) -> "TokenClusterizer":
         """
         Compute cluster order based on differential abundance between positive and negative patches.
-        
+
         This method:
         1. Selects positive (high-scoring) and negative (zero-score) patches for a feature
         2. Extracts image patches and computes token embeddings
         3. Predicts cluster labels for all tokens
         4. Computes differential cluster frequencies (positive - negative)
         5. Ranks clusters by differential abundance
-        6. Updates self.cluster_order and returns the ordering
-        
+        6. Updates self.cluster_order and returns self
+
         This is useful for identifying which tissue structures (clusters) are
         most enriched in patches where a specific SAE feature is active.
-        
+
         Parameters
         ----------
         slides : slides_table, AnnData, WSIData, or sequence/mapping of either
@@ -290,10 +299,8 @@ class TokenClusterizer:
 
         Returns
         -------
-        cluster_order : np.ndarray
-            Indices that sort clusters by differential abundance (high to low).
-            Also stored in self.cluster_order.
-        
+        self, with `cluster_order` updated.
+
         Examples
         --------
         >>> # Compute cluster order for a specific SAE feature
@@ -308,7 +315,7 @@ class TokenClusterizer:
         >>> masks = clusterizer(images)
         """
         from mesoslide._patch_selector import select_top_patches, select_negative_patches
-        from mesoslide.preprocessing import extract_patch_images
+        from mesoslide.tools._feature_extraction import run_model_stages
 
         if image_slides is None:
             if isinstance(slides, dict):
@@ -346,87 +353,61 @@ class TokenClusterizer:
             print(f"Extracting {len(positive_patches_anndata)} positive and "
                   f"{len(negative_patches_anndata)} negative patches...")
 
-        positive_patches = extract_patch_images(
-            positive_patches_anndata, image_slides, tile_key=tile_key,
-            channel_first=True, progress_bar=show_progress)
-        negative_patches = extract_patch_images(
-            negative_patches_anndata, image_slides, tile_key=tile_key,
-            channel_first=True, progress_bar=show_progress)
-        
-        # Convert to tensors
-        positive_patches = torch.from_numpy(positive_patches).float() / 255.0
-        negative_patches = torch.from_numpy(negative_patches).float() / 255.0
-        
-        if show_progress:
-            print("Computing token embeddings...")
-        
-        # Extract token embeddings for both sets
-        all_patches = torch.cat([positive_patches, negative_patches], dim=0)
-        all_tokens = []
-        
-        n_batches = int(np.ceil(len(all_patches) / batch_size))
-        iterator = range(n_batches)
-        if show_progress:
-            iterator = tqdm(iterator, desc="Extracting tokens")
-        
-        self.embedder.model.eval()
-        with torch.inference_mode():
-            for i in iterator:
-                batch = all_patches[i * batch_size:(i + 1) * batch_size].to(self.device)
-                token_embeds = self.embedder.get_token_embeddings(batch, remove_cls=True)
-                
-                # Flatten: (B, N, D) -> (B*N, D)
-                flat = token_embeds.reshape(-1, token_embeds.shape[-1]).cpu().numpy()
-                all_tokens.append(flat)
-        
-        all_tokens = np.concatenate(all_tokens, axis=0).astype(np.float64)
-        
-        # Split back into positive and negative tokens
-        n_pos = len(positive_patches)
-        n_neg = len(negative_patches)
-        tokens_per_patch = self.token_grid_size ** 2
-        pos_token_count = n_pos * tokens_per_patch
-        neg_token_count = n_neg * tokens_per_patch
-        
-        positive_tokens = all_tokens[:pos_token_count]
-        negative_tokens = all_tokens[pos_token_count:pos_token_count + neg_token_count]
-        
+        dense_key = "_fit_dense"
+        fm_stage = ImageModelStage(self.model, dense=True, name=dense_key, device=self.device)
+
+        run_model_stages(
+            positive_patches_anndata, [fm_stage], slides=image_slides,
+            tile_key=tile_key, batch_size=batch_size,
+            progress_bar=show_progress, save=False,
+        )
+        run_model_stages(
+            negative_patches_anndata, [fm_stage], slides=image_slides,
+            tile_key=tile_key, batch_size=batch_size,
+            progress_bar=show_progress, save=False,
+        )
+
+        pos_dense = positive_patches_anndata.obsm[dense_key]  # (n_pos, N_tokens, D)
+        neg_dense = negative_patches_anndata.obsm[dense_key]  # (n_neg, N_tokens, D)
+        positive_tokens = pos_dense.reshape(-1, pos_dense.shape[-1]).astype(np.float64)
+        negative_tokens = neg_dense.reshape(-1, neg_dense.shape[-1]).astype(np.float64)
+
         if show_progress:
             print("Predicting cluster labels...")
-        
+
         # Fit KMeans if not already fitted
         if not hasattr(self.kmeans, 'cluster_centers_'):
             if show_progress:
                 print("Fitting KMeans on all tokens...")
             self.kmeans = KMeans(n_clusters=3, random_state=0).fit(positive_tokens)
-        
+
         # Predict cluster labels
         positive_labels = self.kmeans.predict(positive_tokens)
         negative_labels = self.kmeans.predict(negative_tokens)
-        
+
         # Get number of clusters
         n_clusters = len(np.unique(np.concatenate([positive_labels, negative_labels])))
         if hasattr(self.kmeans, 'n_clusters'):
             n_clusters = self.kmeans.n_clusters
-        
+
         # Compute normalized frequencies
         positive_counts = np.bincount(positive_labels, minlength=n_clusters)
         negative_counts = np.bincount(negative_labels, minlength=n_clusters)
-        
+
         percentage_positive = positive_counts / (positive_counts.sum() + 1e-12)
         percentage_negative = negative_counts / (negative_counts.sum() + 1e-12)
-        
+
         # Compute differential abundance
         diff_percentage = percentage_positive - percentage_negative
-        
+
         # Rank clusters by differential abundance (high to low)
         cluster_order = np.argsort(np.argsort(-diff_percentage))
-        
+
         # Store and return
         self.cluster_order = cluster_order
-        
+
         if show_progress:
             print(f"Cluster order computed and stored. Top 3 enriched clusters: {cluster_order[:3]}")
             print(f"Differential abundances: {diff_percentage[cluster_order[:3]]}")
-        
+
         return self

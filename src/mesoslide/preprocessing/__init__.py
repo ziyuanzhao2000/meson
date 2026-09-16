@@ -7,7 +7,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
     __name__,
     submod_attrs={
     '_extract_patches': ['extract_patch_images'],
-    '_extract_saliency_maps': ['extract_saliency_maps'],
+    '_extract_cluster_maps': ['extract_cluster_maps'],
     '_registration': ['ForwardTransform'],
     }
 )

@@ -14,6 +14,14 @@ clustering calls onto a given `obsm` entry without needing them in `.X`.
 Named `feature_extraction` to match lazyslide's own `zs.tl.feature_extraction`.
 `embed_patch` is kept as a deprecated alias.
 
+Internally, `feature_extraction` builds a `ModelStage` chain and delegates to
+`run_model_stages` (see `mesoslide.tools._model_stage`), the same engine
+`TokenClusterizer`/`extract_cluster_maps` use at patch-table scope. A single
+call computes exactly one chain from the image -- pooled (optionally
+followed by `sparse_transform`), or dense (followed by the required
+`reducer`) -- since these are two independent branches off the same image
+batch, not a linear chain; `dense=True` and `sparse=True` together raise.
+
 The KMeans post-processing branch previously handled by this module has
 moved, unchanged, to `mesoslide.tools._legacy._embed_patch`.
 """
@@ -22,63 +30,38 @@ from __future__ import annotations
 
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import (
+    TYPE_CHECKING,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Sequence,
+    Union,
+)
 
 import numpy as np
 import pandas as pd
 import torch
 from anndata import AnnData
-from scipy.sparse import csr_matrix, hstack, issparse
+from scipy.sparse import csr_matrix, hstack, issparse, vstack
 from spatialdata.models import TableModel
-from torch.utils.data import DataLoader
 from tqdm import tqdm
+
+from ._model_stage import (
+    CallableStage,
+    ImageModelStage,
+    ModelStage,
+    _require_dense_capable,
+    _resolve_model,
+    iter_array_batches,
+    to_numpy,
+)
 
 if TYPE_CHECKING:
     import scipy.sparse as sp
     from lazyslide_models.base import ImageModel
     from wsidata import WSIData
-
-
-def _resolve_model(model, *, model_path=None, token=None):
-    """Resolve a model name/instance to an `(ImageModel, name)` pair.
-
-    Mirrors lazyslide's own `load_models` helper: a registered name is
-    instantiated from `lazyslide_models.MODEL_REGISTRY`; an unregistered name
-    falls back to a generic timm wrapper; an already-instantiated model is
-    used as-is.
-    """
-    if isinstance(model, str):
-        from lazyslide_models import MODEL_REGISTRY
-        if model in MODEL_REGISTRY:
-            instance, name = MODEL_REGISTRY[model](model_path=model_path, token=token), model
-        else:
-            from lazyslide_models import TimmModel
-            instance, name = TimmModel(model, model_path=model_path, token=token), model
-    else:
-        instance, name = model, model.name
-
-    from ._timm_transform_patch import patch_transform_if_needed
-    patch_transform_if_needed(instance)
-    return instance, name
-
-
-def _require_dense_capable(model, model_name: str) -> None:
-    """Check the model can produce per-token embeddings for dense=True.
-
-    Raises rather than letting AttributeError surface later mid-loop, and
-    names which registered models already work: everything built on
-    `lazyslide_models.base.TimmViTModel` (uni, uni2, virchow, virchow2, ...).
-    """
-    from lazyslide_models.base import ViTModelProtocol
-
-    if not isinstance(model, ViTModelProtocol):
-        raise NotImplementedError(
-            f"dense=True requires a ViT-style model exposing grid_size, "
-            f"patch_size and encode_image_dense (see "
-            f"lazyslide_models.base.ViTModelProtocol); '{model_name}' does not. "
-            f"Registered models built on lazyslide_models.base.TimmViTModel "
-            f"(uni, uni2, virchow, virchow2, ...) support this."
-        )
 
 
 def _validate_reduced_shape(reduced, tokens_shape: tuple) -> torch.Tensor:
@@ -136,6 +119,371 @@ def _write_sparse_features(table: AnnData, prefix: str, matrix) -> AnnData:
     )
 
 
+# ---------------------------------------------------------------------------
+# run_model_stages: the general chain-of-stages engine
+# ---------------------------------------------------------------------------
+
+_PROVENANCE_KEY = "model_stages"
+
+
+def _stage_key_exists(table: AnnData, stage: ModelStage) -> bool:
+    if stage.output_kind == "sparse":
+        return any(v.startswith(f"{stage.name}_") for v in table.var_names)
+    return stage.name in table.obsm
+
+
+def _stage_key_shape_ok(table: AnnData, stage: ModelStage) -> bool:
+    if stage.output_kind == "sparse":
+        return True
+    arr = table.obsm[stage.name]
+    return arr.shape[0] == table.n_obs
+
+
+def _stage_provenance(stage: ModelStage) -> dict:
+    fn = getattr(stage, "provenance", None)
+    return fn() if callable(fn) else {}
+
+
+def _check_device_available(device: Optional[str], stage_index: int, stage_name: str) -> None:
+    if device is None or "cuda" not in device:
+        return
+    if not torch.cuda.is_available():
+        raise ValueError(
+            f"stage {stage_index} ('{stage_name}'): requested device '{device}' "
+            f"but CUDA is not available."
+        )
+    if ":" in device:
+        idx = int(device.split(":", 1)[1])
+        if idx >= torch.cuda.device_count():
+            raise ValueError(
+                f"stage {stage_index} ('{stage_name}'): requested device "
+                f"'{device}' but only {torch.cuda.device_count()} CUDA "
+                f"device(s) are visible."
+            )
+
+
+def _preflight(
+    table: AnnData,
+    stages: List[ModelStage],
+    *,
+    overwrite: Optional[bool],
+    devices: Optional[List[str]],
+    input_key: Optional[str],
+    has_pixels: bool,
+) -> Optional[int]:
+    """Validate the whole chain before anything runs.
+
+    Returns the index of the first stage that actually needs to execute, or
+    None if every stage is already cached and nothing needs to run.
+    """
+    n = len(stages)
+    seen: Dict[str, int] = {}
+    exists = [False] * n
+    eff_overwrite = [False] * n
+
+    for i, stage in enumerate(stages):
+        if stage.cache and stage.name in seen:
+            raise ValueError(
+                f"stage {i} ('{stage.name}'): duplicate name, already used by "
+                f"stage {seen[stage.name]} in this call."
+            )
+        if stage.cache:
+            seen[stage.name] = i
+
+        eff_overwrite[i] = stage.overwrite if overwrite is None else overwrite
+        eff_device = devices[i] if devices is not None else stage.device
+        _check_device_available(eff_device, i, stage.name)
+
+        exists[i] = bool(stage.cache) and _stage_key_exists(table, stage)
+        if exists[i]:
+            if not _stage_key_shape_ok(table, stage):
+                raise ValueError(
+                    f"stage {i} ('{stage.name}'): existing cached entry is "
+                    f"structurally incompatible with output_kind="
+                    f"'{stage.output_kind}' (e.g. a row-count mismatch). "
+                    f"Refusing to overwrite automatically -- inspect or "
+                    f"remove it manually."
+                )
+            recorded = table.uns.get(_PROVENANCE_KEY, {}).get(stage.name)
+            current = _stage_provenance(stage)
+            if recorded is not None and current and recorded != current and not eff_overwrite[i]:
+                raise ValueError(
+                    f"stage {i} ('{stage.name}'): existing cache was produced "
+                    f"by a different configuration ({recorded!r} vs "
+                    f"{current!r}). Pass overwrite=True to replace it."
+                )
+
+    # Scan backward: a cacheable, still-valid stage is a safe resume point
+    # (everything before it can stay skipped), so we stop extending run_from
+    # further back once we hit one. A cache=False stage has no persisted
+    # state of its own -- it only needs to (re)run when something after it
+    # does, so it never independently starts a run_from extension.
+    run_from = None
+    if any(stage.cache for stage in stages):
+        for i in range(n - 1, -1, -1):
+            stage = stages[i]
+            if stage.cache:
+                dirty = (not exists[i]) or eff_overwrite[i]
+                if dirty:
+                    run_from = i
+                elif run_from is not None:
+                    break
+            elif run_from is not None:
+                run_from = i
+    else:
+        # No stage in the chain persists anything -- there is nothing to
+        # resume from, so the whole chain always runs.
+        run_from = 0
+
+    if run_from is not None:
+        first = stages[run_from]
+        if run_from == 0:
+            if first.input_kind == "image":
+                if not has_pixels:
+                    raise ValueError(
+                        f"stage 0 ('{first.name}'): input_kind='image' but no "
+                        f"`slides` was provided to read pixels from."
+                    )
+            else:
+                if input_key is None:
+                    raise ValueError(
+                        f"stage 0 ('{first.name}'): input_kind="
+                        f"'{first.input_kind}' has no pixel source; pass "
+                        f"input_key= naming an existing cached array."
+                    )
+                if input_key not in table.obsm:
+                    raise ValueError(
+                        f"stage 0 ('{first.name}'): input_key='{input_key}' "
+                        f"not found in obsm."
+                    )
+        else:
+            prev = stages[run_from - 1]
+            if prev.output_kind != first.input_kind:
+                raise ValueError(
+                    f"stage {run_from} ('{first.name}'): input_kind="
+                    f"'{first.input_kind}' has no source -- stage "
+                    f"{run_from - 1} ('{prev.name}') produces output_kind="
+                    f"'{prev.output_kind}'."
+                )
+            if not exists[run_from - 1]:
+                raise ValueError(
+                    f"stage {run_from} ('{first.name}'): input_kind="
+                    f"'{first.input_kind}' has no source -- stage "
+                    f"{run_from - 1} ('{prev.name}') produces output_kind="
+                    f"'{prev.output_kind}' but its key '{prev.name}' does not "
+                    f"exist yet and stage {run_from - 1} is not scheduled to run."
+                )
+
+    return run_from
+
+
+def _build_table_for_slide(slide: "WSIData", tile_key: str) -> AnnData:
+    """Bootstrap a fresh tile table when `slide` has none yet for `tile_key`."""
+    tiles = slide[tile_key]
+    bounds = tiles.bounds
+    n_tiles = len(tiles)
+    obs = pd.DataFrame({
+        "tile_id": tiles["tile_id"].to_numpy() if "tile_id" in tiles.columns
+                   else np.arange(n_tiles),
+        "tissue_id": tiles["tissue_id"].to_numpy() if "tissue_id" in tiles.columns
+                     else 0,
+        "x": bounds["minx"].to_numpy(),
+        "y": bounds["miny"].to_numpy(),
+        "library_id": pd.Categorical([tile_key] * n_tiles),
+    })
+    # Index must be str for AnnData, but the tile_id *column* has to keep the
+    # tiles element's own dtype: SpatialData matches instance_key values
+    # against the element index, and a str/int mismatch makes the table look
+    # unrelated to its shapes (spatialdata_plot then refuses to render it).
+    # Assign from a bare array so the index inherits no name -- an index
+    # named after a column whose values differ is rejected on write.
+    # This mirrors wsidata.io.add_features.
+    obs.index = obs["tile_id"].astype(str).to_numpy()
+    return TableModel.parse(
+        AnnData(obs=obs),
+        region=tile_key, region_key="library_id", instance_key="tile_id",
+    )
+
+
+def run_model_stages(
+    slide_or_patches,
+    stages: Union[Sequence[ModelStage], ModelStage],
+    *,
+    slides=None,
+    input_key: Optional[str] = None,
+    tile_key: str = "tiles",
+    table_key: Optional[str] = None,
+    overwrite: Optional[bool] = None,
+    device: Union[str, Sequence[str], None] = None,
+    batch_size: int = 32,
+    num_workers: int = 0,
+    block: bool = True,
+    cache_size: int = 4,
+    save: bool = True,
+    progress_bar: bool = True,
+) -> Union["WSIData", AnnData]:
+    """Run an ordered chain of `ModelStage`s against a slide or a patch table.
+
+    Parameters
+    ----------
+    slide_or_patches : WSIData or AnnData
+        A whole-slide `WSIData` (tiles read via `ezslide.tile_images`,
+        results cached in `slide.tables[table_key]` and persisted via
+        `slide.write_element` when `save=True`), or a patch-table `AnnData`
+        (tiles read via `mesoslide.pp.extract_patch_images(slide_or_patches,
+        slides)`, results cached directly in `.obsm` -- no disk persistence).
+    stages : ModelStage or sequence of ModelStage
+        A linear chain: stage i's output feeds stage i+1's input. The first
+        stage need not consume images -- see `input_key`.
+    slides : optional
+        Required when `slide_or_patches` is a patch-table AnnData and the
+        first stage that actually needs to run consumes images.
+    input_key : str, optional
+        Name of an existing `.obsm` entry to start the chain from, when the
+        first stage that needs to run doesn't consume images (e.g. resuming
+        with a new downstream stage against a previously cached embedding).
+    overwrite : bool, optional
+        None (default) respects each stage's own `.overwrite`; a bool
+        overrides every stage's setting for this call only.
+    device : str, sequence of str, optional
+        None (default) respects each stage's own `.device`; a single string
+        overrides every stage for this call; a sequence the same length as
+        `stages` overrides positionally.
+    batch_size, num_workers, block, cache_size
+        Forwarded to the pixel-reading path (whole-slide `ezslide.tile_images`
+        / `DataLoader`, or `extract_patch_images` at patch-table scale).
+    save : bool, default=True
+        Whole-slide only: persist the updated table via `slide.write_element`.
+
+    Returns
+    -------
+    The same `slide_or_patches` object (mutated in place for the whole-slide
+    case; also mutated in place for the patch-table case, except a stage
+    with `output_kind="sparse"` at patch-table scale, which is unsupported --
+    see Raises).
+
+    Raises
+    ------
+    ValueError
+        If the chain fails preflight validation (see module docstring):
+        unresolvable input, duplicate stage names, an incompatible existing
+        cache entry, or an unavailable device.
+    NotImplementedError
+        A patch-table `AnnData` with a stage declaring `output_kind="sparse"`
+        -- writing sparse features requires rebuilding `.X`/`.var` together
+        into a *new* AnnData (see `_write_sparse_features`), which can't be
+        reflected back onto a caller-owned object the way whole-slide's
+        `slide.tables[table_key] = table` reassignment can.
+    """
+    stages = list(stages) if isinstance(stages, (list, tuple)) else [stages]
+    if not stages:
+        raise ValueError("stages must contain at least one ModelStage.")
+
+    is_patch_table = hasattr(slide_or_patches, "obs")
+
+    if is_patch_table and any(s.output_kind == "sparse" for s in stages):
+        raise NotImplementedError(
+            "output_kind='sparse' stages are not supported when running "
+            "against a patch-table AnnData directly (sparse output requires "
+            "rebuilding X/var together into a new AnnData object, which "
+            "can't be reflected back onto a caller-owned reference)."
+        )
+
+    devices: Optional[List[str]] = None
+    if device is not None:
+        devices = [device] * len(stages) if isinstance(device, str) else list(device)
+        if len(devices) != len(stages):
+            raise ValueError(
+                f"device sequence must have length {len(stages)} (one per "
+                f"stage), got {len(devices)}."
+            )
+        for stage, d in zip(stages, devices):
+            stage.to(d)
+
+    if is_patch_table:
+        table = slide_or_patches
+        has_pixels = slides is not None
+    else:
+        table_key = table_key or f"{tile_key}_table"
+        table = slide_or_patches.tables.get(table_key)
+        if table is None:
+            table = _build_table_for_slide(slide_or_patches, tile_key)
+        has_pixels = True
+
+    run_from = _preflight(
+        table, stages, overwrite=overwrite, devices=devices,
+        input_key=input_key, has_pixels=has_pixels,
+    )
+    if run_from is None:
+        return slide_or_patches
+
+    active = stages[run_from:]
+    first = active[0]
+
+    if first.input_kind == "image":
+        if is_patch_table:
+            from mesoslide.preprocessing._extract_patches import extract_patch_images
+            pixels = extract_patch_images(
+                table, slides, tile_key=tile_key, channel_first=True,
+                progress_bar=progress_bar,
+            )
+            batches = iter_array_batches(pixels, batch_size)
+        else:
+            import ezslide
+            from torch.utils.data import DataLoader
+
+            dataset = ezslide.tile_images(
+                slide_or_patches, tile_key=tile_key, transform=None,
+                block=block, num_workers=num_workers, cache_size=cache_size,
+            )
+            loader = DataLoader(
+                dataset, batch_size=batch_size, shuffle=False,
+                num_workers=num_workers,
+                multiprocessing_context="spawn" if num_workers > 0 else None,
+            )
+            batches = (b["image"] for b in loader)
+    else:
+        start_key = input_key if run_from == 0 else stages[run_from - 1].name
+        batches = iter_array_batches(table.obsm[start_key], batch_size)
+
+    accum: Dict[int, list] = {j: [] for j in range(len(active)) if active[j].cache}
+
+    iterator = tqdm(batches, desc="Running model stages") if progress_bar else batches
+    for batch in iterator:
+        x = batch
+        for j, stage in enumerate(active):
+            x = stage(x)
+            if not stage.cache:
+                continue
+            if stage.output_kind == "sparse":
+                accum[j].append(x if issparse(x) else csr_matrix(x))
+            else:
+                accum[j].append(to_numpy(x))
+
+    for j, stage in enumerate(active):
+        if not stage.cache:
+            continue
+        if stage.output_kind == "sparse":
+            result = vstack(accum[j]).tocsr()
+            table = _write_sparse_features(table, stage.name, result)
+        else:
+            result = np.concatenate(accum[j], axis=0)
+            table.obsm[stage.name] = result
+        table.uns.setdefault(_PROVENANCE_KEY, {})[stage.name] = _stage_provenance(stage)
+
+    if is_patch_table:
+        return table
+
+    slide_or_patches.tables[table_key] = table
+    if save:
+        slide_or_patches.write_element(table_key, overwrite=True)
+    return slide_or_patches
+
+
+# ---------------------------------------------------------------------------
+# feature_extraction: the friendly, whole-slide-oriented wrapper
+# ---------------------------------------------------------------------------
+
 def feature_extraction(
     slide: "WSIData",
     model: "str | ImageModel",
@@ -160,12 +508,20 @@ def feature_extraction(
     amp: bool = False,
     overwrite: bool = False,
     save: bool = True,
+    progress_bar: bool = True,
 ) -> "WSIData":
     """Embed every tile of `slide[tile_key]` with a vision foundation model.
 
-    The pooled embedding is written to `slide.tables[table_key].obsm[key_added]`
-    (`key_added` defaults to the resolved model name). Requires
-    `slide[tile_key]` to already exist (see `lazyslide.pp.tile_tissues`).
+    A single call computes exactly one chain from the image: the pooled
+    embedding (optionally followed by `sparse_transform`), or, when
+    `dense=True`, the dense per-token embedding (followed by the required
+    `reducer`) -- these are two independent branches off the same image
+    batch, not a linear chain, so `dense=True` and `sparse=True` together
+    raise `ValueError`; call `feature_extraction` twice, once per chain, to
+    get both. The pooled embedding is written to
+    `slide.tables[table_key].obsm[key_added]` (`key_added` defaults to the
+    resolved model name). Requires `slide[tile_key]` to already exist (see
+    `lazyslide.pp.tile_tissues`).
 
     Parameters
     ----------
@@ -185,24 +541,21 @@ def feature_extraction(
         element types, and `tile_key` already names the tiles shapes element.
     key_added
         `obsm` key to write the pooled embeddings under. Defaults to the
-        resolved model name.
+        resolved model name. Ignored when `dense=True` (nothing pooled is
+        computed in that call).
     dense
-        Also compute a reduced per-token map for each tile, via `reducer`.
-        Requires a ViT-style model (`grid_size`, `patch_size`,
-        `encode_image_dense`) -- true today for every `MODEL_REGISTRY` entry
-        built on `lazyslide_models.base.TimmViTModel` (uni, uni2, virchow,
-        virchow2, ...).
+        Compute a reduced per-token map for each tile, via `reducer`, instead
+        of the pooled embedding. Requires a ViT-style model (`grid_size`,
+        `patch_size`, `encode_image_dense`) -- true today for every
+        `MODEL_REGISTRY` entry built on `lazyslide_models.base.TimmViTModel`
+        (uni, uni2, virchow, virchow2, ...).
     reducer
         Required when `dense=True` and the dense map still needs computing.
         Maps a batch of per-token embeddings, `(B, N_tokens, D)`, to one score
         per token, `(B, N_tokens)` (a trailing size-1 axis is also accepted
-        and squeezed). Called once per DataLoader batch inside the same
-        `inference_mode`/`autocast` context as the forward pass, on a tensor
-        still on `device` -- the reducer decides whether to move it to CPU.
-        Unlike lazyslide's own `dense=True` (which stores every unreduced
-        token vector as a new table row, `(n_tiles * N_tokens, D)`), reducing
-        first keeps the result to a single flat `obsm` entry the same size as
-        any other feature: `(n_tiles, N_tokens)`.
+        and squeezed). Called once per batch on a tensor still on `device` --
+        the reducer decides whether to move it to CPU. The raw, unreduced
+        per-token tensor is never cached; only `reducer`'s output is.
     dense_key_added
         `obsm` key for the reduced dense map. Defaults to `f"{key_added}_dense"`,
         mirroring lazyslide's own dense-key suffix. The map is flat,
@@ -213,14 +566,14 @@ def feature_extraction(
     sparse
         Also derive a sparse feature matrix from the pooled embedding
         (`table.obsm[key_added]`) via `sparse_transform`, and write it into
-        `table.X`.
+        `table.X`. Mutually exclusive with `dense=True`.
     sparse_transform
         Required when `sparse=True` and the result still needs computing.
         Maps the entire table's pooled embedding, `(N_tiles, D)`, to a sparse
         feature matrix, `(N_tiles, M)` (e.g. a sparse autoencoder's
-        `.transform()`). Called once per call, not per batch -- unlike
-        `reducer`, it never sees a live `torch.Tensor` mid-loop, and owns any
-        device placement it needs internally.
+        `.transform()`). Called once on the fully materialized pooled array,
+        not per batch -- unlike `reducer`, it never sees a live
+        `torch.Tensor`, and owns any device placement it needs internally.
     sparse_key_added
         Prefix for the new `var` names, written as `f"{sparse_key_added}_{i}"`
         for `i` in `range(M)`. Defaults to `f"{key_added}_sparse"`, mirroring
@@ -234,140 +587,82 @@ def feature_extraction(
     amp
         Run the forward pass under `torch.autocast` (CUDA only).
     overwrite
-        Recompute even if a key is already present in the table. Applies
-        independently to `key_added`, `dense_key_added`, and the
-        `sparse_key_added` var-name prefix: an already-cached one is left
-        untouched unless `overwrite=True`, even while another is being
-        (re)computed.
+        Recompute even if a key is already present in the table.
     save
         Persist the updated table back to the slide's Zarr store via
         `slide.write_element`, which requires `slide` to already be backed
         by one (i.e. `slide.write(...)` has been called at least once). Set
         to `False` to only mutate `slide` in memory.
     """
-    import ezslide
-
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-
-    resolved = None  # lazily set to (model_obj, model_name); avoids loading the
-                      # model at all for a sparse-only call against a cached slide
-
-    def resolve_model():
-        nonlocal resolved
-        if resolved is None:
-            resolved = _resolve_model(model, model_path=model_path, token=token)
-        return resolved
-
-    if key_added is None:
-        _, key_added = resolve_model()
-    table_key = table_key or f"{tile_key}_table"
-    dense_key = dense_key_added or f"{key_added}_dense"
-    sparse_key = sparse_key_added or f"{key_added}_sparse"
-
-    table = slide.tables.get(table_key)
-    need_pooled = overwrite or table is None or key_added not in table.obsm
-    need_dense = dense and (overwrite or table is None or dense_key not in table.obsm)
-    need_sparse = sparse and (
-        overwrite or table is None
-        or not any(v.startswith(f"{sparse_key}_") for v in table.var_names)
-    )
-
-    if not need_pooled and not need_dense and not need_sparse:
-        return slide
-
-    if need_sparse and sparse_transform is None:
+    if dense and sparse:
+        raise ValueError(
+            "dense=True and sparse=True can't be combined in one call: "
+            "sparse_transform reads the pooled embedding while dense/reducer "
+            "reads the dense (per-token) embedding -- two different chains "
+            "from the image. Call feature_extraction twice, once per chain."
+        )
+    if dense and reducer is None:
+        raise ValueError(
+            "dense=True requires a reducer callable that maps per-token "
+            "embeddings (B, N_tokens, D) to per-token scalars (B, N_tokens); "
+            "pass reducer=..."
+        )
+    if sparse and sparse_transform is None:
         raise ValueError(
             "sparse=True requires a sparse_transform callable that maps the "
             "pooled embedding (N_tiles, D) to a sparse feature matrix "
             "(N_tiles, M); pass sparse_transform=..."
         )
 
-    if need_pooled or need_dense:
-        model, model_name = resolve_model()
+    resolved_model, model_name = _resolve_model(model, model_path=model_path, token=token)
+    key_added = key_added or model_name
 
-        if need_dense:
-            if reducer is None:
-                raise ValueError(
-                    "dense=True requires a reducer callable that maps per-token "
-                    "embeddings (B, N_tokens, D) to per-token scalars (B, N_tokens); "
-                    "pass reducer=..."
+    if dense:
+        _require_dense_capable(resolved_model, model_name)
+        dense_key = dense_key_added or f"{key_added}_dense"
+
+        def _validated_reducer(patch_tokens):
+            return _validate_reduced_shape(reducer(patch_tokens), patch_tokens.shape)
+
+        stages: List[ModelStage] = [
+            ImageModelStage(
+                resolved_model, dense=True, name=dense_key, cache=False,
+                overwrite=overwrite, device=device, amp=amp,
+            ),
+            CallableStage(
+                _validated_reducer, name=dense_key, input_kind="dense",
+                output_kind="dense", cache=True, overwrite=overwrite,
+            ),
+        ]
+    else:
+        stages = [
+            ImageModelStage(
+                resolved_model, dense=False, name=key_added, cache=True,
+                overwrite=overwrite, device=device,
+            ),
+        ]
+        if sparse:
+            def _validated_sparse_transform(pooled):
+                if torch.is_tensor(pooled):
+                    pooled = pooled.detach().cpu().numpy()
+                matrix = sparse_transform(pooled)
+                _validate_sparse_shape(matrix, pooled.shape[0])
+                return matrix
+
+            sparse_key = sparse_key_added or f"{key_added}_sparse"
+            stages.append(
+                CallableStage(
+                    _validated_sparse_transform, name=sparse_key,
+                    input_kind="pooled", output_kind="sparse", cache=True,
+                    overwrite=overwrite,
                 )
-            _require_dense_capable(model, model_name)
-
-        model.to(device)
-        model.model.eval()
-        transform = model.get_transform()
-
-        dataset = ezslide.tile_images(
-            slide,
-            tile_key=tile_key,
-            transform=transform,
-            block=block,
-            num_workers=num_workers,
-            cache_size=cache_size,
-        )
-        loader = DataLoader(
-            dataset, batch_size=batch_size, shuffle=False, num_workers=num_workers,
-            multiprocessing_context="spawn" if num_workers > 0 else None,
-        )
-
-        n_tiles = len(dataset)
-        amp_on = bool(amp) and "cuda" in str(device)
-        pooled_outputs, dense_outputs = [], []
-
-        with torch.inference_mode():
-            for batch in tqdm(loader, desc=f"Embedding tiles with {model_name}"):
-                image = batch["image"].to(device, non_blocking=True)
-                with torch.autocast(device_type=device, dtype=torch.float16, enabled=amp_on):
-                    if need_pooled:
-                        pooled_outputs.append(model.encode_image(image).float().cpu().numpy())
-                    if need_dense:
-                        patch_tokens = model.encode_image_dense(image).patch_tokens
-                        reduced = _validate_reduced_shape(
-                            reducer(patch_tokens), patch_tokens.shape
-                        )
-                        dense_outputs.append(reduced.float().cpu().numpy())
-
-        if table is None:
-            tiles = slide[tile_key]
-            bounds = tiles.bounds
-            obs = pd.DataFrame({
-                "tile_id": tiles["tile_id"].to_numpy() if "tile_id" in tiles.columns
-                           else np.arange(n_tiles),
-                "tissue_id": tiles["tissue_id"].to_numpy() if "tissue_id" in tiles.columns
-                             else 0,
-                "x": bounds["minx"].to_numpy(),
-                "y": bounds["miny"].to_numpy(),
-                "library_id": pd.Categorical([tile_key] * n_tiles),
-            })
-            # Index must be str for AnnData, but the tile_id *column* has to keep the
-            # tiles element's own dtype: SpatialData matches instance_key values
-            # against the element index, and a str/int mismatch makes the table look
-            # unrelated to its shapes (spatialdata_plot then refuses to render it).
-            # Assign from a bare array so the index inherits no name -- an index
-            # named after a column whose values differ is rejected on write.
-            # This mirrors wsidata.io.add_features.
-            obs.index = obs["tile_id"].astype(str).to_numpy()
-            table = TableModel.parse(
-                AnnData(obs=obs),
-                region=tile_key, region_key="library_id", instance_key="tile_id",
             )
 
-        if need_pooled:
-            table.obsm[key_added] = np.vstack(pooled_outputs).astype(np.float32)
-        if need_dense:
-            table.obsm[dense_key] = np.vstack(dense_outputs).astype(np.float32)
-
-    if need_sparse:
-        matrix = sparse_transform(table.obsm[key_added])
-        _validate_sparse_shape(matrix, len(table))
-        table = _write_sparse_features(table, sparse_key, matrix)
-
-    slide.tables[table_key] = table
-
-    if save:
-        slide.write_element(table_key, overwrite=True)
-    return slide
+    return run_model_stages(
+        slide, stages, tile_key=tile_key, table_key=table_key,
+        batch_size=batch_size, num_workers=num_workers, block=block,
+        cache_size=cache_size, save=save, progress_bar=progress_bar,
+    )
 
 
 def embed_patch(*args, **kwargs):

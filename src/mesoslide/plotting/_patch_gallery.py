@@ -5,10 +5,10 @@ import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
 
-from mesoslide._slides import DEFAULT_TILE_KEY, SLIDE_ID
+from mesoslide._slides import DEFAULT_TILE_KEY, PATCH_IMG_KEY, SLIDE_ID
 from mesoslide._deprecated import SLIDES_HINT, deprecated_kwargs, removed, rename
 from mesoslide.preprocessing._extract_patches import extract_patch_images
-from mesoslide.preprocessing._extract_saliency_maps import extract_saliency_maps
+from mesoslide.preprocessing._extract_cluster_maps import cluster_img_key, extract_cluster_maps
 from ._image_grid import _plot_image_grid
 from ._utils import _finish_plot
 
@@ -23,10 +23,8 @@ if TYPE_CHECKING:
 )
 def plot_patch_gallery_with_saliency(
     patches: "ad.AnnData",
-    clusterizers: Optional[List["TokenClusterizer"]] = None,
+    clusterizers: List["TokenClusterizer"],
     slides=None,
-    patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
-    saliency_maps: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     output_path: Optional[str] = None,
     tile_key: str = DEFAULT_TILE_KEY,
     samples_per_figure: int = 100,
@@ -48,10 +46,13 @@ def plot_patch_gallery_with_saliency(
 
     Displays patches in a grid where each patch occupies a column-group of rows:
     - Row 0: Original H&E image
-    - Row 1..K: Saliency overlay for each clusterizer / pre-computed map
+    - Row 1..K: Cluster-map overlay for each clusterizer
 
-    Accepts either raw SpatialData + clusterizers (extraction done internally)
-    or pre-computed arrays (useful when plotting multiple times or formats).
+    Pixel data and cluster maps are always read through
+    :func:`extract_patch_images`/:func:`extract_cluster_maps`, which check
+    `patches.obsm` first and only fall back to `slides` for whatever isn't
+    already cached there -- pass `cache=True` to persist freshly computed
+    results back into `patches` for reuse across calls.
 
     Parameters
     ----------
@@ -59,19 +60,13 @@ def plot_patch_gallery_with_saliency(
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
         Required .obs columns: 'x', 'y' (plus 'slide_id' across slides).
         Optional column: 'score' (used when show_scores=True).
-    clusterizers : list of TokenClusterizer, optional
-        Required when saliency_maps is None. Each produces one saliency row.
+    clusterizers : list of TokenClusterizer
+        Each produces one cluster-map row. Must have distinct, non-empty
+        `feature_name`s (see :func:`extract_cluster_maps`).
     slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
-        Required when patches_array is None. Build with
+        Required unless the pixel array and every clusterizer's cluster map
+        are already cached in `patches.obsm` (see `cache`). Build with
         :func:`mesoslide.open_slides`; slides must have image data attached.
-    patches_array : np.ndarray or list of np.ndarray, optional
-        Pre-extracted patches, channel-last (N, H, W, C) or list of (H, W, C).
-        If provided, slides is not used.
-    saliency_maps : np.ndarray or list of np.ndarray, optional
-        Pre-computed cluster label maps (uint8).
-        np.ndarray shape: (N, K, H, W); list: N elements of (K, H, W).
-        If provided, clusterizers are not called (but their feature_names are
-        still used for row labels if clusterizers is also given).
     output_path : str, optional
         File path to save to. Required when n_patches > samples_per_figure
         unless return_buffer=True. For multiple pages, the patch range is
@@ -96,9 +91,9 @@ def plot_patch_gallery_with_saliency(
     batch_size : int, default=16
         Batch size passed to clusterizers during inference.
     cache : bool, default=False
-        Forwarded to :func:`extract_patch_images`: cache the extracted array
-        in ``patches.obsm['patch_img']`` so later calls on the same `patches`
-        skip re-reading from slides.
+        Forwarded to :func:`extract_patch_images`/:func:`extract_cluster_maps`:
+        persist freshly extracted pixels/cluster maps into `patches.obsm` so
+        later calls on the same `patches` skip re-reading from slides.
 
     Returns
     -------
@@ -118,27 +113,43 @@ def plot_patch_gallery_with_saliency(
     ...     output_path='output/saliency.png'
     ... )
     >>>
-    >>> # Pre-computed (extract once, plot many times)
-    >>> patches_cf = extract_patch_images(patches, slides, channel_first=True)
-    >>> imgs = np.moveaxis(patches_cf, 1, -1)
-    >>> maps = extract_saliency_maps(patches_cf, [c1, c2])
-    >>> np.save("imgs.npy", imgs); np.save("maps.npy", maps)
-    >>>
+    >>> # Cache once, plot many times without slides
     >>> plot_patch_gallery_with_saliency(
-    ...     patches,
-    ...     clusterizers=[c1, c2],   # still used for row labels
-    ...     patches_array=np.load("imgs.npy"),
-    ...     saliency_maps=np.load("maps.npy"),
-    ...     output_path='output/saliency.png'
+    ...     patches, clusterizers=[c1, c2], slides=slides,
+    ...     cache=True, output_path='output/saliency_1.png'
+    ... )
+    >>> plot_patch_gallery_with_saliency(
+    ...     patches, clusterizers=[c1, c2],   # no slides needed -- all cached
+    ...     output_path='output/saliency_2.png'
     ... )
     """
-    
-    if patches_array is None and slides is None:
-        raise ValueError("Either slides or patches_array must be provided.")
-    if saliency_maps is None and (clusterizers is None or len(clusterizers) == 0):
+
+    if not clusterizers:
+        raise ValueError("At least one clusterizer must be provided.")
+    names = [c.feature_name for c in clusterizers]
+    if any(not n for n in names):
         raise ValueError(
-            "Either saliency_maps or at least one clusterizer must be provided."
+            "Every clusterizer must have a non-empty feature_name -- it's "
+            "used as this clusterizer's patches.obsm cache key."
         )
+    if len(set(names)) != len(names):
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        raise ValueError(
+            f"clusterizers must have distinct feature_name values to avoid "
+            f"colliding patches.obsm keys; duplicates: {dupes}"
+        )
+    if slides is None:
+        missing_pixel_cache = PATCH_IMG_KEY not in patches.obsm
+        missing_cluster_cache = any(
+            cluster_img_key(c) not in patches.obsm for c in clusterizers
+        )
+        if missing_pixel_cache or missing_cluster_cache:
+            raise ValueError(
+                "slides is required unless patches.obsm already has the "
+                "cached pixel array and every clusterizer's cached cluster "
+                "map (see extract_patch_images/extract_cluster_maps "
+                "cache=True)."
+            )
 
     if show_slide_ids and SLIDE_ID not in patches.obs.columns:
         raise ValueError(f"show_slide_ids=True requires a '{SLIDE_ID}' column in patches.obs")
@@ -155,81 +166,57 @@ def plot_patch_gallery_with_saliency(
             "Please provide output_path and/or return_buffer=True for multi-page figures."
         )
 
-    
-    if saliency_maps is not None:
-        # Infer K from pre-computed maps
-        if isinstance(saliency_maps, np.ndarray):
-            n_clusterizers = saliency_maps.shape[1]
-        else:
-            n_clusterizers = saliency_maps[0].shape[0]
-        row_labels = (
-            ["H&E"] + [c.feature_name for c in clusterizers]
-            if clusterizers
-            else ["H&E"] + [f"Clusterizer {k+1}" for k in range(n_clusterizers)]
-        )
-    else:
-        n_clusterizers = len(clusterizers)
-        row_labels = ["H&E"] + [c.feature_name for c in clusterizers]
+    n_clusterizers = len(clusterizers)
+    row_labels = ["H&E"] + [c.feature_name for c in clusterizers]
 
     import anndata as ad
 
-    # patches_cf (channel-first) is extracted at most once, since it's the
-    # canonical cached layout and the source both for clusterizer inference
-    # and (via moveaxis) the channel-last display array.
-    patches_cf = None
+    if progress_bar:
+        print("Extracting patches from slides...")
+    patches_array = extract_patch_images(
+        patches, slides,
+        tile_key=tile_key,
+        channel_first=False,   # (N, H, W, C) for display
+        progress_bar=progress_bar,
+        skip_errors=True,
+        cache=cache,
+    )
 
-    if patches_array is None and saliency_maps is None:
-        if progress_bar:
-            print("Extracting patches from slides...")
-        patches_cf = extract_patch_images(
-            patches, slides,
-            tile_key=tile_key,
-            channel_first=True,
-            progress_bar=progress_bar,
-            skip_errors=True,
-            cache=cache,
-        )
-        patches_array = _channel_last(patches_cf)
-    elif patches_array is None:
-        if progress_bar:
-            print("Extracting patches from slides...")
-        patches_array = extract_patch_images(
-            patches, slides,
-            tile_key=tile_key,
-            channel_first=False,   # (N, H, W, C) for display
-            progress_bar=progress_bar,
-            skip_errors=True,
-            cache=cache,
-        )
-
-    if saliency_maps is None:
-        if patches_cf is None:
-            if progress_bar:
-                print("Extracting patches (channel-first) for clusterizers...")
-            patches_cf = extract_patch_images(
-                patches, slides,
-                tile_key=tile_key,
-                channel_first=True,
-                progress_bar=progress_bar,
-                skip_errors=True,
-                cache=cache,
-            )
-        saliency_maps = extract_saliency_maps(
-            patches_cf,
-            clusterizers=clusterizers,
+    # extract_cluster_maps handles one clusterizer at a time -- the "shared
+    # embedding computed once" property comes from run_model_stages' own
+    # per-key caching in patches.obsm, not from anything special about
+    # calling it with a list, so stacking the K results is done here.
+    per_clusterizer_maps = [
+        extract_cluster_maps(
+            patches, slides, c,
             batch_size=batch_size,
             progress_bar=progress_bar,
-            shared_embedder=True
+            cache=cache,
         )
+        for c in clusterizers
+    ]
+
+    is_list_result = isinstance(per_clusterizer_maps[0], list)
+    if is_list_result:
+        cluster_maps = [
+            np.stack(
+                [per_clusterizer_maps[k][i] for k in range(n_clusterizers)],
+                axis=0,
+            ).astype(np.uint8)  # (K, H, W)
+            for i in range(n_patches)
+        ]
+    else:
+        stacked = np.stack(per_clusterizer_maps, axis=0)  # (K, N, H, W)
+        cluster_maps = stacked.transpose(1, 0, 2, 3).astype(np.uint8)  # (N, K, H, W)
 
     # Normalise to lists for uniform downstream indexing
     patches_list = (
         list(patches_array) if isinstance(patches_array, np.ndarray)
         else patches_array
     )
-    saliency_list = (
-        list(saliency_maps) if isinstance(saliency_maps, np.ndarray)
-        else saliency_maps
+    cluster_maps_list = (
+        list(cluster_maps) if isinstance(cluster_maps, np.ndarray)
+        else cluster_maps
     )
 
     # Per-row title text, resolved once from patches.obs
@@ -248,8 +235,8 @@ def plot_patch_gallery_with_saliency(
         start_idx = page_idx * samples_per_figure
         end_idx = min(start_idx + samples_per_figure, n_patches)
 
-        batch_images = patches_list[start_idx:end_idx]   # list of (H, W, C)
-        batch_maps = saliency_list[start_idx:end_idx]    # list of (K, H, W)
+        batch_images = patches_list[start_idx:end_idx]        # list of (H, W, C)
+        batch_maps = cluster_maps_list[start_idx:end_idx]      # list of (K, H, W)
         batch_titles = patch_titles[start_idx:end_idx]
 
         if progress_bar and n_pages > 1:
@@ -280,13 +267,6 @@ def plot_patch_gallery_with_saliency(
     if return_buffer:
         return buffers
     return None
-
-
-def _channel_last(arr: Union[np.ndarray, List[np.ndarray]]) -> Union[np.ndarray, List[np.ndarray]]:
-    """Convert a channel-first (N, C, H, W) array or list of (C, H, W) to channel-last."""
-    if isinstance(arr, np.ndarray):
-        return np.moveaxis(arr, 1, -1)
-    return [np.moveaxis(p, 0, -1) for p in arr]
 
 
 def _render_saliency_page(
@@ -396,7 +376,6 @@ def _paged_path(output_path: str, start_idx: int, end_idx: int) -> str:
 def plot_patch_gallery(
     patches: "ad.AnnData",
     slides=None,
-    patches_array: Optional[Union[np.ndarray, List[np.ndarray]]] = None,
     output_path: Optional[str] = None,
     tile_key: str = DEFAULT_TILE_KEY,
     samples_per_figure: int = 100,
@@ -424,11 +403,9 @@ def plot_patch_gallery(
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
         Required .obs columns: 'x', 'y' (plus 'slide_id' across slides).
     slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
-        Required when patches_array is None. Build with
+        Required unless the pixel array is already cached in
+        `patches.obsm['patch_img']` (see `cache`). Build with
         :func:`mesoslide.open_slides`.
-    patches_array : np.ndarray or list of np.ndarray, optional
-        Pre-extracted patches, channel-last (N, H, W, C) or list of (H, W, C).
-        If provided, slides is not used for extraction.
     output_path : str, optional
         File path to save to. For multiple pages, the patch range is
         inserted before the extension (e.g. ``gallery_1-100.png``).
@@ -464,12 +441,16 @@ def plot_patch_gallery(
     >>> slides = ms.open_slides(manifest)
     >>> plot_patch_gallery(patches, slides=slides, output_path='output/gallery.png')
     >>>
-    >>> # Pre-computed
-    >>> imgs = extract_patch_images(patches, slides, channel_first=False)
-    >>> plot_patch_gallery(patches, patches_array=imgs, output_path='output/gallery.png')
+    >>> # Cache once, plot many times without slides
+    >>> plot_patch_gallery(patches, slides=slides, cache=True,
+    ...                     output_path='output/gallery_1.png')
+    >>> plot_patch_gallery(patches, output_path='output/gallery_2.png')  # no slides needed
     """
-    if patches_array is None and slides is None:
-        raise ValueError("Either slides or patches_array must be provided.")
+    if slides is None and PATCH_IMG_KEY not in patches.obsm:
+        raise ValueError(
+            "slides is required unless patches.obsm['patch_img'] is already "
+            "cached (see extract_patch_images(..., cache=True))."
+        )
 
     if show_slide_ids and SLIDE_ID not in patches.obs.columns:
         raise ValueError(f"show_slide_ids=True requires a '{SLIDE_ID}' column in patches.obs")
@@ -491,17 +472,16 @@ def plot_patch_gallery(
         )
 
     # Full-dataset extraction (once, before paging)
-    if patches_array is None:
-        if progress_bar:
-            print("Extracting patches from slides...")
-        patches_array = extract_patch_images(
-            patches, slides,
-            tile_key=tile_key,
-            channel_first=False,
-            progress_bar=progress_bar,
-            skip_errors=True,
-            cache=cache,
-        )
+    if progress_bar:
+        print("Extracting patches from slides...")
+    patches_array = extract_patch_images(
+        patches, slides,
+        tile_key=tile_key,
+        channel_first=False,
+        progress_bar=progress_bar,
+        skip_errors=True,
+        cache=cache,
+    )
 
     patches_list = (
         list(patches_array) if isinstance(patches_array, np.ndarray)

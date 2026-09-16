@@ -79,7 +79,7 @@ class TestDenseMode:
             one_slide, vit_stub_encoder, key_added="vitstub", dense=True,
             reducer=self._mean_reducer, batch_size=16, device="cpu", save=False,
         )
-        assert table.obsm["vitstub"].shape == (n, vit_stub_encoder.embed_dim)
+        assert "vitstub" not in table.obsm, "dense=True no longer also computes pooled"
         dense = table.obsm["vitstub_dense"]
         assert dense.shape == (n, self.N_TOKENS)
         expected = np.tile(np.arange(self.N_TOKENS, dtype=np.float32), (n, 1))
@@ -102,28 +102,23 @@ class TestDenseMode:
             one_slide, vit_stub_encoder, key_added="vitstub", dense=True,
             reducer=self._mean_reducer, batch_size=16, device="cpu", save=False,
         )
-        pooled_sentinel = np.full((n, vit_stub_encoder.embed_dim), -1.0, dtype=np.float32)
         dense_sentinel = np.full((n, self.N_TOKENS), -2.0, dtype=np.float32)
-        table.obsm["vitstub"] = pooled_sentinel
         table.obsm["vitstub_dense"] = dense_sentinel
 
         ms.tl.feature_extraction(
             one_slide, vit_stub_encoder, key_added="vitstub", dense=True,
             reducer=self._mean_reducer, batch_size=16, device="cpu", save=False,
         )
-        assert np.array_equal(table.obsm["vitstub"], pooled_sentinel)
         assert np.array_equal(table.obsm["vitstub_dense"], dense_sentinel)
 
-    def test_overwrite_replaces_both_keys(self, one_slide, vit_stub_encoder):
+    def test_overwrite_replaces_the_dense_key(self, one_slide, vit_stub_encoder):
         table = one_slide.tables["tiles_table"]
         n = table.n_obs
         ms.tl.feature_extraction(
             one_slide, vit_stub_encoder, key_added="vitstub", dense=True,
             reducer=self._mean_reducer, batch_size=16, device="cpu", save=False,
         )
-        pooled_sentinel = np.full((n, vit_stub_encoder.embed_dim), -1.0, dtype=np.float32)
         dense_sentinel = np.full((n, self.N_TOKENS), -2.0, dtype=np.float32)
-        table.obsm["vitstub"] = pooled_sentinel
         table.obsm["vitstub_dense"] = dense_sentinel
 
         ms.tl.feature_extraction(
@@ -131,7 +126,6 @@ class TestDenseMode:
             reducer=self._mean_reducer, batch_size=16, device="cpu", save=False,
             overwrite=True,
         )
-        assert not np.array_equal(table.obsm["vitstub"], pooled_sentinel)
         assert not np.array_equal(table.obsm["vitstub_dense"], dense_sentinel)
 
     def test_recomputes_only_the_missing_key(self, one_slide, vit_stub_encoder):
@@ -187,21 +181,24 @@ class TestDenseMode:
         )
         assert table.obsm["vitstub_squeeze_dense"].shape == (table.n_obs, self.N_TOKENS)
 
-    def test_pooled_result_is_unaffected_by_dense_mode(self, one_slide, vit_stub_encoder):
-        """Enabling dense=True must not change what encode_image alone produces."""
+    def test_dense_mode_does_not_compute_pooled(self, one_slide, vit_stub_encoder):
+        """dense=True computes only the dense chain; call it separately for pooled."""
         table = one_slide.tables["tiles_table"]
-        ms.tl.feature_extraction(
-            one_slide, vit_stub_encoder, key_added="pooled_only",
-            batch_size=16, device="cpu", save=False,
-        )
-        pooled_alone = table.obsm["pooled_only"].copy()
-        del table.obsm["pooled_only"]
-
         ms.tl.feature_extraction(
             one_slide, vit_stub_encoder, key_added="pooled_only", dense=True,
             reducer=self._mean_reducer, batch_size=16, device="cpu", save=False,
         )
-        assert np.array_equal(table.obsm["pooled_only"], pooled_alone)
+        assert "pooled_only" not in table.obsm
+        assert "pooled_only_dense" in table.obsm
+
+    def test_dense_and_sparse_together_raise(self, one_slide, vit_stub_encoder):
+        with pytest.raises(ValueError, match="dense=True and sparse=True"):
+            ms.tl.feature_extraction(
+                one_slide, vit_stub_encoder, key_added="vitstub_both", dense=True,
+                reducer=self._mean_reducer, sparse=True,
+                sparse_transform=lambda pooled: csr_matrix(pooled[:, :2]),
+                batch_size=16, device="cpu", save=False,
+            )
 
 
 class TestSparseMode:
