@@ -85,7 +85,7 @@ def _render_feature_grid(
         _iter_plot_slides(slides, tile_key), desc="Rendering slides"
     ):
         try:
-            fig = plot_feature_map(
+            buf = plot_feature_map(
                 wsi,
                 feature_name,
                 tile_key=tile_key,
@@ -95,16 +95,13 @@ def _render_feature_grid(
                 figsize=figsize_per_image,
                 colorbar=colorbar,
                 title=str(slide_id) if show_titles else '',
-                return_ax=False,
+                return_buffer=True,
+                dpi=dpi,
             )
         except (KeyError, ValueError) as e:
             print(f"Warning: skipping slide {slide_id!r}: {e}")
             continue
 
-        buf = io.BytesIO()
-        fig.savefig(buf, dpi=dpi, format='png')
-        plt.close(fig)
-        buf.seek(0)
         rendered_images.append(Image.open(buf))
 
     if not rendered_images:

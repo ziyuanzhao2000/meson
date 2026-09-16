@@ -18,15 +18,15 @@ def _close_figures():
 
 class TestFeatureMap:
     def test_renders_an_obs_column(self, one_slide):
-        fig = ms.plotting.plot_feature_map(one_slide, "score")
+        fig, ax = ms.plotting.plot_feature_map(one_slide, "score", return_fig=True)
         assert fig.axes and fig.axes[0].images
 
     def test_titles_with_the_slide_name(self, one_slide):
-        fig = ms.plotting.plot_feature_map(one_slide, "score")
+        fig, ax = ms.plotting.plot_feature_map(one_slide, "score", return_fig=True)
         assert fig.axes[0].get_title() == one_slide.name
 
     def test_explicit_title_wins(self, one_slide):
-        fig = ms.plotting.plot_feature_map(one_slide, "score", title="custom")
+        fig, ax = ms.plotting.plot_feature_map(one_slide, "score", title="custom", return_fig=True)
         assert fig.axes[0].get_title() == "custom"
 
     def test_bridges_a_var_name_in_X_into_obs(self, one_slide):
@@ -44,7 +44,8 @@ class TestFeatureMap:
         sae.uns["spatialdata_attrs"] = table.uns["spatialdata_attrs"]
         one_slide.tables["sae_table"] = sae
 
-        fig = ms.plotting.plot_feature_map(one_slide, "UNI_SAE_1", table_key="sae_table")
+        fig, ax = ms.plotting.plot_feature_map(one_slide, "UNI_SAE_1", table_key="sae_table",
+                                                return_fig=True)
         assert fig.axes and fig.axes[0].images
         # the bridge must not write back into the caller's table
         assert "UNI_SAE_1" not in one_slide.tables["sae_table"].obs.columns
@@ -74,7 +75,7 @@ class TestFeatureMap:
         with pytest.raises(KeyError):
             one_slide["wsi"]
         assert "wsi" in one_slide.images
-        assert ms.plotting.plot_feature_map(one_slide, "score") is not None
+        assert ms.plotting.plot_feature_map(one_slide, "score", return_fig=True) is not None
 
 
 class TestFeatureGrid:

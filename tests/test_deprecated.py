@@ -56,6 +56,12 @@ def test_element_name_kwarg_rejects_a_value_it_cannot_honour(one_slide):
         ms.plotting.plot_feature_map(one_slide, "score", bbox_postfix="_something_else")
 
 
+def test_return_ax_forwards_to_return_fig(one_slide):
+    with pytest.warns(DeprecationWarning, match="use 'return_fig'"):
+        result = ms.plotting.plot_feature_map(one_slide, "score", return_ax=True)
+    assert isinstance(result, tuple) and len(result) == 2
+
+
 def test_show_image_names_forwards_to_show_slide_ids(one_table):
     images = np.zeros((2, 8, 8, 3), dtype=np.uint8)
     with pytest.warns(DeprecationWarning, match="use 'show_slide_ids'"):

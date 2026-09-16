@@ -9,7 +9,8 @@ import matplotlib.pyplot as plt
 
 from mesoslide._interpolation import interpolate_patch_max
 from mesoslide._slides import DEFAULT_TILE_KEY, tile_table_key
-from mesoslide._deprecated import ELEMENT_NAME_HINT, deprecated_kwargs, drop, removed
+from mesoslide._deprecated import ELEMENT_NAME_HINT, deprecated_kwargs, drop, removed, rename
+from ._utils import _finish_plot
 
 _RENDERING_HINT = (
     "plot_feature_map no longer renders via spatialdata_plot; there is only "
@@ -131,6 +132,7 @@ def _tile_centers_and_values(wsi, tile_key, table_key, feature_name):
     patch_postfix=drop('_grid_point_patch', ELEMENT_NAME_HINT),
     method=drop('datashader', _RENDERING_HINT),
     datashader_reduction=drop('max', _RENDERING_HINT),
+    return_ax=rename('return_fig'),
 )
 def plot_feature_map(
     wsi,
@@ -146,7 +148,10 @@ def plot_feature_map(
     colorbar=False,
     title=None,
     norm=None,
-    return_ax=False,
+    output_path=None,
+    dpi=300,
+    return_fig=False,
+    return_buffer=False,
 ):
     """
     Plot a per-tile feature as an overlay on the slide image.
@@ -190,11 +195,18 @@ def plot_feature_map(
     norm : matplotlib Normalize, optional
         Defaults to Normalize(vmin=0, vmax=<feature's max value>), so the
         highest-scoring tile always reaches full color regardless of scale.
-    return_ax : bool, default=False
+    output_path : str, optional
+        File path to save to.
+    dpi : int, default=300
+    return_fig : bool, default=False
+        Return (fig, ax).
+    return_buffer : bool, default=False
+        Return an in-memory PNG buffer.
 
     Returns
     -------
-    fig, or (fig, ax) when return_ax=True
+    None, (fig, ax) if return_fig=True, or an in-memory PNG buffer if
+    return_buffer=True.
     """
     table_key = table_key or tile_table_key(tile_key)
     xs, ys, values, patch_size = _tile_centers_and_values(wsi, tile_key, table_key, feature_name)
@@ -255,6 +267,11 @@ def plot_feature_map(
     ax.set_xticklabels([])
     ax.set_yticklabels([])
 
-    if return_ax:
-        return fig, ax
-    return fig
+    keep_alive = return_fig and not return_buffer
+    result = _finish_plot(fig, ax, show=keep_alive, save=output_path,
+                           return_fig=return_fig, return_buffer=return_buffer, dpi=dpi)
+    if output_path is not None:
+        print(f"Saved: {output_path}")
+    if return_buffer or return_fig:
+        return result
+    return None
