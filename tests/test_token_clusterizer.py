@@ -1,4 +1,4 @@
-"""TokenClusterizer: __call__, fit(), and extract_cluster_maps."""
+"""TokenClusterizer: transform(), fit(), and extract_cluster_maps."""
 
 import numpy as np
 import pytest
@@ -7,6 +7,7 @@ from sklearn.cluster import KMeans
 
 import mesoslide as ms
 from mesoslide.preprocessing import extract_cluster_maps
+from mesoslide.tools._model_stage import ImageModelStage
 from mesoslide.tools.segmenters import TokenClusterizer
 from tests.conftest import StubViTEncoder, TILE_PX
 
@@ -23,12 +24,14 @@ def _fitted_kmeans(n_clusters=3, seed=0):
     )
 
 
-def test_call_uses_the_models_own_grid_size(one_slide):
+def test_transform_uses_the_models_own_grid_size():
     """A non-square grid_size must not trip the old square-only assumption."""
     encoder = NonSquareStub()
     clusterizer = TokenClusterizer(model=encoder, kmeans=_fitted_kmeans(), device="cpu")
     images = torch.randint(0, 255, (5, 3, 64, 64), dtype=torch.uint8)
-    masks = clusterizer(images, output_size=(64, 64), show_progress=False)
+    fm_stage = ImageModelStage(encoder, dense=True, device="cpu")
+    token_embeddings = fm_stage(images)
+    masks = clusterizer.transform(token_embeddings, output_size=(64, 64))
     assert masks.shape == (5, 64, 64)
     assert masks.dtype == np.uint8
     # StubViTEncoder's tokens are deterministic (token k's embedding is a

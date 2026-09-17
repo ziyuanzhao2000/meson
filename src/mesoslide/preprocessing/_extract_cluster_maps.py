@@ -33,19 +33,20 @@ def extract_cluster_maps(
     `patches.obsm[cluster_img_key(clusterizer)]` (e.g. from a previous call
     with `cache=True`), it's returned directly -- no pixel read, no model
     call. Otherwise, this embeds `patches` with the clusterizer's vision
-    model (dense, per-token, via `run_model_stages`), applies its KMeans, and
-    rasterizes the per-token cluster labels up to each patch's native pixel
-    size. Renamed from the earlier `extract_saliency_maps`: "saliency map"
-    implies a gradient/attribution-based importance map (e.g. GradCAM),
-    which this never was -- it's a KMeans cluster-ID raster.
+    model (dense, per-token, via `run_model_stages`) and hands the result to
+    `clusterizer.transform`, which clusters and rasterizes it up to each
+    patch's native pixel size. Renamed from the earlier
+    `extract_saliency_maps`: "saliency map" implies a gradient/attribution-
+    based importance map (e.g. GradCAM), which this never was -- it's a
+    KMeans cluster-ID raster.
 
     Calling this once per clusterizer (e.g. to build a multi-row gallery,
     see `mesoslide.plotting.plot_patch_gallery_with_saliency`) still only
     embeds a shared underlying vision model once: `run_model_stages` caches
     the embedding stage's output under a key derived from the resolved model
     name, so the second and later clusterizers' calls find that key already
-    present in `patches.obsm` and skip straight to their own (cheap) KMeans
-    step -- no special handling needed here for that to hold.
+    present in `patches.obsm` and skip straight to their own (cheap)
+    `transform` step -- no special handling needed here for that to hold.
 
     Parameters
     ----------
@@ -117,22 +118,29 @@ def extract_cluster_maps(
     )
     is_list_pixels = isinstance(pixels, list)
 
+    # Compose the vision FM embedder with the clusterizer's own `transform`:
+    # `run_model_stages` handles the (cacheable) embedding step, and
+    # `clusterizer.transform` -- its single public entry point for going
+    # from token embeddings to a rasterized cluster map -- handles the rest.
+    # `transform` isn't threaded through `as_stage`/`run_model_stages` here
+    # because its output_size varies per patch in the list case below, and
+    # in the non-list case doing so would duplicate the rasterized array
+    # under both the stage's own cache key and `cluster_img_key` below.
     fm_stage = ImageModelStage(clusterizer.model, dense=True, device=clusterizer.device)
-    cluster_stage = clusterizer.as_stage()
     table = run_model_stages(
-        patches, [fm_stage, cluster_stage], slides=slides,
+        patches, [fm_stage], slides=slides,
         input_key=input_key, batch_size=batch_size,
         progress_bar=progress_bar, save=False,
     )
-    cluster_grid = table.obsm[cluster_stage.name]  # (N, grid_h, grid_w)
+    dense_tokens = table.obsm[fm_stage.name]  # (N, N_tokens, D)
 
     if is_list_pixels:
         rasterized = [
-            clusterizer._rasterize(cluster_grid[i:i + 1], p.shape[-2:])[0]
+            clusterizer.transform(dense_tokens[i:i + 1], p.shape[-2:])[0]
             for i, p in enumerate(pixels)
         ]
     else:
-        rasterized = clusterizer._rasterize(cluster_grid, pixels.shape[-2:])
+        rasterized = clusterizer.transform(dense_tokens, tuple(pixels.shape[-2:]))
 
     if cache:
         if is_list_pixels:

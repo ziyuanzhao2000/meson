@@ -4,7 +4,7 @@ from typing import Optional, Union
 import numpy as np
 import torch
 import cv2
-from tqdm.auto import tqdm
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import KMeans
 
 from mesoslide.tools._model_stage import (
@@ -12,20 +12,25 @@ from mesoslide.tools._model_stage import (
     ImageModelStage,
     _require_dense_capable,
     _resolve_model,
-    iter_array_batches,
 )
 
 
-class TokenClusterizer:
+class TokenClusterizer(TransformerMixin, BaseEstimator):
     """
     Token-level clustering and rasterization for vision transformer embeddings.
 
     Takes per-token embeddings from a `lazyslide_models` vision foundation
     model, applies KMeans clustering, and upsamples cluster assignments to
-    patch image resolution. Its own job is exactly that: fitting/applying the
-    KMeans model and rasterizing the result -- embedding patches into tokens
-    is delegated to `mesoslide.tools._feature_extraction.run_model_stages`,
-    the same engine `feature_extraction`/`extract_cluster_maps` use.
+    patch image resolution. Its public surface is a single sklearn-style
+    `transform()` method -- token embeddings in, rasterized cluster maps out
+    -- mirroring how `mesoslide.tools.sparse_coding.SparseAutoencoder` wraps
+    a fitted torch model as a plain `transform()`. Embedding patches into
+    tokens is delegated to `mesoslide.tools._feature_extraction
+    .run_model_stages`, the same engine `feature_extraction` and
+    `extract_cluster_maps` use; `extract_cluster_maps` composes
+    `transform()` with a vision FM embedding stage (`as_stage()` wraps
+    `transform()` as a `ModelStage` for that purpose) rather than
+    duplicating clustering/rasterization logic of its own.
 
     Parameters
     ----------
@@ -56,12 +61,14 @@ class TokenClusterizer:
     >>> from mesoslide.tools.segmenters import TokenClusterizer
     >>> from sklearn.cluster import KMeans
     >>>
-    >>> clusterizer = TokenClusterizer(model="uni2", kmeans=KMeans(n_clusters=3))
+    >>> clusterizer = TokenClusterizer(
+    ...     model="uni2", kmeans=KMeans(n_clusters=3), feature_name="my_feature",
+    ... )
     >>>
-    >>> # Process a batch of images directly
-    >>> images = torch.randn(8, 3, 224, 224)  # batch of 8 images
-    >>> cluster_masks = clusterizer(images, output_size=(224, 224))
-    >>> # Returns: (8, 224, 224) uint8 array with cluster IDs
+    >>> # Turn a set of selected patches into rasterized cluster maps
+    >>> from mesoslide.preprocessing import extract_cluster_maps
+    >>> cluster_masks = extract_cluster_maps(patches, slides, clusterizer)
+    >>> # Returns: (N, H, W) uint8 array with cluster IDs
     """
 
     def __init__(
@@ -157,99 +164,50 @@ class TokenClusterizer:
 
         return rasterized
 
-    def as_stage(self, *, name: Optional[str] = None, cache: bool = True,
-                 overwrite: bool = False) -> CallableStage:
-        """Wrap this clusterizer's `_cluster_tokens` as a `ModelStage`.
-
-        Used by `extract_cluster_maps` (and `__call__`/`fit()` internally) to
-        feed into `run_model_stages`'s chain, downstream of an
-        `ImageModelStage(dense=True)`.
+    def transform(self, token_embeddings, output_size: Optional[tuple] = None) -> np.ndarray:
         """
-        stage_name = name or self.feature_name or f"cluster_{id(self)}"
-        return CallableStage(
-            self._cluster_tokens, name=stage_name, input_kind="dense",
-            output_kind="dense", cache=cache, overwrite=overwrite, device="cpu",
-        )
+        Cluster token embeddings and rasterize to pixel resolution.
 
-    def __call__(
-        self,
-        images,
-        slides=None,
-        output_size: Optional[tuple] = None,
-        batch_size: int = 16,
-        show_progress: bool = True
-    ) -> np.ndarray:
-        """
-        Generate cluster masks for a batch of images.
+        The only public entry point for turning per-token embeddings into
+        cluster maps -- combines KMeans assignment and upsampling so callers
+        (`as_stage()`, `extract_cluster_maps`) don't hand-roll that pairing
+        themselves.
 
         Parameters
         ----------
-        images : torch.Tensor, np.ndarray, or AnnData
-            Input images. Can be:
-            - torch.Tensor: (N, C, H, W)
-            - np.ndarray: (N, C, H, W) or (N, H, W, C)
-            - AnnData: selected tiles, with .obs columns x, y (+ slide_id)
-        slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
-            Required if images is an AnnData. Used to read the tile pixels.
+        token_embeddings : torch.Tensor or np.ndarray
+            Shape (B, N_tokens, embed_dim)
         output_size : tuple, optional
-            Target (height, width) for masks. If None, uses each patch's own
-            native size.
-        batch_size : int, default=16
-            Batch size for processing
-        show_progress : bool, default=True
-            Whether to show progress bar
+            Target (height, width). Defaults to the model's native grid
+            resolution in pixels (grid_size * patch_size).
 
         Returns
         -------
         cluster_masks : np.ndarray
-            Shape (N, H, W), dtype uint8. Each value is a cluster ID.
-
-        Examples
-        --------
-        >>> # Method 1: Direct numpy array
-        >>> patches = np.random.randint(0, 255, (10, 3, 224, 224), dtype=np.uint8)
-        >>> masks = clusterizer(patches)
-
-        >>> # Method 2: From a selected patch table
-        >>> top = mesoslide.select_top_patches(manifest, 'UNI_SAE_123', n=100)
-        >>> masks = clusterizer(top, slides=mesoslide.open_slides(manifest))
+            Shape (B, H, W), dtype uint8. Each value is a cluster ID.
         """
-        if hasattr(images, 'obs'):
-            if slides is None:
-                raise ValueError("slides must be provided when images is an AnnData")
-
-            from mesoslide.preprocessing._extract_patches import extract_patch_images
-            from mesoslide.tools._feature_extraction import run_model_stages
-
-            if output_size is None:
-                pixels = extract_patch_images(
-                    images, slides, channel_first=True,
-                    progress_bar=show_progress, cache=True,
-                )
-                output_size = tuple(pixels.shape[-2:])
-
-            fm_stage = ImageModelStage(self.model, dense=True, device=self.device)
-            cluster_stage = self.as_stage()
-            table = run_model_stages(
-                images, [fm_stage, cluster_stage], slides=slides,
-                batch_size=batch_size, progress_bar=show_progress, save=False,
-            )
-            cluster_maps = table.obsm[cluster_stage.name]
-            return self._rasterize(cluster_maps, output_size)
-
+        cluster_maps = self._cluster_tokens(token_embeddings)
         if output_size is None:
-            output_size = (images.shape[-2], images.shape[-1])
+            gh, gw = self.model.grid_size
+            ph, pw = self.model.patch_size
+            output_size = (gh * ph, gw * pw)
+        return self._rasterize(cluster_maps, output_size)
 
-        fm_stage = ImageModelStage(self.model, dense=True, device=self.device)
-        all_cluster_maps = []
-        batches = iter_array_batches(images, batch_size)
-        iterator = tqdm(batches, desc="Clustering patches") if show_progress else batches
-        for batch in iterator:
-            token_embeds = fm_stage(batch)
-            all_cluster_maps.append(self._cluster_tokens(token_embeds))
-        all_cluster_maps = np.concatenate(all_cluster_maps, axis=0)
+    def as_stage(self, *, output_size: Optional[tuple] = None, name: Optional[str] = None,
+                 cache: bool = True, overwrite: bool = False) -> CallableStage:
+        """Wrap this clusterizer's `transform` as a `ModelStage`.
 
-        return self._rasterize(all_cluster_maps, output_size)
+        Used by `extract_cluster_maps` to feed into `run_model_stages`'s
+        chain, downstream of an `ImageModelStage(dense=True)`. `output_size`
+        is fixed for the whole stage since a single `run_model_stages` batch
+        shares one target resolution.
+        """
+        stage_name = name or self.feature_name or f"cluster_{id(self)}"
+        return CallableStage(
+            lambda token_embeddings: self.transform(token_embeddings, output_size),
+            name=stage_name, input_kind="dense",
+            output_kind="dense", cache=cache, overwrite=overwrite, device="cpu",
+        )
 
     def fit(
         self,
@@ -312,7 +270,8 @@ class TokenClusterizer:
         ...     n_negative=100,
         ... )
         >>> # Now the clusterizer will use this ordering when rasterizing
-        >>> masks = clusterizer(images)
+        >>> from mesoslide.preprocessing import extract_cluster_maps
+        >>> masks = extract_cluster_maps(patches, slides, clusterizer)
         """
         from mesoslide._patch_selector import select_top_patches, select_negative_patches
         from mesoslide.tools._feature_extraction import run_model_stages
