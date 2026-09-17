@@ -42,7 +42,7 @@ def test_table_round_trips_through_a_written_store(cohort):
     """The fixtures write with save=True, so reaching this at all exercises it."""
     import ezslide
 
-    wsi = ezslide.read_wsi(cohort[0])
+    wsi = ezslide.read_slide(cohort[0])
     table = wsi.tables["tiles_table"]
     assert table.n_obs == len(wsi.shapes["tiles"])
     assert "stub_embedding" in table.obsm

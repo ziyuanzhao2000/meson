@@ -78,7 +78,7 @@ def extract_patch_images(
     slides : WSIData, list of WSIData, or {slide_id: WSIData}
         The slides to read from. Use :func:`mesoslide.open_slides` to build the
         mapping from a cohort manifest. Slides must have image data attached
-        (``ezslide.read_wsi(store, attach_images=True)``); a store written by
+        (``ezslide.read_slide(store, attach_images=True)``); a store written by
         ``wsi.write()`` holds no pixels on its own.
     tile_key : str, default='tiles'
     channel_first : bool, default=True

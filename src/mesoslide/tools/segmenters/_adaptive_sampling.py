@@ -505,7 +505,7 @@ def adaptive_sample_wsi(
     if image_key not in wsi.images:
         raise ValueError(
             f"Slide '{slide_id}' has no image element '{image_key}'; reopen with "
-            "ezslide.read_wsi(store, attach_images=True)."
+            "ezslide.read_slide(store, attach_images=True)."
         )
 
     # Label every tile with the classifier. This used to route through the

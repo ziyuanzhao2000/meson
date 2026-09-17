@@ -54,7 +54,7 @@ class TestFeatureMap:
         """wsi.write() persists no pixels, so this is the common mistake."""
         import ezslide
 
-        bare = ezslide.read_wsi(cohort[0])
+        bare = ezslide.read_slide(cohort[0])
         with pytest.raises(ValueError, match="attach_images=True"):
             ms.plotting.plot_feature_map(bare, "score")
 

@@ -125,7 +125,7 @@ def concat_slides(
     import ezslide
 
     for slide_id, store in resolve_manifest(slides_table, store_col, slide_id_col):
-        wsi = ezslide.read_wsi(store)
+        wsi = ezslide.read_slide(store)
         try:
             table = _require_table(wsi, table_key, slide_id)
             # Rebuild rather than slice: this is where obsm is deliberately

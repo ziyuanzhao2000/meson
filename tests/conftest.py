@@ -54,7 +54,7 @@ def _build_store(tmpdir, name: str, seed: int, shape=SLIDE_SHAPE):
     # Pin the reader, as the real pipeline does. Auto-detection picks
     # OpenSlideReader for a plain OME-TIFF, and that reader has no pyramid
     # chunk path, so rendering fails on it.
-    wsi = ezslide.open_wsi(slide_path, attach_images=True, reader="tifffile_zarr")
+    wsi = ezslide.open_slide(slide_path, attach_images=True, reader="tifffile_zarr")
     wsi.set_mpp(MPP)  # otherwise tissue segmentation warns and tile specs lack scale
     zs.pp.find_tissues(wsi, detect_holes=False)
     zs.pp.tile_tissues(wsi, tile_px=TILE_PX, stride_px=TILE_PX, background_filter=False)
@@ -139,7 +139,7 @@ def _add_features(store, seed: int):
 
     import mesoslide as ms
 
-    wsi = ezslide.read_wsi(store, attach_images=True)
+    wsi = ezslide.read_slide(store, attach_images=True)
     ms.tl.feature_extraction(
         wsi, StubEncoder(), key_added="stub_embedding",
         batch_size=8, num_workers=0, device="cpu", save=False,
@@ -181,7 +181,7 @@ def one_slide(cohort):
     """A single opened WSIData with image data attached."""
     import ezslide
 
-    wsi = ezslide.read_wsi(cohort[0], attach_images=True)
+    wsi = ezslide.read_slide(cohort[0], attach_images=True)
     yield wsi
     wsi.close()
 
