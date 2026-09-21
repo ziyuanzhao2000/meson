@@ -116,6 +116,26 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
             else cv2.INTER_LINEAR
         )
 
+    # `model`/`token`/`model_path` are resolved once in __init__ and not
+    # retained on self (see class docstring), so BaseEstimator.get_params()'s
+    # getattr(self, key) fails for them. Substitute values for them instead
+    # of delegating to super(), whose getattr loop would fail before this
+    # method could intervene.
+    def get_params(self, deep=True):
+        out = {}
+        for key in self._get_param_names():
+            if key == "model":
+                value = self.model_name
+            elif key in ("token", "model_path"):
+                value = None
+            else:
+                value = getattr(self, key)
+            if deep and hasattr(value, "get_params") and not isinstance(value, type):
+                deep_items = value.get_params().items()
+                out.update((key + "__" + k, val) for k, val in deep_items)
+            out[key] = value
+        return out
+
     def _cluster_tokens(self, token_embeddings) -> np.ndarray:
         """
         Apply KMeans clustering to token embeddings.
@@ -395,8 +415,8 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         # Compute differential abundance
         diff_percentage = percentage_positive - percentage_negative
 
-        # Rank clusters by differential abundance (high to low)
-        cluster_order = np.argsort(np.argsort(-diff_percentage))
+        # Rank clusters by differential abundance (low to high)
+        cluster_order = np.argsort(np.argsort(diff_percentage))
 
         # Store and return
         self.cluster_order = cluster_order
