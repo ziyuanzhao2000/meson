@@ -149,7 +149,7 @@ class GalleryPlan:
         slides=None,
         *,
         tile_key: str = DEFAULT_TILE_KEY,
-        cmap: str = 'viridis_r',
+        cmap: str = 'viridis',
         blend_with_previous: bool = True,
         saliency_alpha_power: float = 1.0,
         batch_size: int = 16,
