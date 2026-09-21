@@ -126,3 +126,81 @@ class TestSlideSource:
         del one_slide.tables["tiles_table"]
         with pytest.raises(KeyError, match="feature_extraction"):
             list(SlideSource(one_slide))
+
+    def test_iter_with_ref_matches_iter_for_slide_id_and_table(self, manifest):
+        """Additive: the 3-tuple's first two elements must match __iter__'s pair."""
+        plain = list(SlideSource(manifest))
+        with_ref = list(SlideSource(manifest).iter_with_ref())
+        assert [sid for sid, _ in plain] == [sid for sid, _, _ in with_ref]
+        assert [len(table) for _, table in plain] == [len(table) for _, table, _ in with_ref]
+
+    def test_iter_with_ref_mapping_yields_the_live_objects(self, open_cohort):
+        for slide_id, _, ref in SlideSource(open_cohort).iter_with_ref():
+            assert ref is open_cohort[slide_id]
+
+    def test_iter_with_ref_manifest_yields_store_paths(self, manifest):
+        stores = set(manifest["store"])
+        for _, _, ref in SlideSource(manifest).iter_with_ref():
+            assert isinstance(ref, str) and ref in stores
+
+    def test_iter_with_ref_bare_table_yields_none(self, one_table):
+        (_, _, ref), = list(SlideSource(one_table).iter_with_ref())
+        assert ref is None
+
+
+class TestAttachSlideRef:
+    def test_rehydrates_a_path_string_to_a_live_object(self, manifest, open_cohort):
+        from mesoslide._slides import SLIDE_REF, attach_slide_ref
+
+        sel = ms.select_top_patches(manifest, "score", n=6)
+        assert all(isinstance(v, str) for v in sel.obs[SLIDE_REF])
+
+        out = attach_slide_ref(sel, open_cohort)
+        for slide_id, ref in zip(out.obs["slide_id"], out.obs[SLIDE_REF]):
+            assert ref is open_cohort[slide_id]
+        # Original is untouched.
+        assert all(isinstance(v, str) for v in sel.obs[SLIDE_REF])
+
+    def test_retargets_via_an_explicit_id_map(self, manifest, open_cohort):
+        """Cross-modality hand-over: the target slide set is keyed differently."""
+        from mesoslide._slides import SLIDE_REF, attach_slide_ref
+
+        sel = ms.select_top_patches(manifest, "score", n=6)
+        fake_cycif = {f"cycif_{sid}": wsi for sid, wsi in open_cohort.items()}
+        id_map = {sid: f"cycif_{sid}" for sid in open_cohort}
+
+        out = attach_slide_ref(sel, fake_cycif, slide_id_map=id_map)
+        for slide_id, ref in zip(out.obs["slide_id"], out.obs[SLIDE_REF]):
+            assert ref is open_cohort[slide_id]
+
+    def test_missing_mapped_id_raises(self, manifest):
+        from mesoslide._slides import attach_slide_ref
+
+        sel = ms.select_top_patches(manifest, "score", n=2)
+        with pytest.raises(ValueError, match="No entry in `slides`"):
+            attach_slide_ref(sel, {"nonexistent": None})
+
+
+class TestStripSlideRefs:
+    def test_replaces_live_objects_with_their_path(self, manifest, open_cohort):
+        from mesoslide._slides import SLIDE_REF, attach_slide_ref, strip_slide_refs
+
+        sel = ms.select_top_patches(manifest, "score", n=6)
+        rehydrated = attach_slide_ref(sel, open_cohort)
+
+        stripped = strip_slide_refs(rehydrated)
+        for orig_path, ref in zip(sel.obs[SLIDE_REF], stripped.obs[SLIDE_REF]):
+            assert ref == orig_path
+        # Original is untouched (still live objects).
+        assert all(hasattr(v, "read_region") for v in rehydrated.obs[SLIDE_REF])
+
+    def test_leaves_path_strings_and_nulls_untouched(self, manifest, one_table):
+        from mesoslide._slides import SLIDE_REF, strip_slide_refs
+
+        sel = ms.select_top_patches(manifest, "score", n=4)
+        stripped = strip_slide_refs(sel)
+        assert list(stripped.obs[SLIDE_REF]) == list(sel.obs[SLIDE_REF])
+
+        bare = ms.select_top_patches(one_table, "score", n=4)
+        stripped_bare = strip_slide_refs(bare)
+        assert stripped_bare.obs[SLIDE_REF].isna().all()

@@ -43,7 +43,7 @@ def test_fit_produces_a_valid_cluster_order(manifest, open_cohort):
     encoder = StubViTEncoder()
     clusterizer = TokenClusterizer(model=encoder, kmeans=_fitted_kmeans(), device="cpu")
     clusterizer.fit(
-        manifest, feature_name="sparse_score", n_positive=6, n_negative=6,
+        manifest, feature_name="sparse_score", model=encoder, n_positive=6, n_negative=6,
         show_progress=False, image_slides=open_cohort,
     )
     n_clusters = clusterizer.kmeans.n_clusters
@@ -74,8 +74,8 @@ def test_extract_cluster_maps_shares_embedding_across_calls(manifest, open_cohor
     c2 = TokenClusterizer(model=encoder, kmeans=_fitted_kmeans(seed=2),
                            feature_name="c2", device="cpu")
 
-    map1 = extract_cluster_maps(selection, open_cohort, c1, progress_bar=False)
-    map2 = extract_cluster_maps(selection, open_cohort, c2, progress_bar=False)
+    map1 = extract_cluster_maps(selection, c1, encoder, slides=open_cohort, progress_bar=False)
+    map2 = extract_cluster_maps(selection, c2, encoder, slides=open_cohort, progress_bar=False)
 
     assert map1.shape == (6, TILE_PX, TILE_PX)
     assert map2.shape == (6, TILE_PX, TILE_PX)
@@ -85,12 +85,52 @@ def test_extract_cluster_maps_shares_embedding_across_calls(manifest, open_cohor
     assert call_count["n"] == 1
 
 
+def test_model_name_is_canonicalized_to_the_registry_key(monkeypatch):
+    """A resolved model's own `.name` doesn't have to match its registry
+    key's casing (e.g. UNI's `.name` is "UNI" but its registry key is
+    "uni") -- clusterizer.model_name must store the registry key so it can
+    be fed straight back into the registry later, not whatever casing the
+    model instance happens to self-report.
+    """
+    from lazyslide_models import MODEL_REGISTRY
+
+    class LoudNameStub(StubViTEncoder):
+        name = "VIT-STUB-LOUD"
+
+    monkeypatch.setitem(MODEL_REGISTRY, "vit-stub-loud", lambda **kw: LoudNameStub())
+
+    clusterizer = TokenClusterizer(model=LoudNameStub(), kmeans=_fitted_kmeans(), device="cpu")
+    assert clusterizer.model_name == "vit-stub-loud"
+
+
+def test_extract_cluster_maps_auto_resolves_model_from_model_name(manifest, open_cohort, monkeypatch):
+    """When `model` is omitted, extract_cluster_maps must pull it from the
+    registry via clusterizer.model_name (set once at __init__ time), not
+    require every call site to pass a model in.
+    """
+    from lazyslide_models import MODEL_REGISTRY
+
+    selection = ms.select_random_patches(manifest, 2, random_state=0)
+    clusterizer = TokenClusterizer(model=StubViTEncoder(), kmeans=_fitted_kmeans(),
+                                    feature_name="auto_resolve", device="cpu")
+    assert clusterizer.model_name == "vit-stub"
+
+    monkeypatch.setitem(
+        MODEL_REGISTRY, "vit-stub",
+        lambda model_path=None, token=None: StubViTEncoder(),
+    )
+
+    cluster_map = extract_cluster_maps(selection, clusterizer, slides=open_cohort, progress_bar=False)
+    assert cluster_map.shape == (2, TILE_PX, TILE_PX)
+    assert cluster_map.dtype == np.uint8
+
+
 def test_extract_cluster_maps_rejects_empty_feature_name(manifest, open_cohort):
     selection = ms.select_random_patches(manifest, 2, random_state=0)
     encoder = StubViTEncoder()
     c1 = TokenClusterizer(model=encoder, kmeans=_fitted_kmeans(), device="cpu")  # feature_name=''
     with pytest.raises(ValueError, match="non-empty feature_name"):
-        extract_cluster_maps(selection, open_cohort, c1)
+        extract_cluster_maps(selection, c1, encoder, slides=open_cohort)
 
 
 def test_extract_cluster_maps_cache_avoids_recompute(manifest, open_cohort):
@@ -112,14 +152,15 @@ def test_extract_cluster_maps_cache_avoids_recompute(manifest, open_cohort):
                                     feature_name="cached_cluster", device="cpu")
 
     first = extract_cluster_maps(
-        selection, open_cohort, clusterizer, progress_bar=False, cache=True,
+        selection, clusterizer, encoder, slides=open_cohort, progress_bar=False, cache=True,
     )
     assert cluster_img_key(clusterizer) in selection.obsm
     assert call_count["n"] == 1
 
-    # Second call: neither the model nor slides should be touched at all.
+    # Second call: neither the model nor slides should be touched at all --
+    # pass model=None to make that explicit (it's cached, so never read).
     second = extract_cluster_maps(
-        selection, None, clusterizer, progress_bar=False,
+        selection, clusterizer, None, slides=None, progress_bar=False,
     )
     assert call_count["n"] == 1
     assert np.array_equal(first, second)

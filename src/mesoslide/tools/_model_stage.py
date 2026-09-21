@@ -71,6 +71,29 @@ def _resolve_model(model, *, model_path=None, token=None):
     return instance, name
 
 
+def _canonical_registry_name(name: str) -> str:
+    """Case-insensitively match `name` against `MODEL_REGISTRY` keys.
+
+    An already-instantiated model's own `.name` doesn't necessarily match its
+    registry key's casing (e.g. UNI's `.name` is "UNI" but its registry key
+    is "uni") -- callers that persist a resolved name (e.g.
+    `TokenClusterizer.model_name`) and later feed it back into
+    `_resolve_model` need the registry key, not whatever casing `.name`
+    happened to report, or they'll silently miss the registry entry and fall
+    through to the generic (and here, wrong) TimmModel path. Names with no
+    matching key (TimmModel-resolved names, which were never registry keys to
+    begin with) are returned unchanged.
+    """
+    from lazyslide_models import MODEL_REGISTRY
+
+    if name in MODEL_REGISTRY:
+        return name
+    for key in MODEL_REGISTRY:
+        if key.lower() == name.lower():
+            return key
+    return name
+
+
 def _require_dense_capable(model, model_name: str) -> None:
     """Check the model can produce per-token embeddings (encode_image_dense).
 

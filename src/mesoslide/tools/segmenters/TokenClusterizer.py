@@ -10,6 +10,7 @@ from sklearn.cluster import KMeans
 from mesoslide.tools._model_stage import (
     CallableStage,
     ImageModelStage,
+    _canonical_registry_name,
     _require_dense_capable,
     _resolve_model,
 )
@@ -32,13 +33,26 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
     `transform()` as a `ModelStage` for that purpose) rather than
     duplicating clustering/rasterization logic of its own.
 
+    A `TokenClusterizer` does not hold onto the vision model itself -- only
+    `grid_size`/`patch_size`/`model_name`, read from it once at construction
+    time. Everywhere `transform()`/`as_stage()` are used, only
+    already-computed token embeddings are needed, so keeping the (often
+    large) model out of `self` keeps a pickled clusterizer small, e.g. for
+    saving many per-feature clusterizers that all happen to share the same
+    model. `model_name` is kept (a plain string, unlike the model itself) so
+    that `fit()` and `extract_cluster_maps` can re-resolve the same model
+    from `lazyslide_models.MODEL_REGISTRY` on their own when not given one
+    explicitly -- see their docstrings.
+
     Parameters
     ----------
     model : str or lazyslide_models.ImageModel
         A key into `lazyslide_models.MODEL_REGISTRY` (e.g. "uni2"), an
         arbitrary timm model name, or an already-instantiated
         `lazyslide_models` `ImageModel`. Must be ViT-style (exposes
-        `grid_size`, `patch_size`, `encode_image_dense`).
+        `grid_size`, `patch_size`, `encode_image_dense`). Only used here to
+        read `grid_size`/`patch_size`/`model_name` -- the model itself is
+        not stored.
     kmeans : sklearn.cluster.KMeans or compatible
         Clustering model; fit lazily by `fit()` if not already fitted.
     interpolation : str, default='nearest'
@@ -50,8 +64,8 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         Used as this clusterizer's default cache key when run as a stage
         (see `extract_cluster_maps`) and for row labels in plotting.
     device : str, optional
-        Torch device for the vision model. Defaults to "cuda" if available,
-        else "cpu".
+        Torch device `fit()` runs its vision model on. Defaults to "cuda" if
+        available, else "cpu".
     token, model_path
         Forwarded to model resolution (see `mesoslide.tools._feature_extraction
         .feature_extraction`).
@@ -67,14 +81,14 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
     >>>
     >>> # Turn a set of selected patches into rasterized cluster maps
     >>> from mesoslide.preprocessing import extract_cluster_maps
-    >>> cluster_masks = extract_cluster_maps(patches, slides, clusterizer)
+    >>> cluster_masks = extract_cluster_maps(patches, clusterizer, model="uni2")
     >>> # Returns: (N, H, W) uint8 array with cluster IDs
     """
 
     def __init__(
         self,
         model,
-        kmeans,
+        kmeans = None,
         *,
         interpolation: str = 'nearest',
         cluster_order: Optional[np.ndarray] = None,
@@ -83,8 +97,11 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         token: Optional[str] = None,
         model_path: "str | Path | None" = None,
     ):
-        self.model, self.model_name = _resolve_model(model, model_path=model_path, token=token)
-        _require_dense_capable(self.model, self.model_name)
+        resolved_model, model_name = _resolve_model(model, model_path=model_path, token=token)
+        _require_dense_capable(resolved_model, model_name)
+        self.grid_size = resolved_model.grid_size
+        self.patch_size = resolved_model.patch_size
+        self.model_name = _canonical_registry_name(model_name)
         self.kmeans = kmeans
         self.interpolation = interpolation
         self.cluster_order = cluster_order
@@ -118,7 +135,7 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         token_embeddings = token_embeddings.astype(np.float64)
 
         B, N, D = token_embeddings.shape
-        gh, gw = self.model.grid_size
+        gh, gw = self.grid_size
         assert N == gh * gw, f"Expected {gh * gw} tokens ({gh}x{gw} grid), got {N}"
 
         cluster_maps = []
@@ -188,8 +205,8 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         """
         cluster_maps = self._cluster_tokens(token_embeddings)
         if output_size is None:
-            gh, gw = self.model.grid_size
-            ph, pw = self.model.patch_size
+            gh, gw = self.grid_size
+            ph, pw = self.patch_size
             output_size = (gh * ph, gw * pw)
         return self._rasterize(cluster_maps, output_size)
 
@@ -213,13 +230,17 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         self,
         slides,
         feature_name: str,
+        model=None,
         n_positive: int = 100,
         n_negative: int = 100,
-        batch_size: int = 16,
+        batch_size: int = 128, # changed from 16 for better perf on cpu
+        top_fraction: float = 0.10,
         show_progress: bool = True,
         take_every: Union[int, None] = None,
         tile_key: str = 'tiles',
         image_slides=None,
+        token: Optional[str] = None,
+        model_path: "str | Path | None" = None,
     ) -> "TokenClusterizer":
         """
         Compute cluster order based on differential abundance between positive and negative patches.
@@ -241,6 +262,14 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
             Where to select patches from. See :func:`mesoslide.select_top_patches`.
         feature_name : str
             Feature name to use for patch selection (e.g., 'UNI_SAE_12345')
+        model : str or lazyslide_models.ImageModel, optional
+            The vision model to embed patches with -- same accepted forms as
+            `__init__`'s `model`. Must resolve to the same `grid_size` this
+            clusterizer was constructed with. Defaults to re-resolving
+            `self.model_name` (set by `__init__`) from
+            `lazyslide_models.MODEL_REGISTRY`; pass this explicitly to reuse
+            an already-loaded instance instead of resolving one again, or to
+            fit against a different (but grid-compatible) model.
         n_positive : int, default=100
             Number of positive patches to sample
         n_negative : int, default=100
@@ -254,6 +283,8 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
             Slides to read pixels from, with image data attached. Defaults to
             `slides` when that is already a mapping of open slides; otherwise
             required, since a slides_table alone carries no pixels.
+        token, model_path
+            Forwarded to model resolution.
 
         Returns
         -------
@@ -268,23 +299,26 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         ...     feature_name='UNI_SAE_12345',
         ...     n_positive=100,
         ...     n_negative=100,
-        ... )
+        ... )  # model defaults to re-resolving clusterizer.model_name ('uni2' here)
         >>> # Now the clusterizer will use this ordering when rasterizing
         >>> from mesoslide.preprocessing import extract_cluster_maps
-        >>> masks = extract_cluster_maps(patches, slides, clusterizer)
+        >>> masks = extract_cluster_maps(patches, clusterizer)
         """
         from mesoslide._patch_selector import select_top_patches, select_negative_patches
         from mesoslide.tools._feature_extraction import run_model_stages
 
-        if image_slides is None:
-            if isinstance(slides, dict):
-                image_slides = slides
-            else:
-                raise ValueError(
-                    "fit() needs slides with image data attached to read pixels. "
-                    "Pass image_slides=mesoslide.open_slides(manifest), or pass "
-                    "that mapping as `slides` directly."
-                )
+        resolved_model, model_name = _resolve_model(
+            model if model is not None else self.model_name,
+            model_path=model_path, token=token,
+        )
+        _require_dense_capable(resolved_model, model_name)
+        if tuple(resolved_model.grid_size) != tuple(self.grid_size):
+            raise ValueError(
+                f"fit()'s model has grid_size={tuple(resolved_model.grid_size)}, "
+                f"but this clusterizer was constructed with grid_size="
+                f"{tuple(self.grid_size)} -- pass the same model (or an "
+                f"equivalent one) used to construct it."
+            )
 
         if show_progress:
             print(f"Selecting patches for feature '{feature_name}'...")
@@ -296,8 +330,10 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
             n=n_positive,
             tile_key=tile_key,
             min_score=0,          # Only positive scores
+            top_fraction=top_fraction,  # Only top fraction of patches
             take_every=take_every,
         )
+        print(top_fraction)
 
         # Negative patches: evenly sampled from zero-score patches
         negative_patches_anndata = select_negative_patches(
@@ -313,7 +349,7 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
                   f"{len(negative_patches_anndata)} negative patches...")
 
         dense_key = "_fit_dense"
-        fm_stage = ImageModelStage(self.model, dense=True, name=dense_key, device=self.device)
+        fm_stage = ImageModelStage(resolved_model, dense=True, name=dense_key, device=self.device)
 
         run_model_stages(
             positive_patches_anndata, [fm_stage], slides=image_slides,

@@ -49,6 +49,27 @@ def test_table_round_trips_through_a_written_store(cohort):
     assert table.obsm["stub_embedding"].shape == (table.n_obs, 8)
 
 
+def test_whole_slide_batches_are_channel_first_for_the_model_transform(
+    one_slide, real_transform_stub_encoder
+):
+    """Regression: the whole-slide DataLoader path must hand ModelStage
+    channel-first (B, C, H, W) batches, matching what the patch-table path
+    already gets from extract_patch_images(channel_first=True).
+
+    ezslide/wsidata's tile datasets hand back channel-last (H, W, C) images;
+    RealTransformStubEncoder's real ToImage/Normalize transform chain (unlike
+    StubEncoder's get_transform() -> None) fails on channel-last input, so
+    this exercises the conversion that StubEncoder-based tests skip entirely.
+    """
+    table = one_slide.tables["tiles_table"]
+    n = table.n_obs
+    ms.tl.feature_extraction(
+        one_slide, real_transform_stub_encoder, key_added="real_transform",
+        batch_size=8, num_workers=0, device="cpu", save=False,
+    )
+    assert table.obsm["real_transform"].shape == (n, 8)
+
+
 def test_x_y_are_tile_origins(one_slide):
     """extract_patch_images reads from these, so they must be the level-0 top-left."""
     table = one_slide.tables["tiles_table"]

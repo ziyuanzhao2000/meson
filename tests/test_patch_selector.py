@@ -33,6 +33,31 @@ def test_accepts_a_mapping(open_cohort):
     assert set(out.obs["slide_id"]) <= set(open_cohort)
 
 
+# --- SLIDE_REF: patch tables carry their own slide reference ----------------
+
+def test_manifest_backed_selection_stamps_slide_ref_with_paths(manifest):
+    from mesoslide._slides import SLIDE_REF
+
+    out = ms.select_top_patches(manifest, "score", n=10)
+    stores = set(manifest["store"])
+    assert all(isinstance(v, str) and v in stores for v in out.obs[SLIDE_REF])
+
+
+def test_open_slides_backed_selection_stamps_slide_ref_with_live_objects(open_cohort):
+    from mesoslide._slides import SLIDE_REF
+
+    out = ms.select_top_patches(open_cohort, "score", n=10)
+    for slide_id, ref in zip(out.obs["slide_id"], out.obs[SLIDE_REF]):
+        assert ref is open_cohort[slide_id], "expected the identical WSIData object"
+
+
+def test_bare_table_selection_has_no_slide_ref_to_speak_of(one_table):
+    from mesoslide._slides import SLIDE_REF
+
+    out = ms.select_top_patches(one_table, "score", n=5)
+    assert out.obs[SLIDE_REF].isna().all()
+
+
 # --- select_top_patches -----------------------------------------------------
 
 class TestSelectTop:

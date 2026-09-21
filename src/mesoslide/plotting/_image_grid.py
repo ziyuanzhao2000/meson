@@ -7,6 +7,44 @@ from math import ceil
 from typing import Optional, List, Union
 
 
+def _group_color_lookup(group_ids: List, cmap: str) -> dict:
+    """Map each distinct group id in `group_ids` to a color from `cmap`."""
+    if isinstance(cmap, ListedColormap):
+        # index directly by group_id — color[3] is always group 3's color
+        return {g: cmap(g) for g in set(group_ids)}
+    # string cmap: normalize by total number of colors expected
+    colormap = cm.get_cmap(cmap)
+    n = colormap.N if hasattr(colormap, 'N') else 256
+    return {g: colormap(g / n) for g in set(group_ids)}
+
+
+def _draw_group_border(ax, color, patch_size: float, border_extend: float, alpha: float) -> None:
+    """Draw a colored rectangle behind an axes' image, extending past its edges."""
+    border = mpatches.Rectangle(
+        (-border_extend * patch_size, -border_extend * patch_size),
+        1 + 2 * border_extend * patch_size,
+        1 + 2 * border_extend,
+        transform=ax.transAxes,
+        facecolor=color,
+        alpha=alpha,
+        zorder=-10,
+        clip_on=False,
+    )
+    ax.add_patch(border)
+
+
+def _draw_corner_label(ax, text: str, fontsize: float, patch_size: float) -> None:
+    """Draw a text label in the top-left corner of an axes."""
+    ax.text(
+        0, 0.95, str(text),
+        ha='left', va='top',
+        transform=ax.transAxes,
+        fontsize=max(fontsize, patch_size * 4),
+        color='black',
+        zorder=20,
+    )
+
+
 def _plot_image_grid(
     images: List[np.ndarray],
     labels: Optional[List[str]] = None,
@@ -60,14 +98,7 @@ def _plot_image_grid(
 
     # Build color lookup once
     if group_ids is not None:
-        if isinstance(cmap, ListedColormap):
-            # index directly by group_id — color[3] is always group 3's color
-            group_to_color = {g: cmap(g) for g in set(group_ids)}
-        else:
-            # string cmap: normalize by total number of colors expected
-            colormap = cm.get_cmap(cmap)
-            n = colormap.N if hasattr(colormap, 'N') else 256
-            group_to_color = {g: colormap(g / n) for g in set(group_ids)}
+        group_to_color = _group_color_lookup(group_ids, cmap)
 
     for i, image in enumerate(images):
         ax = axs[i]
@@ -75,28 +106,10 @@ def _plot_image_grid(
         ax.set_zorder(10)
 
         if group_ids is not None:
-            color = group_to_color[group_ids[i]]
-            border = mpatches.Rectangle(
-                (-border_extend * patch_size, -border_extend * patch_size),
-                1 + 2 * border_extend * patch_size,
-                1 + 2 * border_extend,
-                transform=ax.transAxes,
-                facecolor=color,
-                alpha=border_alpha,
-                zorder=-10,
-                clip_on=False,
-            )
-            ax.add_patch(border)
+            _draw_group_border(ax, group_to_color[group_ids[i]], patch_size, border_extend, border_alpha)
 
         if labels is not None:
-            ax.text(
-                0, 0.95, str(labels[i]),
-                ha='left', va='top',
-                transform=ax.transAxes,
-                fontsize=max(fontsize, patch_size * 4),
-                color='black',
-                zorder=20,
-            )
+            _draw_corner_label(ax, labels[i], fontsize, patch_size)
 
         ax.axis('off')
 

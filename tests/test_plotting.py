@@ -174,11 +174,13 @@ class TestPatchGalleryWithSaliency:
                                  feature_name=feature_name, device="cpu")
 
     def test_writes_a_gallery_from_slides(self, manifest, open_cohort, tmp_path):
+        from tests.conftest import StubViTEncoder
+
         sel = ms.select_random_patches(manifest, 4, random_state=4)
         out = tmp_path / "sal.png"
         ms.plotting.plot_patch_gallery_with_saliency(
             sel, clusterizers=[self._clusterizer("c1"), self._clusterizer("c2")],
-            slides=open_cohort, output_path=str(out),
+            model=StubViTEncoder(), slides=open_cohort, output_path=str(out),
             patches_per_row=2, progress_bar=False, dpi=40,
         )
         assert out.exists()
@@ -198,24 +200,44 @@ class TestPatchGalleryWithSaliency:
                 slides=open_cohort, progress_bar=False,
             )
 
-    def test_needs_slides_unless_fully_cached(self, manifest, open_cohort, tmp_path):
+    def test_needs_slides_unless_fully_cached_or_slide_ref(self, manifest, open_cohort, tmp_path):
+        """slides is no longer required for a fresh selection: patches.obs
+        carries its own '_slide_ref' (set by select_random_patches), which
+        extract_he_patch_images/extract_cluster_maps fall back to. It's
+        still required when that column is missing/empty and nothing is
+        cached -- e.g. a hand-built patches table.
+        """
+        from mesoslide._slides import SLIDE_REF
+        from tests.conftest import StubViTEncoder
+
         sel = ms.select_random_patches(manifest, 2, random_state=0)
         clusterizer = self._clusterizer("c1")
-        with pytest.raises(ValueError, match="slides is required"):
+
+        bare = sel.copy()
+        del bare.obs[SLIDE_REF]
+        with pytest.raises(ValueError, match="slides was not given"):
             ms.plotting.plot_patch_gallery_with_saliency(
-                sel, clusterizers=[clusterizer], progress_bar=False,
+                bare, clusterizers=[clusterizer], progress_bar=False,
             )
 
-        # Once everything is cached, slides is no longer needed.
+        # A fresh selection carries its own slide reference -- no slides= needed.
         ms.plotting.plot_patch_gallery_with_saliency(
-            sel, clusterizers=[clusterizer], slides=open_cohort, cache=True,
+            sel, clusterizers=[clusterizer], model=StubViTEncoder(),
             output_path=str(tmp_path / "sal1.png"), progress_bar=False, dpi=40,
         )
+
+        # Once everything is cached, neither slides nor SLIDE_REF is needed.
+        cached = sel.copy()
+        del cached.obs[SLIDE_REF]
         ms.plotting.plot_patch_gallery_with_saliency(
-            sel, clusterizers=[clusterizer],
-            output_path=str(tmp_path / "sal2.png"), progress_bar=False, dpi=40,
+            cached, clusterizers=[clusterizer], model=StubViTEncoder(), slides=open_cohort,
+            cache=True, output_path=str(tmp_path / "sal2.png"), progress_bar=False, dpi=40,
         )
-        assert (tmp_path / "sal2.png").exists()
+        ms.plotting.plot_patch_gallery_with_saliency(
+            cached, clusterizers=[clusterizer],
+            output_path=str(tmp_path / "sal3.png"), progress_bar=False, dpi=40,
+        )
+        assert (tmp_path / "sal3.png").exists()
 
 
 class TestCreateFeaturePdf:

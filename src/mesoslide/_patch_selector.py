@@ -24,10 +24,11 @@ from typing import Optional, Sequence, Union
 from tqdm.auto import tqdm
 
 import numpy as np
+import pandas as pd
 import anndata as ad
 
 from mesoslide._utils import get_patch_scores
-from mesoslide._slides import SLIDE_ID, DEFAULT_TILE_KEY, SlideSource
+from mesoslide._slides import SLIDE_ID, SLIDE_REF, DEFAULT_TILE_KEY, SlideSource
 from mesoslide._deprecated import (
     SLIDES_HINT,
     check_not_spatialdata,
@@ -72,7 +73,7 @@ def _build_output(
     sort_by_score    : sort output by _feature_score descending
     """
     subsets = []
-    for slide_id, table in source:
+    for slide_id, table, ref in source.iter_with_ref():
         idx_list = selected_indices.get(slide_id, [])
         if len(idx_list) == 0:
             continue
@@ -82,6 +83,12 @@ def _build_output(
         # column (e.g. from concat_slides) that we must not overwrite.
         if slide_id is not None:
             subset.obs[SLIDE_ID] = slide_id
+
+        # Object-dtype Series, not a bare scalar assignment -- a bare `ref`
+        # (a WSIData) would otherwise get interpreted as array-like by pandas.
+        subset.obs[SLIDE_REF] = pd.Series(
+            [ref] * len(subset), index=subset.obs.index, dtype=object,
+        )
 
         if selected_scores is not None:
             subset.obs["_feature_score"] = np.asarray(

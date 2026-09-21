@@ -83,6 +83,39 @@ class StubEncoder:
         return flat[:, :8] / 255.0
 
 
+class RealTransformStubEncoder:
+    """A stub encoder whose ``get_transform()`` is a real ``ImageModel``-style
+    Compose (ToImage/ToDtype/Resize/Normalize), unlike ``StubEncoder``'s
+    ``None``.
+
+    Exists to catch channel-order bugs: ``Normalize`` only tolerates
+    channel-first ``(B, C, H, W)`` input, so a stage fed channel-last tiles
+    fails inside the transform rather than silently producing wrong output.
+    """
+
+    name = "real-transform-stub"
+
+    def __init__(self):
+        self.model = torch.nn.Identity()
+
+    def to(self, device):
+        return self
+
+    def get_transform(self):
+        from torchvision.transforms.v2 import Compose, Normalize, Resize, ToDtype, ToImage
+
+        return Compose([
+            ToImage(),
+            ToDtype(dtype=torch.float32, scale=True),
+            Resize(size=(64, 64), antialias=False),
+            Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
+        ])
+
+    def encode_image(self, batch):
+        assert batch.shape[1] == 3, f"expected channel-first input, got shape {tuple(batch.shape)}"
+        return batch.reshape(batch.shape[0], -1)[:, :8]
+
+
 class StubViTEncoder:
     """A dense-capable stub: grid_size/patch_size/encode_image_dense, no downloads.
 
@@ -213,6 +246,12 @@ def stub_encoder():
 def vit_stub_encoder():
     """A dense-capable stub encoder for feature_extraction(dense=True) tests."""
     return StubViTEncoder()
+
+
+@pytest.fixture
+def real_transform_stub_encoder():
+    """A stub encoder with a real ToImage/Normalize transform chain."""
+    return RealTransformStubEncoder()
 
 
 # ---------------------------------------------------------------------------

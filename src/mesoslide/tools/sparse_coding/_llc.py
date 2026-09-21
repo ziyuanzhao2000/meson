@@ -343,7 +343,7 @@ class LocalityConstrainedCoding(TransformerMixin, BaseEstimator):
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
         rows, cols, vals = [], [], []
         with torch.no_grad():
-            for idx, batch in enumerate(tqdm(dataloader)):
+            for idx, batch in enumerate(dataloader):
                 code = self.model_.encode(
                     batch[0].to(device),
                     n_neighbors=self.n_neighbors,

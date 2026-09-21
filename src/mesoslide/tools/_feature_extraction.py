@@ -242,7 +242,11 @@ def _preflight(
                 if not has_pixels:
                     raise ValueError(
                         f"stage 0 ('{first.name}'): input_kind='image' but no "
-                        f"`slides` was provided to read pixels from."
+                        f"`slides` was provided and patches.obs['_slide_ref'] "
+                        f"isn't populated either -- pass slides=, or build "
+                        f"patches via mesoslide.select_* (or attach one with "
+                        f"mesoslide.attach_slide_ref) so it can read pixels "
+                        f"on its own."
                     )
             else:
                 if input_key is None:
@@ -336,8 +340,12 @@ def run_model_stages(
         A linear chain: stage i's output feeds stage i+1's input. The first
         stage need not consume images -- see `input_key`.
     slides : optional
-        Required when `slide_or_patches` is a patch-table AnnData and the
-        first stage that actually needs to run consumes images.
+        Needed when `slide_or_patches` is a patch-table AnnData and the
+        first stage that actually needs to run consumes images -- unless
+        `slide_or_patches.obs['_slide_ref']` is already populated (set
+        automatically by `mesoslide.select_top_patches` and friends), in
+        which case pixels are read from that instead and `slides` can be
+        omitted.
     input_key : str, optional
         Name of an existing `.obsm` entry to start the chain from, when the
         first stage that needs to run doesn't consume images (e.g. resuming
@@ -402,7 +410,10 @@ def run_model_stages(
 
     if is_patch_table:
         table = slide_or_patches
-        has_pixels = slides is not None
+        from mesoslide._slides import SLIDE_REF
+        has_pixels = slides is not None or (
+            SLIDE_REF in table.obs.columns and table.obs[SLIDE_REF].notna().any()
+        )
     else:
         table_key = table_key or f"{tile_key}_table"
         table = slide_or_patches.tables.get(table_key)
@@ -441,7 +452,11 @@ def run_model_stages(
                 num_workers=num_workers,
                 multiprocessing_context="spawn" if num_workers > 0 else None,
             )
-            batches = (b["image"] for b in loader)
+            # ezslide/wsidata's tile datasets hand back channel-last (H, W, C)
+            # images (see ezslide.dataset.patch's docstring); every ModelStage
+            # expects channel-first (B, C, H, W), same as the patch-table
+            # branch above gets from extract_patch_images(channel_first=True).
+            batches = (b["image"].permute(0, 3, 1, 2).contiguous() for b in loader)
     else:
         start_key = input_key if run_from == 0 else stages[run_from - 1].name
         batches = iter_array_batches(table.obsm[start_key], batch_size)

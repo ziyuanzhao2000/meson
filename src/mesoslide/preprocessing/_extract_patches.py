@@ -9,6 +9,7 @@ from mesoslide._slides import (
     DEFAULT_TILE_KEY,
     PATCH_IMG_KEY,
     SLIDE_ID,
+    SLIDE_REF,
     slide_id_from,
     tile_table_key,
 )
@@ -34,6 +35,55 @@ def _resolve_slides(slides) -> dict:
     )
 
 
+def _resolve_slides_from_ref(patches: "ad.AnnData") -> "tuple[dict, list]":
+    """Build {slide_id: WSIData} from patches.obs[SLIDE_REF], the fallback
+    used when no `slides` argument is given.
+
+    Each unique live `WSIData` reference is reused directly (no open); each
+    unique path-string reference is opened exactly once via
+    `ezslide.read_slide`, regardless of how many rows share it. Returns
+    `(slide_map, opened)` -- `opened` lists the WSIData this function itself
+    opened, for the caller to close once done reading.
+    """
+    if SLIDE_REF not in patches.obs.columns:
+        raise ValueError(
+            "slides was not given and patches.obs has no "
+            f"'{SLIDE_REF}' column -- pass slides= explicitly, or build "
+            "patches via mesoslide.select_* (or attach one with "
+            "mesoslide.attach_slide_ref) so it carries its own slide "
+            "reference."
+        )
+
+    from wsidata import WSIData
+    import ezslide
+
+    has_slide_id = SLIDE_ID in patches.obs.columns
+    slide_ids = patches.obs[SLIDE_ID] if has_slide_id else None
+    refs = patches.obs[SLIDE_REF]
+
+    slide_map: dict = {}
+    opened: list = []
+    opened_by_path: dict = {}
+    for i in range(len(patches)):
+        slide_id = slide_ids.iat[i] if has_slide_id else None
+        if slide_id in slide_map:
+            continue
+        ref = refs.iat[i]
+        if ref is None or (isinstance(ref, float) and np.isnan(ref)):
+            continue  # left unresolved; existing KeyError/skip_errors path handles it
+        if isinstance(ref, WSIData):
+            slide_map[slide_id] = ref
+            continue
+        path = str(ref)
+        if path not in opened_by_path:
+            wsi = ezslide.read_slide(path, attach_images=True)
+            opened_by_path[path] = wsi
+            opened.append(wsi)
+        slide_map[slide_id] = opened_by_path[path]
+
+    return slide_map, opened
+
+
 def _tile_size(wsi: "WSIData", tile_key: str) -> tuple:
     """Tile height/width at level 0, from the slide's own tile spec."""
     spec = wsi.tile_spec(tile_key)
@@ -48,9 +98,9 @@ def _tile_size(wsi: "WSIData", tile_key: str) -> tuple:
     )
 
 
-def extract_patch_images(
+def extract_he_patch_images(
     patches: "ad.AnnData",
-    slides,
+    slides=None,
     *,
     tile_key: str = DEFAULT_TILE_KEY,
     channel_first: bool = True,
@@ -75,11 +125,17 @@ def extract_patch_images(
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
         Required .obs columns: 'x', 'y'; plus 'slide_id' when `slides` covers
         more than one slide.
-    slides : WSIData, list of WSIData, or {slide_id: WSIData}
+    slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
         The slides to read from. Use :func:`mesoslide.open_slides` to build the
         mapping from a cohort manifest. Slides must have image data attached
         (``ezslide.read_slide(store, attach_images=True)``); a store written by
-        ``wsi.write()`` holds no pixels on its own.
+        ``wsi.write()`` holds no pixels on its own. When omitted, resolved from
+        ``patches.obs['_slide_ref']`` instead -- populated automatically by
+        :func:`mesoslide.select_top_patches` and friends, or attach one
+        manually with :func:`mesoslide.attach_slide_ref`. A slide referenced
+        by a live `WSIData` there is reused directly (no re-open); one
+        referenced by a store path is opened once (regardless of how many
+        rows share it) and closed again before this function returns.
     tile_key : str, default='tiles'
     channel_first : bool, default=True
         True -> each patch (C, H, W), stacked (N, C, H, W).
@@ -123,86 +179,132 @@ def extract_patch_images(
         cached = patches.obsm[PATCH_IMG_KEY]
         return np.moveaxis(cached, 1, -1) if not channel_first else cached
 
-    slide_map = _resolve_slides(slides)
-    single = set(slide_map) == {None}
-
-    required = ["x", "y"] if single else ["x", "y", SLIDE_ID]
-    missing = [c for c in required if c not in patches.obs.columns]
-    if missing:
-        raise ValueError(
-            f"patches.obs missing required columns: {missing}. "
-            "These come from the tile table written by mesoslide.tl.feature_extraction; "
-            f"got: {list(patches.obs.columns)}"
-        )
-
-    patch_df = patches.obs
-    sizes = {sid: _tile_size(wsi, tile_key) for sid, wsi in slide_map.items()}
-
-    extracted = []
-    iterator = patch_df.iterrows()
-    if progress_bar:
-        iterator = tqdm(iterator, total=len(patch_df), desc="Extracting patches")
-
-    for _, patch in iterator:
-        slide_id = None if single else patch[SLIDE_ID]
-        try:
-            wsi = slide_map[slide_id]
-        except KeyError:
-            msg = (
-                f"Warning: no slide '{slide_id}' in `slides` "
-                f"(have: {sorted(k for k in slide_map if k is not None)})"
-            )
-            if skip_errors:
-                tqdm.write(msg) if progress_bar else print(msg)
-                continue
-            raise ValueError(msg.removeprefix("Warning: "))
-
-        try:
-            h, w = sizes[slide_id]
-            # read_region returns (H, W, C) uint8 at level 0; keep channel-first
-            # internally so a cached result is always in the canonical layout.
-            arr = wsi.read_region(int(patch.x), int(patch.y), w, h)
-            extracted.append(np.moveaxis(arr, -1, 0))
-        except Exception as e:
-            if skip_errors:
-                msg = f"Warning: Failed to read patch at ({patch.x}, {patch.y}) from {slide_id}: {e}"
-                tqdm.write(msg) if progress_bar else print(msg)
-                continue
-            raise
-
-    if len(extracted) == 0:
-        raise ValueError("No patches were successfully extracted")
-
-    shapes = [p.shape for p in extracted]
-    if len(set(shapes)) != 1:
-        warnings.warn(
-            f"Patches have inconsistent shapes ({len(set(shapes))} distinct shapes). "
-            "Returning a list instead of a stacked array.",
-            UserWarning,
-            stacklevel=2,
-        )
-        if cache:
-            warnings.warn(
-                "cache=True has no effect: patches have inconsistent shapes and "
-                "cannot be aligned 1:1 with patches.obs.",
-                UserWarning,
-                stacklevel=2,
-            )
-        result = extracted
-        return result if channel_first else [np.moveaxis(p, 0, -1) for p in result]
-
-    stacked = np.stack(extracted, axis=0)  # channel-first (N, C, H, W)
-
-    if cache:
-        if len(extracted) == len(patch_df):
-            patches.obsm[PATCH_IMG_KEY] = stacked
+    opened: list = []
+    try:
+        if slides is not None:
+            slide_map = _resolve_slides(slides)
         else:
+            slide_map, opened = _resolve_slides_from_ref(patches)
+        single = set(slide_map) == {None}
+
+        required = ["x", "y"] if single else ["x", "y", SLIDE_ID]
+        missing = [c for c in required if c not in patches.obs.columns]
+        if missing:
+            raise ValueError(
+                f"patches.obs missing required columns: {missing}. "
+                "These come from the tile table written by mesoslide.tl.feature_extraction; "
+                f"got: {list(patches.obs.columns)}"
+            )
+
+        patch_df = patches.obs
+        sizes = {sid: _tile_size(wsi, tile_key) for sid, wsi in slide_map.items()}
+
+        extracted = []
+        iterator = patch_df.iterrows()
+        if progress_bar:
+            iterator = tqdm(iterator, total=len(patch_df), desc="Extracting patches")
+
+        for _, patch in iterator:
+            slide_id = None if single else patch[SLIDE_ID]
+            try:
+                wsi = slide_map[slide_id]
+            except KeyError:
+                msg = (
+                    f"Warning: no slide '{slide_id}' resolved "
+                    f"(have: {sorted(k for k in slide_map if k is not None)})"
+                )
+                if skip_errors:
+                    tqdm.write(msg) if progress_bar else print(msg)
+                    continue
+                raise ValueError(msg.removeprefix("Warning: "))
+
+            try:
+                h, w = sizes[slide_id]
+                # read_region returns (H, W, C) uint8 at level 0; keep channel-first
+                # internally so a cached result is always in the canonical layout.
+                arr = wsi.read_region(int(patch.x), int(patch.y), w, h)
+                extracted.append(np.moveaxis(arr, -1, 0))
+            except Exception as e:
+                if skip_errors:
+                    msg = f"Warning: Failed to read patch at ({patch.x}, {patch.y}) from {slide_id}: {e}"
+                    tqdm.write(msg) if progress_bar else print(msg)
+                    continue
+                raise
+
+        if len(extracted) == 0:
+            raise ValueError("No patches were successfully extracted")
+
+        shapes = [p.shape for p in extracted]
+        if len(set(shapes)) != 1:
             warnings.warn(
-                "cache=True has no effect: skip_errors dropped "
-                f"{len(patch_df) - len(extracted)} row(s), so the result cannot "
-                "be aligned 1:1 with patches.obs.",
+                f"Patches have inconsistent shapes ({len(set(shapes))} distinct shapes). "
+                "Returning a list instead of a stacked array.",
                 UserWarning,
                 stacklevel=2,
             )
+            if cache:
+                warnings.warn(
+                    "cache=True has no effect: patches have inconsistent shapes and "
+                    "cannot be aligned 1:1 with patches.obs.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            result = extracted
+            return result if channel_first else [np.moveaxis(p, 0, -1) for p in result]
 
-    return stacked if channel_first else np.moveaxis(stacked, 1, -1)
+        stacked = np.stack(extracted, axis=0)  # channel-first (N, C, H, W)
+
+        if cache:
+            if len(extracted) == len(patch_df):
+                patches.obsm[PATCH_IMG_KEY] = stacked
+            else:
+                warnings.warn(
+                    "cache=True has no effect: skip_errors dropped "
+                    f"{len(patch_df) - len(extracted)} row(s), so the result cannot "
+                    "be aligned 1:1 with patches.obs.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+
+        return stacked if channel_first else np.moveaxis(stacked, 1, -1)
+    finally:
+        for wsi in opened:
+            try:
+                wsi.close()
+            except Exception:
+                pass
+
+
+def extract_patch_images(
+    patches: "ad.AnnData",
+    slides=None,
+    *,
+    channels: Optional[List[str]] = None,
+    **kwargs,
+) -> Union[np.ndarray, List[np.ndarray]]:
+    """
+    Read image data for the tiles described by a patch table.
+
+    Dispatches to :func:`extract_he_patch_images` (default) or
+    :func:`extract_cycif_patch_images` (when `channels` is given). This is a
+    quick heuristic on the presence of `channels`, not a type check on
+    `slides`; kept for backward compatibility with existing callers that use
+    the name `extract_patch_images` for H&E extraction.
+
+    Parameters
+    ----------
+    patches : AnnData
+    slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
+        See :func:`extract_he_patch_images`/:func:`extract_cycif_patch_images`
+        for the `patches.obs['_slide_ref']` fallback when omitted.
+    channels : list of str, optional
+        Marker/channel names to extract. When given, extracts a CyCIF stack
+        instead of the H&E image -- see :func:`extract_cycif_patch_images`
+        for its additional keyword arguments (`marker_table`, `marker_col`).
+    **kwargs
+        Forwarded to whichever extraction function is dispatched to.
+    """
+    if channels is not None:
+        from mesoslide.preprocessing._extract_cycif_patches import extract_cycif_patch_images
+        return extract_cycif_patch_images(patches, channels, slides, **kwargs)
+    return extract_he_patch_images(patches, slides, **kwargs)

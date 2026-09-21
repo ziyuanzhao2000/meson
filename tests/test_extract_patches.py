@@ -104,3 +104,67 @@ def test_cache_skipped_when_rows_are_dropped(selection, open_cohort):
     with pytest.warns(UserWarning, match="cache=True has no effect"):
         ms.pp.extract_patch_images(sel, open_cohort, progress_bar=False, cache=True)
     assert "patch_img" not in sel.obsm
+
+
+# --- SLIDE_REF fallback: no `slides=` argument at all ------------------------
+
+def test_no_slides_falls_back_to_slide_ref_manifest_backed(manifest, open_cohort):
+    """A manifest-backed selection carries store paths in SLIDE_REF; with no
+    `slides=`, extraction must reopen from those and still match ground truth.
+    """
+    sel = ms.select_random_patches(manifest, 8, random_state=7)
+    out = ms.pp.extract_patch_images(sel, progress_bar=False)
+    ref = ms.pp.extract_patch_images(sel, open_cohort, progress_bar=False)
+    assert np.array_equal(out, ref)
+
+
+def test_no_slides_opens_each_manifest_slide_exactly_once(manifest, monkeypatch):
+    """Opening must be grouped by unique slide, not once per row."""
+    import ezslide
+
+    sel = ms.select_random_patches(manifest, 20, random_state=1)
+    n_unique_slides = sel.obs["slide_id"].nunique()
+    assert n_unique_slides < len(sel), "test needs >1 row per slide to be meaningful"
+
+    open_count = {"n": 0}
+    original_read_slide = ezslide.read_slide
+
+    def _counting_read_slide(*args, **kwargs):
+        open_count["n"] += 1
+        return original_read_slide(*args, **kwargs)
+
+    monkeypatch.setattr(ezslide, "read_slide", _counting_read_slide)
+
+    ms.pp.extract_patch_images(sel, progress_bar=False)
+    assert open_count["n"] == n_unique_slides
+
+
+def test_no_slides_reuses_already_open_wsidata_with_zero_reopens(open_cohort, monkeypatch):
+    """When SLIDE_REF holds live WSIData (selection ran against open_slides
+    output), extraction must reuse those objects directly -- no reopening.
+    """
+    import ezslide
+
+    sel = ms.select_random_patches(open_cohort, 10, random_state=1)
+
+    open_count = {"n": 0}
+    original_read_slide = ezslide.read_slide
+
+    def _counting_read_slide(*args, **kwargs):
+        open_count["n"] += 1
+        return original_read_slide(*args, **kwargs)
+
+    monkeypatch.setattr(ezslide, "read_slide", _counting_read_slide)
+
+    out = ms.pp.extract_patch_images(sel, progress_bar=False)
+    assert open_count["n"] == 0
+    assert out.shape[0] == 10
+
+
+def test_no_slides_and_no_slide_ref_raises(one_slide, one_table):
+    from mesoslide._slides import SLIDE_REF
+
+    sel = ms.select_random_patches(one_table, 2, random_state=0)
+    del sel.obs[SLIDE_REF]
+    with pytest.raises(ValueError, match="slides was not given"):
+        ms.pp.extract_patch_images(sel, progress_bar=False)
