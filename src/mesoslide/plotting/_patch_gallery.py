@@ -3,7 +3,7 @@ from typing import TYPE_CHECKING, Optional, Tuple, Union, List
 import numpy as np
 import matplotlib.pyplot as plt
 
-from mesoslide._slides import DEFAULT_TILE_KEY, PATCH_IMG_KEY, SLIDE_ID, SLIDE_REF
+from mesoslide._slides import DEFAULT_TILE_KEY, HE_PATCH_IMG_KEY, SLIDE_ID, SLIDE_REF
 from mesoslide._deprecated import SLIDES_HINT, deprecated_kwargs, removed, rename
 from ._gallery_plan import GalleryPlan
 from ._image_grid import _plot_image_grid
@@ -54,7 +54,7 @@ def plot_patch_gallery_with_saliency(
     row ordering, etc).
 
     Pixel data and cluster maps are always read through
-    :func:`mesoslide.preprocessing.extract_he_patch_images`/:func:`mesoslide.preprocessing.extract_cluster_maps`,
+    :func:`mesoslide.preprocessing.extract_patch_images`/:func:`mesoslide.preprocessing.extract_cluster_maps`,
     which check `patches.obsm` first and only fall back to `slides` for
     whatever isn't already cached there -- pass `cache=True` to persist
     freshly computed results back into `patches` for reuse across calls.
@@ -106,7 +106,7 @@ def plot_patch_gallery_with_saliency(
     batch_size : int, default=16
         Batch size passed to clusterizers during inference.
     cache : bool, default=False
-        Forwarded to :func:`extract_he_patch_images`/:func:`extract_cluster_maps`:
+        Forwarded to :func:`extract_patch_images`/:func:`extract_cluster_maps`:
         persist freshly extracted pixels/cluster maps into `patches.obsm` so
         later calls on the same `patches` skip re-reading from slides.
 
@@ -228,8 +228,8 @@ def plot_patch_gallery(
         list, even for a single page).
     progress_bar : bool
     cache : bool, default=False
-        Forwarded to :func:`extract_he_patch_images`: cache the extracted array
-        in ``patches.obsm['patch_img']`` so later calls on the same `patches`
+        Forwarded to :func:`extract_patch_images`: cache the extracted array
+        in ``patches.obsm['he_patch_img']`` so later calls on the same `patches`
         skip re-reading from slides.
 
     Returns
@@ -248,10 +248,10 @@ def plot_patch_gallery(
     >>> plot_patch_gallery(patches, output_path='output/gallery_2.png')  # no slides needed
     """
     has_slide_ref = SLIDE_REF in patches.obs.columns and patches.obs[SLIDE_REF].notna().any()
-    if slides is None and PATCH_IMG_KEY not in patches.obsm and not has_slide_ref:
+    if slides is None and HE_PATCH_IMG_KEY not in patches.obsm and not has_slide_ref:
         raise ValueError(
-            "slides is required unless patches.obsm['patch_img'] is already "
-            "cached (see extract_he_patch_images(..., cache=True)), or "
+            "slides is required unless patches.obsm['he_patch_img'] is already "
+            "cached (see extract_patch_images(..., cache=True)), or "
             "patches.obs['_slide_ref'] is populated (set automatically by "
             "mesoslide.select_top_patches and friends)."
         )

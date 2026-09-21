@@ -47,13 +47,14 @@ if TYPE_CHECKING:
 
 DEFAULT_TILE_KEY = "tiles"
 
-PATCH_IMG_KEY = "patch_img"
-"""obsm key under which extract_he_patch_images caches extracted pixel data,
-channel-first (N, C, H, W)."""
+HE_PATCH_IMG_KEY = "he_patch_img"
+"""obsm key under which extract_patch_images caches an H&E-style extraction
+(channels=None, 3-channel result), channel-first (N, C, H, W)."""
 
-CYCIF_IMG_KEY = "cycif_img"
-"""obsm key under which extract_cycif_patch_images caches extracted pixel
-data, channel-first (N, len(channels), H, W)."""
+CYCIF_PATCH_IMG_KEY = "cycif_patch_img"
+"""obsm key under which extract_patch_images caches a CyCIF-style extraction
+(explicit channels, or an all-channel read with C != 3), channel-first
+(N, len(channels), H, W)."""
 
 SLIDE_REF = "_slide_ref"
 """obs column under which a patch table carries, per row, how to read that

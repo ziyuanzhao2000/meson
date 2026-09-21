@@ -6,8 +6,8 @@ import lazy_loader as lazy
 __getattr__, __dir__, __all__ = lazy.attach(
     __name__,
     submod_attrs={
-    '_extract_patches': ['extract_patch_images', 'extract_he_patch_images'],
-    '_extract_cycif_patches': ['extract_cycif_patch_images'],
+    '_extract_patches': ['extract_patch_images'],
+    '_utils': ['channel_indices_from_markers'],
     '_extract_cluster_maps': ['extract_cluster_maps'],
     '_registration': ['ForwardTransform'],
     }

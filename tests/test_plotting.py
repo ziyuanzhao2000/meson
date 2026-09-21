@@ -124,7 +124,7 @@ class TestPatchGallery:
                                     progress_bar=False, cache=True)
         out = tmp_path / "pre.png"
         ms.plotting.plot_patch_gallery(
-            sel, output_path=str(out),  # no slides -- reads patches.obsm['patch_img']
+            sel, output_path=str(out),  # no slides -- reads patches.obsm['he_patch_img']
             patches_per_row=2, progress_bar=False, dpi=40,
         )
         assert out.exists()
@@ -203,7 +203,7 @@ class TestPatchGalleryWithSaliency:
     def test_needs_slides_unless_fully_cached_or_slide_ref(self, manifest, open_cohort, tmp_path):
         """slides is no longer required for a fresh selection: patches.obs
         carries its own '_slide_ref' (set by select_random_patches), which
-        extract_he_patch_images/extract_cluster_maps fall back to. It's
+        extract_patch_images/extract_cluster_maps fall back to. It's
         still required when that column is missing/empty and nothing is
         cached -- e.g. a hand-built patches table.
         """

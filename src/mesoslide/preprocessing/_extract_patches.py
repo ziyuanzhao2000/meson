@@ -6,8 +6,9 @@ import numpy as np
 from tqdm.auto import tqdm
 
 from mesoslide._slides import (
+    CYCIF_PATCH_IMG_KEY,
     DEFAULT_TILE_KEY,
-    PATCH_IMG_KEY,
+    HE_PATCH_IMG_KEY,
     SLIDE_ID,
     SLIDE_REF,
     slide_id_from,
@@ -98,22 +99,79 @@ def _tile_size(wsi: "WSIData", tile_key: str) -> tuple:
     )
 
 
-def extract_he_patch_images(
+def _resolve_obsm_key_pre_read(
+    patches: "ad.AnnData",
+    channels: Optional[List[int]],
+    obsm_key: Optional[str],
+) -> Optional[str]:
+    """Which `patches.obsm` key (if any) already holds a cached extraction,
+    decided before opening any slide.
+
+    `channels=None` results can land under either the H&E or CyCIF key
+    depending on the slide's actual channel count (only known after a read),
+    so both are checked in that case; an explicit `channels` can never hit
+    the H&E slot (see :func:`extract_patch_images`)."""
+    if obsm_key is not None:
+        return obsm_key if obsm_key in patches.obsm else None
+    if channels is not None:
+        return CYCIF_PATCH_IMG_KEY if CYCIF_PATCH_IMG_KEY in patches.obsm else None
+    he_hit = HE_PATCH_IMG_KEY in patches.obsm
+    cycif_hit = CYCIF_PATCH_IMG_KEY in patches.obsm
+    if he_hit and cycif_hit:
+        warnings.warn(
+            f"Both '{HE_PATCH_IMG_KEY}' and '{CYCIF_PATCH_IMG_KEY}' are cached "
+            "in patches.obsm; using the H&E one. Pass obsm_key= to disambiguate.",
+            UserWarning,
+            stacklevel=3,
+        )
+        return HE_PATCH_IMG_KEY
+    if he_hit:
+        return HE_PATCH_IMG_KEY
+    if cycif_hit:
+        return CYCIF_PATCH_IMG_KEY
+    return None
+
+
+def _resolve_obsm_key_post_read(
+    channels: Optional[List[int]],
+    obsm_key: Optional[str],
+    n_channels: int,
+) -> str:
+    """Which `patches.obsm` key a freshly extracted array should be cached
+    under, now that its actual channel count is known."""
+    if obsm_key is not None:
+        return obsm_key
+    if channels is not None:
+        return CYCIF_PATCH_IMG_KEY
+    return HE_PATCH_IMG_KEY if n_channels == 3 else CYCIF_PATCH_IMG_KEY
+
+
+def extract_patch_images(
     patches: "ad.AnnData",
     slides=None,
     *,
+    channels: Optional[List[int]] = None,
     tile_key: str = DEFAULT_TILE_KEY,
     channel_first: bool = True,
     progress_bar: bool = True,
     skip_errors: bool = True,
-    cache: bool = False,
+    cache: bool = True,
+    obsm_key: Optional[str] = None,
 ) -> Union[np.ndarray, List[np.ndarray]]:
     """
     Read image data for the tiles described by a patch table.
 
-    If ``patches.obsm[PATCH_IMG_KEY]`` is already populated (e.g. from a
-    previous call with ``cache=True``), it is returned directly (converted to
-    the requested ``channel_first`` layout) and no slide is read.
+    Reads whichever channels are asked for: `channels=None` (the default)
+    reads every channel `wsi.read_region` returns, which is the correct
+    behavior for an H&E slide (3-channel RGB); `channels=[...]` selects a
+    subset by integer index, for CyCIF/multiplex slides with more than 3
+    channels. To select by marker name instead of index, resolve indices
+    first with :func:`mesoslide.preprocessing.channel_indices_from_markers`.
+
+    If a matching cached array is already populated in `patches.obsm` (e.g.
+    from a previous call with `cache=True`), it is returned directly
+    (converted to the requested `channel_first` layout) and no slide is
+    read -- see `obsm_key` below for which key is checked.
 
     Otherwise, coordinates come from ``patches.obs['x']`` / ``['y']`` (a
     tile's top-left corner at level 0) and the tile size from each slide's
@@ -136,6 +194,10 @@ def extract_he_patch_images(
         by a live `WSIData` there is reused directly (no re-open); one
         referenced by a store path is opened once (regardless of how many
         rows share it) and closed again before this function returns.
+    channels : list of int, optional
+        Integer channel indices to select from the last axis of each
+        `read_region` result, in the order they should be returned. Omit to
+        read every channel (the H&E default).
     tile_key : str, default='tiles'
     channel_first : bool, default=True
         True -> each patch (C, H, W), stacked (N, C, H, W).
@@ -144,11 +206,20 @@ def extract_he_patch_images(
     skip_errors : bool, default=True
         Skip failed reads instead of raising on the first one.
     cache : bool, default=False
-        Store the extracted array in ``patches.obsm[PATCH_IMG_KEY]``
-        (channel-first) so a later call on the same `patches` object can skip
-        reading from slides. Skipped (with a warning) if `skip_errors` caused
-        rows to be dropped, or if patches have inconsistent shapes, since
-        either case cannot be aligned 1:1 with `.obs`.
+        Store the extracted array (channel-first) in `patches.obsm`, so a
+        later call on the same `patches` object can skip reading from
+        slides. Skipped (with a warning) if `skip_errors` caused rows to be
+        dropped, or if patches have inconsistent shapes, since either case
+        cannot be aligned 1:1 with `.obs`.
+    obsm_key : str, optional
+        `patches.obsm` key to read/write the cache under. Defaults to
+        choosing between `mesoslide._slides.HE_PATCH_IMG_KEY` and
+        `..._slides.CYCIF_PATCH_IMG_KEY`: the H&E key only when `channels`
+        is not given *and* the extracted array turns out to have 3
+        channels; the CyCIF key in every other case (including an explicit
+        `channels` of length 3). Pass this explicitly to keep several
+        distinct extractions (e.g. two different channel subsets) cached
+        side by side on the same `patches` object.
 
     Returns
     -------
@@ -168,6 +239,9 @@ def extract_he_patch_images(
     >>> slides = ms.open_slides(manifest)
     >>> top = ms.select_top_patches(manifest, 'UNI_SAE_123', n=100)
     >>> imgs = ms.pp.extract_patch_images(top, slides, channel_first=False)
+    >>>
+    >>> idx = ms.pp.channel_indices_from_markers(['DAPI', 'CD3'], marker_table)
+    >>> cycif = ms.pp.extract_patch_images(top, cycif_slides, channels=idx)
 
     Notes
     -----
@@ -175,8 +249,9 @@ def extract_he_patch_images(
     use ``ezslide.tile_images(wsi, tile_key=...)`` (block-deduping, and what
     :func:`mesoslide.tl.feature_extraction` uses) or ``wsi.iter.tile_images(key)``.
     """
-    if PATCH_IMG_KEY in patches.obsm:
-        cached = patches.obsm[PATCH_IMG_KEY]
+    cached_key = _resolve_obsm_key_pre_read(patches, channels, obsm_key)
+    if cached_key is not None:
+        cached = patches.obsm[cached_key]
         return np.moveaxis(cached, 1, -1) if not channel_first else cached
 
     opened: list = []
@@ -197,7 +272,31 @@ def extract_he_patch_images(
             )
 
         patch_df = patches.obs
-        sizes = {sid: _tile_size(wsi, tile_key) for sid, wsi in slide_map.items()}
+
+        # Tile size normally comes from the pixel-reading slides themselves, but a
+        # CyCIF slide registered to the same pixel grid is often never itself tiled
+        # with lazyslide -- fall back to patches.obs['_slide_ref'] (typically the
+        # H&E slide that *was* tiled) in that case. Kept general (not gated on
+        # `channels`) since the same mismatch can occur in the opposite direction
+        # too -- a CyCIF-selected patch table extracting from a registered H&E slide.
+        try:
+            sizes = {sid: _tile_size(wsi, tile_key) for sid, wsi in slide_map.items()}
+        except ValueError:
+            ref_slide_map, ref_opened = _resolve_slides_from_ref(patches)
+            opened.extend(ref_opened)
+            ref_sizes = {sid: _tile_size(wsi, tile_key) for sid, wsi in ref_slide_map.items()}
+            if single:
+                # slide_map has exactly one entry keyed None (a lone WSIData was
+                # passed for pixel reads), but ref_slide_map is keyed by
+                # patches.obs['slide_id'] when that column exists, regardless of
+                # how many pixel-reading slides were passed -- so its keys don't
+                # necessarily line up with slide_map's. Every patch looks up
+                # `sizes[None]` here (single=True), so re-key onto that; this
+                # assumes one tile size across whichever ref slide(s) matched,
+                # true in the common single-slide case.
+                sizes = {None: next(iter(ref_sizes.values()))}
+            else:
+                sizes = ref_sizes
 
         extracted = []
         iterator = patch_df.iterrows()
@@ -223,6 +322,8 @@ def extract_he_patch_images(
                 # read_region returns (H, W, C) uint8 at level 0; keep channel-first
                 # internally so a cached result is always in the canonical layout.
                 arr = wsi.read_region(int(patch.x), int(patch.y), w, h)
+                if channels is not None:
+                    arr = arr[..., channels]
                 extracted.append(np.moveaxis(arr, -1, 0))
             except Exception as e:
                 if skip_errors:
@@ -256,7 +357,8 @@ def extract_he_patch_images(
 
         if cache:
             if len(extracted) == len(patch_df):
-                patches.obsm[PATCH_IMG_KEY] = stacked
+                key = _resolve_obsm_key_post_read(channels, obsm_key, stacked.shape[1])
+                patches.obsm[key] = stacked
             else:
                 warnings.warn(
                     "cache=True has no effect: skip_errors dropped "
@@ -273,38 +375,3 @@ def extract_he_patch_images(
                 wsi.close()
             except Exception:
                 pass
-
-
-def extract_patch_images(
-    patches: "ad.AnnData",
-    slides=None,
-    *,
-    channels: Optional[List[str]] = None,
-    **kwargs,
-) -> Union[np.ndarray, List[np.ndarray]]:
-    """
-    Read image data for the tiles described by a patch table.
-
-    Dispatches to :func:`extract_he_patch_images` (default) or
-    :func:`extract_cycif_patch_images` (when `channels` is given). This is a
-    quick heuristic on the presence of `channels`, not a type check on
-    `slides`; kept for backward compatibility with existing callers that use
-    the name `extract_patch_images` for H&E extraction.
-
-    Parameters
-    ----------
-    patches : AnnData
-    slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
-        See :func:`extract_he_patch_images`/:func:`extract_cycif_patch_images`
-        for the `patches.obs['_slide_ref']` fallback when omitted.
-    channels : list of str, optional
-        Marker/channel names to extract. When given, extracts a CyCIF stack
-        instead of the H&E image -- see :func:`extract_cycif_patch_images`
-        for its additional keyword arguments (`marker_table`, `marker_col`).
-    **kwargs
-        Forwarded to whichever extraction function is dispatched to.
-    """
-    if channels is not None:
-        from mesoslide.preprocessing._extract_cycif_patches import extract_cycif_patch_images
-        return extract_cycif_patch_images(patches, channels, slides, **kwargs)
-    return extract_he_patch_images(patches, slides, **kwargs)

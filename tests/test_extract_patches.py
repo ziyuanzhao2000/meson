@@ -78,8 +78,8 @@ def test_rejects_an_unusable_slides_argument(selection):
 def test_cache_writes_channel_first_array_to_obsm(selection, open_cohort):
     out = ms.pp.extract_patch_images(selection, open_cohort, progress_bar=False,
                                       cache=True)
-    assert "patch_img" in selection.obsm
-    assert np.array_equal(selection.obsm["patch_img"], out)
+    assert "he_patch_img" in selection.obsm
+    assert np.array_equal(selection.obsm["he_patch_img"], out)
 
 
 def test_cache_hit_skips_slide_reads(selection, open_cohort):
@@ -94,7 +94,7 @@ def test_cache_hit_respects_requested_layout(selection, open_cohort):
     ms.pp.extract_patch_images(selection, open_cohort, progress_bar=False, cache=True)
     cl = ms.pp.extract_patch_images(selection, open_cohort, channel_first=False,
                                      progress_bar=False)
-    assert np.array_equal(np.moveaxis(cl, -1, 1), selection.obsm["patch_img"])
+    assert np.array_equal(np.moveaxis(cl, -1, 1), selection.obsm["he_patch_img"])
 
 
 def test_cache_skipped_when_rows_are_dropped(selection, open_cohort):
@@ -103,7 +103,7 @@ def test_cache_skipped_when_rows_are_dropped(selection, open_cohort):
     sel.obs.iloc[0, sel.obs.columns.get_loc("slide_id")] = "not_a_slide"
     with pytest.warns(UserWarning, match="cache=True has no effect"):
         ms.pp.extract_patch_images(sel, open_cohort, progress_bar=False, cache=True)
-    assert "patch_img" not in sel.obsm
+    assert "he_patch_img" not in sel.obsm
 
 
 # --- SLIDE_REF fallback: no `slides=` argument at all ------------------------

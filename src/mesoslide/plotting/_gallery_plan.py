@@ -15,9 +15,9 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from mesoslide._slides import DEFAULT_TILE_KEY, SLIDE_ID
-from mesoslide.preprocessing._extract_patches import extract_he_patch_images
+from mesoslide.preprocessing._extract_patches import extract_patch_images
 from mesoslide.preprocessing._extract_cluster_maps import extract_cluster_maps
-from mesoslide.preprocessing._extract_cycif_patches import extract_cycif_patch_images
+from mesoslide.preprocessing._utils import channel_indices_from_markers
 from ._image_grid import _draw_group_border, _draw_corner_label, _group_color_lookup
 from ._utils import _finish_plot, FLUOROPHORE_COLORS, MARKER_COLOR_DEFAULTS
 
@@ -120,7 +120,7 @@ class GalleryPlan:
         if group_col is not None and group_col not in self.patches.obs.columns:
             raise ValueError(f"group_col '{group_col}' not found in patches.obs")
 
-        images = extract_he_patch_images(
+        images = extract_patch_images(
             self.patches, slides,
             tile_key=tile_key, channel_first=False,
             progress_bar=True, skip_errors=True, cache=cache,
@@ -238,9 +238,10 @@ class GalleryPlan:
         cache: bool = False,
     ) -> "GalleryPlan":
         """Add an optional multicolor-merge row followed by one row per CyCIF channel."""
-        cycif_arr = extract_cycif_patch_images(
-            self.patches, channels, slides,
-            tile_key=tile_key, marker_table=marker_table, marker_col=marker_col,
+        channel_idx = channel_indices_from_markers(channels, marker_table, marker_col)
+        cycif_arr = extract_patch_images(
+            self.patches, slides,
+            channels=channel_idx, tile_key=tile_key,
             progress_bar=True, skip_errors=True, cache=cache,
         )
 
