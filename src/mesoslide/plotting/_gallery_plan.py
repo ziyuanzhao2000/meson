@@ -12,18 +12,32 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple, Union
 import io
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.colors import to_rgba
+from matplotlib.patches import Patch
 
 from mesoslide._slides import DEFAULT_TILE_KEY, SLIDE_ID
-from mesoslide.preprocessing._extract_patches import extract_patch_images
+from mesoslide.preprocessing._extract_patches import (
+    _resolve_slides,
+    _resolve_slides_from_ref,
+    _tile_size,
+    extract_patch_images,
+)
 from mesoslide.preprocessing._extract_cluster_maps import extract_cluster_maps
 from mesoslide.preprocessing._utils import channel_indices_from_markers
 from ._image_grid import _draw_group_border, _draw_corner_label, _group_color_lookup
+from ._cell_overlay import (
+    alpha_composite,
+    cells_in_patch,
+    rasterize_cell_polygons,
+    resolve_categorical_palette,
+    translate_to_patch_local,
+)
 from ._utils import _finish_plot, FLUOROPHORE_COLORS, MARKER_COLOR_DEFAULTS
 
 if TYPE_CHECKING:
     import anndata as ad
-    import pandas as pd
     from mesoslide.tools.segmenters import TokenClusterizer
 
 
@@ -66,6 +80,17 @@ def _channel_percentile(cycif_arr, channel_idx: int, pct: float) -> float:
     ))
 
 
+def _default_cell_overlay_background(wsi) -> Tuple[float, float, float]:
+    """White for an H&E slide, black for CyCIF/mIF -- same 3-channel
+    heuristic as `preprocessing._extract_patches._resolve_obsm_key_post_read`.
+    Reads a single pixel at the coarsest pyramid level to check channel
+    count without materializing real pixel data."""
+    n_level = wsi.properties.n_level
+    sample = wsi.read_region(0, 0, 1, 1, level=n_level - 1)
+    n_channels = sample.shape[-1] if sample.ndim == 3 else 1
+    return (1.0, 1.0, 1.0) if n_channels == 3 else (0.0, 0.0, 0.0)
+
+
 @dataclass
 class _RowBlock:
     """One or more rows repeated once per patch."""
@@ -76,6 +101,8 @@ class _RowBlock:
     border_cmap: str = 'tab10'
     border_extend: float = 0.1
     border_alpha: float = 1.0
+    legend_palette: Optional[Dict] = None  # {category: rgba}, drawn once per page by render()
+    legend_title: Optional[str] = None
 
 
 def _normalize_axes(axes, n_rows: int, n_cols: int) -> np.ndarray:
@@ -235,7 +262,7 @@ class GalleryPlan:
         merge: bool = True,
         merge_colors: Optional[Dict[str, Union[str, Tuple[float, float, float]]]] = None,
         single_channel_color: Union[str, Tuple[float, float, float]] = 'white',
-        cache: bool = False,
+        cache: bool = True,
     ) -> "GalleryPlan":
         """Add an optional multicolor-merge row followed by one row per CyCIF channel."""
         channel_idx = channel_indices_from_markers(channels, marker_table, marker_col)
@@ -279,11 +306,206 @@ class GalleryPlan:
                 rows.append(n[..., None] * single_rgb)
             frames.append(rows)
 
+        legend_palette = None
+        if merge:
+            legend_palette = {ch: to_rgba(tuple(merge_rgb[ch])) for ch in channels}
+
         self._blocks.append(_RowBlock(
             label_per_row=label_per_row,
             n_rows=len(label_per_row),
             frames=frames,
+            legend_palette=legend_palette,
+            legend_title="Merge" if merge else None,
         ))
+        return self
+
+    def add_cell_overlay_row(
+        self,
+        *,
+        cells_key: str = "cells",
+        slides=None,
+        tile_key: str = DEFAULT_TILE_KEY,
+        color_by: Optional[str] = None,
+        palette: Optional[Dict] = None,
+        legend_title: Optional[str] = None,
+        fill_alpha: float = 0.35,
+        edge_color: Optional[Union[str, Tuple]] = "white",
+        edge_only: bool = False,
+        linewidth: float = 1.0,
+        supersample: int = 4,
+        blend_with_previous: bool = True,
+        background_color: Optional[Union[str, Tuple]] = None,
+        label: str = "Cells",
+    ) -> "GalleryPlan":
+        """Overlay cell polygons (from `wsidata.shapes[cells_key]`) onto each patch.
+
+        Cells are rasterized onto an RGBA overlay and alpha-composited onto
+        an existing frame -- see `mesoslide.plotting._cell_overlay` -- rather
+        than drawn as live vector artists (how `lazyslide.pl.WSIViewer` draws
+        them), so the result is a plain image frame like every other
+        `GalleryPlan` row and `render()` needs no changes to display it.
+
+        Parameters
+        ----------
+        cells_key : str, default='cells'
+            `wsidata.shapes` key holding cell polygons, e.g. written by
+            :func:`mesoslide.tl.add_cell_polygons`. May live on a different
+            `WSIData` than the one the patch table was tiled on (e.g. cells
+            segmented on a separately-registered CyCIF slide) -- patch
+            geometry always comes from `patches.obs['_slide_ref']`/its own
+            tile spec, independently of which slide `slides` resolves to.
+        slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
+            The slide(s) holding `cells_key`. Defaults to
+            `patches.obs['_slide_ref']`, i.e. the same slide(s) the patch
+            table itself came from.
+        tile_key : str, default='tiles'
+            Tile shapes key on the *reference* slide (`patches.obs['_slide_ref']`)
+            used to size each patch -- see :func:`mesoslide.pp.extract_patch_images`.
+        color_by : str, optional
+            Column on the cells shapes GeoDataFrame (e.g. `'phenotype'`) to
+            color fills by. Omit for a single fixed color. Resolved once,
+            globally, from every touched slide's full `cells_key[color_by]`
+            column (not per-patch) -- so a given category gets the same
+            color everywhere in the gallery, not just within one patch.
+        palette : dict, optional
+            `{category: color}`. Resolved automatically (a fixed qualitative
+            palette for few categories, `distinctipy`-generated distinct
+            colors otherwise) if omitted.
+        legend_title : str, optional
+            Heading for the legend `render(legend=True)` draws for this
+            row's palette. Defaults to `color_by`.
+        blend_with_previous : bool, default=True
+            Composite onto the most recently added block's last row, in
+            place (no new row/label added) -- matching how
+            `add_cluster_map_rows(blend_with_previous=True)` overlays onto
+            the H&E row. `False` appends a standalone new row instead.
+        background_color : str or tuple, optional
+            Background for a standalone row (`blend_with_previous=False`
+            only -- ignored otherwise, since that branch always composites
+            onto an existing frame). `None` (the default) auto-detects per
+            cells-slide: white for an H&E slide, black for CyCIF/mIF (the
+            same 3-channel heuristic used in
+            `preprocessing._extract_patches`).
+
+        Returns
+        -------
+        GalleryPlan
+        """
+        if blend_with_previous and not self._blocks:
+            raise ValueError(
+                "add_cell_overlay_row(blend_with_previous=True) requires at least "
+                "one row already added (e.g. add_he_row) to overlay onto."
+            )
+
+        opened: list = []
+        try:
+            # Cells slide(s): explicit `slides`, or the same reference the
+            # patch table itself carries.
+            if slides is not None:
+                cells_slide_map = _resolve_slides(slides)
+            else:
+                cells_slide_map, opened = _resolve_slides_from_ref(self.patches)
+            cells_single = set(cells_slide_map) == {None}
+
+            # Patch geometry always comes from the reference slide's own tile
+            # spec -- the cells slide (e.g. a separately-registered CyCIF
+            # segmentation slide) is not guaranteed to have been tiled itself,
+            # mirroring extract_patch_images's own ref-slide fallback.
+            ref_slide_map, ref_opened = _resolve_slides_from_ref(self.patches)
+            opened.extend(ref_opened)
+            ref_single = set(ref_slide_map) == {None}
+            sizes = {sid: _tile_size(wsi, tile_key) for sid, wsi in ref_slide_map.items()}
+
+            patch_df = self.patches.obs
+            required = ["x", "y"]
+            if not cells_single or not ref_single:
+                required.append(SLIDE_ID)
+            missing = [c for c in required if c not in patch_df.columns]
+            if missing:
+                raise ValueError(f"patches.obs missing required columns: {missing}")
+
+            # Resolve the categorical palette once, globally, across every
+            # touched slide's full cells layer -- not per patch's local
+            # subset. resolve_categorical_palette assigns colors by
+            # positional index into whatever categories it's given, so
+            # calling it separately per patch (each seeing only its own
+            # local subset of categories) would assign the same category a
+            # different color in different patches whenever patches don't
+            # all contain the exact same categories in the same order.
+            resolved_palette = None
+            if color_by is not None:
+                all_values = []
+                for sid, wsi in cells_slide_map.items():
+                    if cells_key not in wsi.shapes:
+                        raise KeyError(
+                            f"wsidata.shapes has no '{cells_key}' for slide '{sid}'. "
+                            "Run mesoslide.tl.add_cell_polygons first."
+                        )
+                    all_values.append(wsi.shapes[cells_key][color_by])
+                resolved_palette = resolve_categorical_palette(
+                    pd.concat(all_values, ignore_index=True), palette
+                )
+
+            bg_cache: Dict = {}
+
+            frames = []
+            for i in range(self.n_patches):
+                patch = patch_df.iloc[i]
+                cells_slide_id = None if cells_single else patch[SLIDE_ID]
+                ref_slide_id = None if ref_single else patch[SLIDE_ID]
+                wsi = cells_slide_map[cells_slide_id]
+                if cells_key not in wsi.shapes:
+                    raise KeyError(
+                        f"wsidata.shapes has no '{cells_key}' for slide '{cells_slide_id}'. "
+                        "Run mesoslide.tl.add_cell_polygons first."
+                    )
+                h, w = sizes[ref_slide_id]
+                x, y = int(patch.x), int(patch.y)
+
+                cells_gdf = wsi.shapes[cells_key]
+                local = translate_to_patch_local(cells_in_patch(cells_gdf, x, y, w, h), x, y)
+
+                if blend_with_previous:
+                    base = _to_float01_rgb(self._blocks[-1].frames[i][-1])
+                else:
+                    if background_color is not None:
+                        bg_rgb = to_rgba(background_color)[:3]
+                    elif cells_slide_id in bg_cache:
+                        bg_rgb = bg_cache[cells_slide_id]
+                    else:
+                        bg_rgb = _default_cell_overlay_background(wsi)
+                        bg_cache[cells_slide_id] = bg_rgb
+                    base = np.full((h, w, 3), bg_rgb, dtype=np.float32)
+
+                overlay = rasterize_cell_polygons(
+                    base.shape[:2], local,
+                    color_by=color_by, palette=resolved_palette,
+                    fill_alpha=fill_alpha, edge_color=edge_color, edge_only=edge_only,
+                    linewidth=linewidth, supersample=supersample,
+                )
+                composited = alpha_composite(base, overlay)
+
+                if blend_with_previous:
+                    self._blocks[-1].frames[i][-1] = composited
+                else:
+                    frames.append([composited])
+        finally:
+            for wsi in opened:
+                try:
+                    wsi.close()
+                except Exception:
+                    pass
+
+        if blend_with_previous:
+            if resolved_palette is not None:
+                self._blocks[-1].legend_palette = resolved_palette
+                self._blocks[-1].legend_title = legend_title or color_by
+        else:
+            self._blocks.append(_RowBlock(
+                label_per_row=[label], n_rows=1, frames=frames,
+                legend_palette=resolved_palette,
+                legend_title=(legend_title or color_by) if resolved_palette is not None else None,
+            ))
         return self
 
     def render(
@@ -299,6 +521,8 @@ class GalleryPlan:
         title: Optional[str] = None,
         show_slide_ids: bool = False,
         show_scores: bool = False,
+        legend: bool = True,
+        legend_width: float = 2.5,
         return_fig: bool = False,
         return_buffer: bool = False,
         progress_bar: bool = True,
@@ -311,6 +535,14 @@ class GalleryPlan:
         total_rows_per_patch`, `patches_per_page = blocks_per_page *
         patches_per_row`. Otherwise falls back to `samples_per_figure`
         patches per page with patch-bands stacked without a row cap.
+
+        `legend` draws one legend per block that carries a `legend_palette`
+        (set by `add_cell_overlay_row(color_by=...)` or
+        `add_cycif_rows(merge=True)`), once per page. The figure's *width*
+        is expanded by `legend_width` inches to make room -- the patch grid
+        itself keeps exactly its `patch_display_size`-driven physical size
+        rather than being squeezed to fit the legend into the original
+        canvas.
         """
         if not self._blocks:
             raise ValueError("GalleryPlan has no rows to render; call an add_*_row method first.")
@@ -354,6 +586,7 @@ class GalleryPlan:
             patch_titles.append('\n'.join(parts) if parts else None)
 
         row_labels = [lbl for block in self._blocks for lbl in block.label_per_row]
+        legend_blocks = [b for b in self._blocks if b.legend_palette] if legend else []
 
         buffers = [] if return_buffer else None
 
@@ -368,9 +601,13 @@ class GalleryPlan:
             if progress_bar and n_pages > 1:
                 print(f"Rendering page {page_idx + 1}/{n_pages} (patches {start + 1}-{end})...")
 
+            grid_width = patch_display_size * n_cols
+            draw_legend_here = bool(legend_blocks)
+            fig_width = grid_width + legend_width if draw_legend_here else grid_width
+
             fig, axes = plt.subplots(
                 n_rows_total, n_cols,
-                figsize=(patch_display_size * n_cols, patch_display_size * n_rows_total),
+                figsize=(fig_width, patch_display_size * n_rows_total),
             )
             axes = _normalize_axes(axes, n_rows_total, n_cols)
 
@@ -406,13 +643,39 @@ class GalleryPlan:
                 fig.suptitle(title, fontsize=16)
 
             plt.tight_layout()
-            fig.subplots_adjust(left=margin, right=1 - margin, top=1 - margin, bottom=margin)
+            # The grid occupies exactly `grid_width` inches regardless of
+            # whether a legend is drawn: when it is, `fig_width` was already
+            # expanded by `legend_width` above, so re-expressing the same
+            # absolute margins as fractions of the (now larger) fig_width
+            # keeps the patch grid's physical size unchanged rather than
+            # shrinking it to make room.
+            right_frac = grid_width * (1 - margin) / fig_width
+            left_frac = grid_width * margin / fig_width
+            fig.subplots_adjust(left=left_frac, right=right_frac, top=1 - margin, bottom=margin)
 
             for band in range(n_bands):
                 for row_idx, label in enumerate(row_labels):
                     r = band * total_rows_per_patch + row_idx
-                    y = 1 - (r + 0.5) / n_rows_total
+                    pos = axes[r, 0].get_position()
+                    y = (pos.y0 + pos.y1) / 2
                     fig.text(0, y, label, fontsize=12, rotation=90, va='center', ha='center')
+
+            if draw_legend_here:
+                y_positions = (
+                    [0.5] if len(legend_blocks) == 1
+                    else list(np.linspace(0.8, 0.2, len(legend_blocks)))
+                )
+                for block, y_pos in zip(legend_blocks, y_positions):
+                    handles = [
+                        Patch(facecolor=color, label=str(cat))
+                        for cat, color in sorted(block.legend_palette.items(), key=lambda kv: str(kv[0]))
+                    ]
+                    ncols = max(1, -(-len(handles) // 20))  # ceil(len / 20)
+                    fig.legend(
+                        handles=handles, title=block.legend_title,
+                        loc='center left', bbox_to_anchor=(right_frac, y_pos),
+                        fontsize=9, ncols=ncols,
+                    )
 
             fp = None
             if output_path is not None:

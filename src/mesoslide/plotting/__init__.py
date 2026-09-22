@@ -18,6 +18,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
             'plot_feature_gallery',
         ],
         '_image_grid': ['_plot_image_grid'],
+        '_cell_overlay': ['rasterize_cell_polygons'],
         '_gallery_plan': ['GalleryPlan'],
         '_clustered_heatmap': ['plot_clustered_heatmap'],
         '_rasterization': ['interpolate_multiclass', 'extract_samples'],

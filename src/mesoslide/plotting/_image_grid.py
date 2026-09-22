@@ -1,7 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-import matplotlib.cm as cm
+from matplotlib import colormaps
 from matplotlib.colors import ListedColormap
 from math import ceil
 from typing import Optional, List, Union
@@ -12,10 +12,14 @@ def _group_color_lookup(group_ids: List, cmap: str) -> dict:
     if isinstance(cmap, ListedColormap):
         # index directly by group_id — color[3] is always group 3's color
         return {g: cmap(g) for g in set(group_ids)}
-    # string cmap: normalize by total number of colors expected
-    colormap = cm.get_cmap(cmap)
+    # string cmap: index directly (with wraparound) rather than normalizing
+    # -- colormap(x) for a float x >= 1.0 clips to the colormap's last
+    # entry instead of wrapping, so `g / n` collapses every group_id >= n
+    # onto one identical color once there are more groups than the
+    # colormap has entries.
+    colormap = colormaps[cmap]
     n = colormap.N if hasattr(colormap, 'N') else 256
-    return {g: colormap(g / n) for g in set(group_ids)}
+    return {g: colormap(g % n) for g in set(group_ids)}
 
 
 def _draw_group_border(ax, color, patch_size: float, border_extend: float, alpha: float) -> None:
