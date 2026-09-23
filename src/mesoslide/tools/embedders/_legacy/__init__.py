@@ -3,7 +3,7 @@
 Superseded by `lazyslide_models.MODEL_REGISTRY` for vision foundation models,
 consumed via `mesoslide.tools._embed_patch.embed_patch`. Kept here only for
 existing callers (`mesoslide.tools._legacy._embed_patch`,
-`mesoslide.tools.segmenters.TokenClusterizer`, `mesoslide.scripts.*`) that
+`mesoslide.scripts.*`) that
 still depend on the old `sdata`-table-based pipeline.
 """
 

@@ -17,6 +17,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgba
 from matplotlib.patches import Patch
 
+from mesoslide._deprecated import deprecated_kwargs, rename
 from mesoslide._slides import CYCIF_PATCH_IMG_KEY, DEFAULT_TILE_KEY, SLIDE_ID
 from mesoslide.preprocessing._extract_patches import (
     _resolve_slides,
@@ -39,7 +40,7 @@ from ._utils import _finish_plot, FLUOROPHORE_COLORS, MARKER_COLOR_DEFAULTS
 
 if TYPE_CHECKING:
     from mesoslide._patch_data import PatchData
-    from mesoslide.tools.segmenters import TokenClusterizer
+    from mesoslide.tools.segmenters import TokenClusterer
 
 
 def _paged_path(output_path: str, start_idx: int, end_idx: int) -> str:
@@ -123,7 +124,7 @@ class GalleryPlan:
     --------
     >>> plan = GalleryPlan(patches)
     >>> plan.add_he_row(slides=slides)
-    >>> plan.add_cluster_map_rows([clusterizer], model='uni2', slides=slides)
+    >>> plan.add_cluster_map_rows([clusterer], model='uni2', slides=slides)
     >>> plan.render(output_path='gallery.png', patches_per_row=10, max_rows_per_page=6)
     """
 
@@ -171,9 +172,10 @@ class GalleryPlan:
         ))
         return self
 
+    @deprecated_kwargs(clusterizers=rename("clusterers"))
     def add_cluster_map_rows(
         self,
-        clusterizers: List["TokenClusterizer"],
+        clusterers: List["TokenClusterer"],
         model=None,
         slides=None,
         *,
@@ -181,59 +183,61 @@ class GalleryPlan:
         cmap: str = 'viridis',
         blend_with_previous: bool = True,
         saliency_alpha_power: float = 1.0,
-        batch_size: int = 16,
+        batch_size: int = 128,
+        device: Optional[str] = None,
         cache: bool = False,
         overwrite: bool = False,
     ) -> "GalleryPlan":
-        """Add one row per clusterizer, each a cluster-map overlay.
+        """Add one row per clusterer, each a cluster-map overlay.
 
         When `blend_with_previous=True` (default), each row blends its own
-        clusterizer's map onto the same-patch-column frame from the most
+        clusterer's map onto the same-patch-column frame from the most
         recently added block (e.g. the H&E row added just before), without
         consuming or replacing that block -- it still contributes its own
         unmodified row.
         """
-        if not clusterizers:
-            raise ValueError("At least one clusterizer must be provided.")
-        names = [c.feature_name for c in clusterizers]
+        if not clusterers:
+            raise ValueError("At least one clusterer must be provided.")
+        names = [c.display_name for c in clusterers]
         if any(not n for n in names):
-            raise ValueError("Every clusterizer must have a non-empty feature_name.")
+            raise ValueError("Every clusterer must have a non-empty name (or feature_name_).")
         if len(set(names)) != len(names):
             dupes = sorted({n for n in names if names.count(n) > 1})
-            raise ValueError(f"clusterizers must have distinct feature_name values; duplicates: {dupes}")
+            raise ValueError(f"clusterers must have distinct names; duplicates: {dupes}")
 
-        per_clusterizer_maps = [
+        per_clusterer_maps = [
             extract_cluster_maps(
                 self.patches, c, model, slides=slides,
-                batch_size=batch_size, progress_bar=True, cache=cache, overwrite=overwrite,
+                batch_size=batch_size, device=device, progress_bar=True,
+                cache=cache, overwrite=overwrite,
             )
-            for c in clusterizers
+            for c in clusterers
         ]
-        n_clusterizers = len(clusterizers)
-        is_list_result = isinstance(per_clusterizer_maps[0], list)
+        n_clusterers = len(clusterers)
+        is_list_result = isinstance(per_clusterer_maps[0], list)
         if is_list_result:
             cluster_maps = [
-                np.stack([per_clusterizer_maps[k][i] for k in range(n_clusterizers)], axis=0)
+                np.stack([per_clusterer_maps[k][i] for k in range(n_clusterers)], axis=0)
                 for i in range(self.n_patches)
             ]
         else:
-            stacked = np.stack(per_clusterizer_maps, axis=0)  # (K, N, H, W)
+            stacked = np.stack(per_clusterer_maps, axis=0)  # (K, N, H, W)
             cluster_maps = list(stacked.transpose(1, 0, 2, 3))  # N x (K, H, W)
 
         prev_block = self._blocks[-1] if self._blocks else None
         colormap = plt.get_cmap(cmap)
-        n_clusters = 3  # matches the fixed cluster count used elsewhere for saliency alpha
 
         frames = [[] for _ in range(self.n_patches)]
-        for k in range(n_clusterizers):
+        for k in range(n_clusterers):
+            max_label = max(clusterers[k].n_clusters_ - 1, 1)
             for patch_idx in range(self.n_patches):
-                cmap_vals = cluster_maps[patch_idx][k].astype(np.float32) / (n_clusters - 1)
+                cmap_vals = cluster_maps[patch_idx][k].astype(np.float32) / max_label
                 colored = colormap(np.clip(cmap_vals, 0, 1))[..., :3]
 
                 if blend_with_previous:
                     if prev_block is None:
                         base = np.ones_like(colored)  # blank white base
-                    elif prev_block.n_rows == n_clusterizers:
+                    elif prev_block.n_rows == n_clusterers:
                         base = _to_float01_rgb(prev_block.frames[patch_idx][k])
                     else:
                         base = _to_float01_rgb(prev_block.frames[patch_idx][-1])
@@ -247,7 +251,7 @@ class GalleryPlan:
 
         self._blocks.append(_RowBlock(
             label_per_row=names,
-            n_rows=n_clusterizers,
+            n_rows=n_clusterers,
             frames=frames,
         ))
         return self
@@ -277,7 +281,7 @@ class GalleryPlan:
         # extract_patch_images's cache is keyed only by CYCIF_PATCH_IMG_KEY,
         # with no record of which channel subset populated it; requesting a
         # subset directly means a later call for a *different* marker subset
-        # on the same patches (e.g. a different clusterizer's marker panel)
+        # on the same patches (e.g. a different clusterer's marker panel)
         # would hit that stale cache and silently misindex it, since a cache
         # hit is returned as-is regardless of which channels were asked for
         # this time. Always requesting the full set makes every cache hit
@@ -628,8 +632,8 @@ class GalleryPlan:
 
         if show_slide_ids and SLIDE_ID not in patch_df.columns:
             raise ValueError(f"show_slide_ids=True requires a '{SLIDE_ID}' column in patches.obs")
-        if show_scores and 'score' not in patch_df.columns:
-            raise ValueError("show_scores=True requires 'score' column in patches.obs")
+        if show_scores and '_feature_score' not in patch_df.columns:
+            raise ValueError("show_scores=True requires '_feature_score' column in patches.obs")
 
         total_rows_per_patch = sum(b.n_rows for b in self._blocks)
 
@@ -652,7 +656,7 @@ class GalleryPlan:
             if show_slide_ids:
                 parts.append(str(row[SLIDE_ID]))
             if show_scores:
-                parts.append(f"Score: {row.get('score', 0):.3f}")
+                parts.append(f"Score: {row.get('_feature_score', 0):.3f}")
             patch_titles.append('\n'.join(parts) if parts else None)
 
         row_labels = [lbl for block in self._blocks for lbl in block.label_per_row]

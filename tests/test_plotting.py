@@ -161,17 +161,10 @@ class TestPatchGallery:
 
 class TestPatchGalleryWithSaliency:
     @staticmethod
-    def _clusterizer(feature_name):
-        from sklearn.cluster import KMeans
-        from mesoslide.tools.segmenters import TokenClusterizer
-        from tests.conftest import StubViTEncoder
+    def _clusterer(name):
+        from tests.test_token_clusterer import fitted_clusterer
 
-        rng = np.random.default_rng(0)
-        kmeans = KMeans(n_clusters=3, random_state=0).fit(
-            rng.random((30, StubViTEncoder.embed_dim))
-        )
-        return TokenClusterizer(model=StubViTEncoder(), kmeans=kmeans,
-                                 feature_name=feature_name, device="cpu")
+        return fitted_clusterer(name=name)
 
     def test_writes_a_gallery_from_slides(self, manifest, open_cohort, tmp_path):
         from tests.conftest import StubViTEncoder
@@ -179,24 +172,24 @@ class TestPatchGalleryWithSaliency:
         sel = ms.select_random_patches(manifest, 4, random_state=4)
         out = tmp_path / "sal.png"
         ms.plotting.plot_patch_gallery_with_saliency(
-            sel, clusterizers=[self._clusterizer("c1"), self._clusterizer("c2")],
+            sel, clusterers=[self._clusterer("c1"), self._clusterer("c2")],
             model=StubViTEncoder(), slides=open_cohort, output_path=str(out),
             patches_per_row=2, progress_bar=False, dpi=40,
         )
         assert out.exists()
 
-    def test_requires_at_least_one_clusterizer(self, manifest, open_cohort):
+    def test_requires_at_least_one_clusterer(self, manifest, open_cohort):
         sel = ms.select_random_patches(manifest, 2, random_state=0)
-        with pytest.raises(ValueError, match="At least one clusterizer"):
+        with pytest.raises(ValueError, match="At least one clusterer"):
             ms.plotting.plot_patch_gallery_with_saliency(
-                sel, clusterizers=[], slides=open_cohort, progress_bar=False,
+                sel, clusterers=[], slides=open_cohort, progress_bar=False,
             )
 
-    def test_rejects_duplicate_feature_names(self, manifest, open_cohort):
+    def test_rejects_duplicate_names(self, manifest, open_cohort):
         sel = ms.select_random_patches(manifest, 2, random_state=0)
-        with pytest.raises(ValueError, match="distinct feature_name"):
+        with pytest.raises(ValueError, match="distinct names"):
             ms.plotting.plot_patch_gallery_with_saliency(
-                sel, clusterizers=[self._clusterizer("dup"), self._clusterizer("dup")],
+                sel, clusterers=[self._clusterer("dup"), self._clusterer("dup")],
                 slides=open_cohort, progress_bar=False,
             )
 
@@ -211,18 +204,18 @@ class TestPatchGalleryWithSaliency:
         from tests.conftest import StubViTEncoder
 
         sel = ms.select_random_patches(manifest, 2, random_state=0)
-        clusterizer = self._clusterizer("c1")
+        clusterer = self._clusterer("c1")
 
         bare = sel.copy()
         del bare.obs[SLIDE_REF]
         with pytest.raises(ValueError, match="slides was not given"):
             ms.plotting.plot_patch_gallery_with_saliency(
-                bare, clusterizers=[clusterizer], progress_bar=False,
+                bare, clusterers=[clusterer], progress_bar=False,
             )
 
         # A fresh selection carries its own slide reference -- no slides= needed.
         ms.plotting.plot_patch_gallery_with_saliency(
-            sel, clusterizers=[clusterizer], model=StubViTEncoder(),
+            sel, clusterers=[clusterer], model=StubViTEncoder(),
             output_path=str(tmp_path / "sal1.png"), progress_bar=False, dpi=40,
         )
 
@@ -230,11 +223,11 @@ class TestPatchGalleryWithSaliency:
         cached = sel.copy()
         del cached.obs[SLIDE_REF]
         ms.plotting.plot_patch_gallery_with_saliency(
-            cached, clusterizers=[clusterizer], model=StubViTEncoder(), slides=open_cohort,
+            cached, clusterers=[clusterer], model=StubViTEncoder(), slides=open_cohort,
             cache=True, output_path=str(tmp_path / "sal2.png"), progress_bar=False, dpi=40,
         )
         ms.plotting.plot_patch_gallery_with_saliency(
-            cached, clusterizers=[clusterizer],
+            cached, clusterers=[clusterer],
             output_path=str(tmp_path / "sal3.png"), progress_bar=False, dpi=40,
         )
         assert (tmp_path / "sal3.png").exists()

@@ -3,27 +3,31 @@ from typing import TYPE_CHECKING, List, Optional, Union
 
 import numpy as np
 
+from mesoslide._deprecated import deprecated_kwargs, rename
+
 if TYPE_CHECKING:
-    from mesoslide.tools.segmenters import TokenClusterizer
+    from mesoslide.tools.segmenters import TokenClusterer
     from mesoslide._patch_data import PatchData
 
 
 CLUSTER_IMG_SUFFIX = "_cluster_img"
 
 
-def cluster_img_key(clusterizer: "TokenClusterizer") -> str:
-    """The `patches.obsm` key a clusterizer's rasterized cluster map is cached under."""
-    return f"{clusterizer.feature_name}{CLUSTER_IMG_SUFFIX}"
+def cluster_img_key(clusterer: "TokenClusterer") -> str:
+    """The `patches.obsm` key a clusterer's rasterized cluster map is cached under."""
+    return f"{clusterer.display_name}{CLUSTER_IMG_SUFFIX}"
 
 
+@deprecated_kwargs(clusterizer=rename("clusterer"))
 def extract_cluster_maps(
     patches: "PatchData",
-    clusterizer: "TokenClusterizer",
+    clusterer: "TokenClusterer",
     model=None,
     *,
     slides=None,
     input_key: Optional[str] = None,
-    batch_size: int = 16,
+    batch_size: int = 128,
+    device: Optional[str] = None,
     progress_bar: bool = True,
     cache: bool = True,
     overwrite: bool = False,
@@ -32,71 +36,56 @@ def extract_cluster_maps(
 ) -> Union[np.ndarray, List[np.ndarray]]:
     """
     Generate a token-cluster map, rasterized to pixel resolution, for a set
-    of pre-selected patches, for one `TokenClusterizer`.
+    of pre-selected patches, for one `TokenClusterer`.
 
     If the cluster map is already cached in
-    `patches.obsm[cluster_img_key(clusterizer)]` (e.g. from a previous call
+    `patches.obsm[cluster_img_key(clusterer)]` (e.g. from a previous call
     with `cache=True`), it's returned directly -- no pixel read, no model
-    call -- unless `overwrite=True`. Otherwise, this embeds `patches` with a vision model (dense,
-    per-token, via `run_model_stages`) and hands the result to
-    `clusterizer.transform`, which clusters and rasterizes it up to each
-    patch's native pixel size. Renamed from the earlier
-    `extract_saliency_maps`: "saliency map" implies a gradient/attribution-
-    based importance map (e.g. GradCAM), which this never was -- it's a
-    KMeans cluster-ID raster.
+    call -- unless `overwrite=True`. Otherwise, this embeds `patches` with a
+    vision model (dense, per-token, via `run_model_stages`) and hands the
+    result to `clusterer.transform`, which clusters and rasterizes it up to
+    each patch's native pixel size.
 
-    `TokenClusterizer` doesn't hold onto its vision model (see its class
-    docstring) -- only `model_name`. When `model` is omitted here (the
-    common case), it's resolved from `clusterizer.model_name` via
-    `lazyslide_models.MODEL_REGISTRY`, the same way `TokenClusterizer.fit()`
-    defaults its own `model`. Pass `model` explicitly instead when calling
-    this once per clusterizer for several clusterizers that share one model
-    (e.g. to build a multi-row gallery, see
-    `mesoslide.plotting.plot_patch_gallery_with_saliency`) -- letting each
-    call auto-resolve its own model instance still only runs the embedding
-    *computation* once (`run_model_stages` caches that in `patches.obsm`
-    under a key derived from the resolved model name, regardless of which
-    Python model object triggered it), but it does re-instantiate/reload
-    the model object itself on every call; passing one already-resolved
-    `model` in avoids that.
+    When `model` is omitted, it's resolved from `clusterer.model_name_` via
+    `lazyslide_models.MODEL_REGISTRY`. Pass `model` explicitly when calling
+    this for several clusterers that share one model (e.g. a multi-row
+    gallery): the embedding itself is computed once either way
+    (`run_model_stages` caches it in `patches.obsm` under a key derived from
+    the model name), but passing one resolved instance avoids reloading the
+    model on every call.
 
     Parameters
     ----------
     patches : PatchData
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
-    clusterizer : TokenClusterizer
-        Must have a non-empty `feature_name` -- used as this clusterizer's
-        own `patches.obsm` cache key.
+    clusterer : TokenClusterer
+        Fitted clusterer. Its `display_name` (`name`, else `feature_name_`)
+        must be non-empty -- it's the `patches.obsm` cache key.
     model : str or lazyslide_models.ImageModel, optional
-        The vision model to embed `patches` with -- must match (or be
-        compatible with) the model `clusterizer` was constructed/fit with.
-        Forwarded to `ImageModelStage`. Defaults to re-resolving
-        `clusterizer.model_name` from `lazyslide_models.MODEL_REGISTRY`.
+        The vision model to embed `patches` with -- must match the model
+        `clusterer` was fit with. Defaults to `clusterer.model_name_`.
     slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
         Forwarded to :func:`extract_patch_images`/`run_model_stages`.
         Not required in the common case -- falls back to
         `patches.obs['_slide_ref']`, populated automatically by
-        :func:`mesoslide.select_top_patches` and friends. Pass this
-        explicitly to read from slides you already have open without
-        relying on that column (or when the cluster map is already cached,
-        it's unused either way).
+        :func:`mesoslide.select_top_patches` and friends.
     input_key : str, optional
         Resume the embedding step from an existing cached dense array
         instead of reading pixels through the vision model -- forwarded to
         `run_model_stages`.
-    batch_size : int, default=16
+    batch_size : int, default=128
         Batch size for the embedding step.
+    device : str, optional
+        Torch device for the vision model. Defaults to "cuda" if available.
     progress_bar : bool, default=True
-    cache : bool, default=False
+    cache : bool, default=True
         Store the freshly computed rasterized map in
-        `patches.obsm[cluster_img_key(clusterizer)]`, so a later call with
-        the same clusterizer skips re-computing it. Skipped (with a
-        warning) if the result can't be stacked into a single per-patch
-        array (inconsistent pixel shapes across patches).
+        `patches.obsm[cluster_img_key(clusterer)]`, so a later call with
+        the same clusterer skips re-computing it. Skipped (with a warning)
+        if patches have inconsistent pixel shapes.
     overwrite : bool, default=False
-        Recompute even if a cluster map is already cached in
-        `patches.obsm[cluster_img_key(clusterizer)]`, replacing the cached
-        value (when `cache=True`).
+        Recompute even if a cluster map is already cached, replacing the
+        cached value (when `cache=True`).
     token, model_path
         Forwarded to model resolution when `model` is omitted.
 
@@ -110,30 +99,21 @@ def extract_cluster_maps(
     Raises
     ------
     ValueError
-        If `clusterizer.feature_name` is empty.
+        If `clusterer.display_name` is empty, or no model can be resolved.
 
     Examples
     --------
     >>> from mesoslide.preprocessing import extract_cluster_maps
-    >>> cluster_map = extract_cluster_maps(patches, clusterizer)
+    >>> cluster_map = extract_cluster_maps(patches, clusterer)
     >>> print(cluster_map.shape)   # (N, H, W)  dtype=uint8
-    >>>
-    >>> # Cache into the patches table, then reuse later, still no slides needed:
-    >>> extract_cluster_maps(patches, clusterizer, cache=True)
-    >>> cluster_map = extract_cluster_maps(patches, clusterizer)
-
-    Notes
-    -----
-    Alpha mapping, power transforms, and colourmap selection are purely
-    visualization concerns and belong in the plotting layer, not here.
     """
-    if not clusterizer.feature_name:
+    if not clusterer.display_name:
         raise ValueError(
-            "clusterizer must have a non-empty feature_name -- it's used as "
-            "this clusterizer's patches.obsm cache key."
+            "clusterer must have a non-empty name (or feature_name_) -- it's used as "
+            "this clusterer's patches.obsm cache key."
         )
 
-    key = cluster_img_key(clusterizer)
+    key = cluster_img_key(clusterer)
     if key in patches.obsm and not overwrite:
         return patches.obsm[key]
 
@@ -147,17 +127,16 @@ def extract_cluster_maps(
     is_list_pixels = isinstance(pixels, list)
 
     if model is None:
-        model, _ = _resolve_model(clusterizer.model_name, model_path=model_path, token=token)
+        model_name = getattr(clusterer, "model_name_", None)
+        if model_name is None:
+            raise ValueError("model is required when clusterer has no model_name_.")
+        model, _ = _resolve_model(model_name, model_path=model_path, token=token)
 
-    # Compose the vision FM embedder with the clusterizer's own `transform`:
-    # `run_model_stages` handles the (cacheable) embedding step, and
-    # `clusterizer.transform` -- its single public entry point for going
-    # from token embeddings to a rasterized cluster map -- handles the rest.
-    # `transform` isn't threaded through `as_stage`/`run_model_stages` here
-    # because its output_size varies per patch in the list case below, and
-    # in the non-list case doing so would duplicate the rasterized array
-    # under both the stage's own cache key and `cluster_img_key` below.
-    fm_stage = ImageModelStage(model, dense=True, device=clusterizer.device)
+    # `run_model_stages` handles the (cacheable) embedding step and
+    # `clusterer.transform` the rest. `transform` isn't run as a stage here
+    # because output_size varies per patch in the list case, and in the
+    # array case the map would be cached twice (stage key and `key`).
+    fm_stage = ImageModelStage(model, dense=True, device=device)
     table = run_model_stages(
         patches, [fm_stage], slides=slides,
         input_key=input_key, batch_size=batch_size,
@@ -165,20 +144,20 @@ def extract_cluster_maps(
     )
     dense_tokens = table.obsm[fm_stage.name]  # (N, N_tokens, D)
 
-    ##  This is for handling mixed patch size
+    # Mixed patch sizes
     if is_list_pixels:
         rasterized = [
-            clusterizer.transform(dense_tokens[i:i + 1], p.shape[-2:])[0]
+            clusterer.transform(dense_tokens[i:i + 1], p.shape[-2:])[0]
             for i, p in enumerate(pixels)
         ]
     else:
-        rasterized = clusterizer.transform(dense_tokens, tuple(pixels.shape[-2:]))
+        rasterized = clusterer.transform(dense_tokens, tuple(pixels.shape[-2:]))
 
     if cache:
         if is_list_pixels:
             warnings.warn(
-                f"cache=True has no effect for clusterizer "
-                f"'{clusterizer.feature_name}': patches have inconsistent "
+                f"cache=True has no effect for clusterer "
+                f"'{clusterer.display_name}': patches have inconsistent "
                 f"pixel shapes and cannot be aligned 1:1 with patches.obs.",
                 UserWarning,
                 stacklevel=2,

@@ -16,7 +16,7 @@ Named `feature_extraction` to match lazyslide's own `zs.tl.feature_extraction`.
 
 Internally, `feature_extraction` builds a `ModelStage` chain and delegates to
 `run_model_stages` (see `mesoslide.tools._model_stage`), the same engine
-`TokenClusterizer`/`extract_cluster_maps` use at patch-table scope. A single
+`fit_token_clusterer`/`extract_cluster_maps` use at patch-table scope. A single
 call computes exactly one chain from the image -- pooled (optionally
 followed by `sparse_transform`), or dense (followed by the required
 `reducer`) -- since these are two independent branches off the same image

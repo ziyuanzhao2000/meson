@@ -10,17 +10,18 @@ from ._image_grid import _plot_image_grid
 
 if TYPE_CHECKING:
     from wsidata import WSIData
-    from mesoslide.tools.segmenters import TokenClusterizer
+    from mesoslide.tools.segmenters import TokenClusterer
     from mesoslide._patch_data import PatchData
 
 
 @deprecated_kwargs(
     sdata=removed(SLIDES_HINT),
     show_image_names=rename('show_slide_ids'),
+    clusterizers=rename('clusterers'),
 )
 def plot_patch_gallery_with_saliency(
     patches: "PatchData",
-    clusterizers: List["TokenClusterizer"],
+    clusterers: List["TokenClusterer"],
     model=None,
     slides=None,
     output_path: Optional[str] = None,
@@ -37,6 +38,7 @@ def plot_patch_gallery_with_saliency(
     progress_bar: bool = True,
     saliency_alpha_power: float = 1.0,
     batch_size: int = 128,
+    device: Optional[str] = None,
     cache: bool = False,
     overwrite: bool = False,
     blend_with_previous: bool = True,
@@ -47,7 +49,7 @@ def plot_patch_gallery_with_saliency(
 
     Displays patches in a grid where each patch occupies a column-group of rows:
     - Row 0: Original H&E image
-    - Row 1..K: Cluster-map overlay for each clusterizer, colorized with viridis
+    - Row 1..K: Cluster-map overlay for each clusterer, colorized with viridis
 
     A thin wrapper around :class:`GalleryPlan`
     (``GalleryPlan(patches).add_he_row(...).add_cluster_map_rows(...)``); use
@@ -66,16 +68,14 @@ def plot_patch_gallery_with_saliency(
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
         Required .obs columns: 'x', 'y' (plus 'slide_id' across slides).
         Optional column: 'score' (used when show_scores=True).
-    clusterizers : list of TokenClusterizer
+    clusterers : list of TokenClusterer
         Each produces one cluster-map row. Must have distinct, non-empty
-        `feature_name`s (see :func:`extract_cluster_maps`).
+        `display_name`s (see :func:`extract_cluster_maps`).
     model : str or lazyslide_models.ImageModel, optional
         The vision model to embed patches with -- forwarded to
-        :func:`extract_cluster_maps` for every clusterizer. Optional: when
-        omitted, each clusterizer resolves its own model from its stored
-        `model_name` (see `TokenClusterizer`'s class docstring). Pass this
-        explicitly when clusterizers share one model, to resolve it once
-        here instead of once per clusterizer.
+        :func:`extract_cluster_maps` for every clusterer. When omitted, each
+        clusterer resolves its own model from `model_name_`. Pass this
+        explicitly when clusterers share one model, to resolve it once.
     slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
         Not required in the common case -- falls back to
         `patches.obs['_slide_ref']`, populated automatically by
@@ -105,7 +105,9 @@ def plot_patch_gallery_with_saliency(
     saliency_alpha_power : float, default=1.0
         Exponent applied to normalised cluster values for alpha contrast.
     batch_size : int, default=128
-        Batch size passed to clusterizers during inference.
+        Batch size for the embedding step.
+    device : str, optional
+        Torch device for the vision model. Defaults to "cuda" if available.
     cache : bool, default=True
         Forwarded to :func:`extract_patch_images`/:func:`extract_cluster_maps`:
         persist freshly extracted pixels/cluster maps into `patches.obsm` so
@@ -129,17 +131,17 @@ def plot_patch_gallery_with_saliency(
     >>> # Fully automatic -- model resolved once here and shared across c1, c2
     >>> slides = ms.open_slides(manifest)
     >>> plot_patch_gallery_with_saliency(
-    ...     patches, clusterizers=[c1, c2], model='uni2', slides=slides,
+    ...     patches, clusterers=[c1, c2], model='uni2', slides=slides,
     ...     output_path='output/saliency.png'
     ... )
     >>>
     >>> # Cache once, plot many times without slides
     >>> plot_patch_gallery_with_saliency(
-    ...     patches, clusterizers=[c1, c2], model='uni2', slides=slides,
+    ...     patches, clusterers=[c1, c2], model='uni2', slides=slides,
     ...     cache=True, output_path='output/saliency_1.png'
     ... )
     >>> plot_patch_gallery_with_saliency(
-    ...     patches, clusterizers=[c1, c2],   # no slides needed -- all cached
+    ...     patches, clusterers=[c1, c2],   # no slides needed -- all cached
     ...     output_path='output/saliency_2.png'
     ... )
     """
@@ -147,10 +149,10 @@ def plot_patch_gallery_with_saliency(
         GalleryPlan(patches)
         .add_he_row(slides, tile_key=tile_key, cache=cache, overwrite=overwrite)
         .add_cluster_map_rows(
-            clusterizers, model, slides,
+            clusterers, model, slides,
             tile_key=tile_key,
             saliency_alpha_power=saliency_alpha_power,
-            batch_size=batch_size, cache=cache, overwrite=overwrite,
+            batch_size=batch_size, device=device, cache=cache, overwrite=overwrite,
             blend_with_previous=blend_with_previous,
             cmap=cmap
         )

@@ -5,7 +5,7 @@ sparse-coding transform, ...) and declares what it consumes, what it
 produces, and where its own output should be cached -- so a pipeline of them
 can be validated and run generically by `mesoslide.tools._feature_extraction
 .run_model_stages`, instead of each caller (feature_extraction,
-TokenClusterizer, extract_cluster_maps) hand-rolling its own batching loop
+fit_token_clusterer, extract_cluster_maps) hand-rolling its own batching loop
 against a different model interface.
 """
 
@@ -77,7 +77,7 @@ def _canonical_registry_name(name: str) -> str:
     An already-instantiated model's own `.name` doesn't necessarily match its
     registry key's casing (e.g. UNI's `.name` is "UNI" but its registry key
     is "uni") -- callers that persist a resolved name (e.g.
-    `TokenClusterizer.model_name`) and later feed it back into
+    `TokenClusterer.model_name_`) and later feed it back into
     `_resolve_model` need the registry key, not whatever casing `.name`
     happened to report, or they'll silently miss the registry entry and fall
     through to the generic (and here, wrong) TimmModel path. Names with no
