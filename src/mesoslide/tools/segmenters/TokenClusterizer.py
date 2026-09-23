@@ -4,6 +4,7 @@ from typing import Optional, Union
 import numpy as np
 import torch
 import cv2
+from scipy.stats import spearmanr
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import KMeans
 
@@ -255,6 +256,7 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         n_negative: int = 100,
         batch_size: int = 128, # changed from 16 for better perf on cpu
         top_fraction: float = 0.10,
+        heuristic: str = "correlation",
         show_progress: bool = True,
         take_every: Union[int, None] = None,
         tile_key: str = 'tiles',
@@ -263,15 +265,31 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         model_path: "str | Path | None" = None,
     ) -> "TokenClusterizer":
         """
-        Compute cluster order based on differential abundance between positive and negative patches.
+        Compute cluster order for this clusterizer's KMeans clusters.
 
-        This method:
-        1. Selects positive (high-scoring) and negative (zero-score) patches for a feature
-        2. Extracts image patches and computes token embeddings
-        3. Predicts cluster labels for all tokens
-        4. Computes differential cluster frequencies (positive - negative)
-        5. Ranks clusters by differential abundance
-        6. Updates self.cluster_order and returns self
+        Two heuristics decide how raw KMeans cluster ids get remapped into a
+        canonical order (`self.cluster_order`, used by `_rasterize`):
+
+        - `heuristic='correlation'` (default): draws `n_positive` patches
+          spread across the *entire* score range for `feature_name`
+          (`top_fraction=1.0`, no score filtering -- `n_negative` and
+          `top_fraction` are ignored), then for each patch counts how many
+          of its tokens fall in each raw cluster. Clusters are ranked by the
+          ascending rank of their Spearman correlation (token count vs.
+          `_feature_score`, across patches) -- the cluster whose token count
+          correlates most negatively with the feature score becomes cluster
+          0, the most positively correlated becomes the highest id. This is
+          more robust than `'diff_abundance'` since it uses the full score
+          distribution rather than a binary top-vs-zero split. Populates
+          `self.fit_diagnostics_` (see below).
+        - `heuristic='diff_abundance'`: the original heuristic. Selects
+          `n_positive` high-scoring patches (`top_fraction` of the
+          qualifying pool) and `n_negative` zero-score patches, pools all
+          their tokens, and ranks clusters by ascending differential
+          pooled-token frequency (positive - negative).
+
+        Both heuristics finish by updating `self.cluster_order` and
+        returning `self`.
 
         This is useful for identifying which tissue structures (clusters) are
         most enriched in patches where a specific SAE feature is active.
@@ -291,11 +309,28 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
             an already-loaded instance instead of resolving one again, or to
             fit against a different (but grid-compatible) model.
         n_positive : int, default=100
-            Number of positive patches to sample
+            Number of patches to sample. Under `'correlation'`, this is the
+            total number of patches drawn (spread across the full score
+            range); under `'diff_abundance'`, the number of high-scoring
+            patches.
         n_negative : int, default=100
-            Number of negative patches to sample
+            Number of zero-score patches to sample. Ignored under
+            `heuristic='correlation'`.
         batch_size : int, default=16
             Batch size for processing
+        top_fraction : float, default=0.10
+            Restricts positive-patch selection to the top fraction of the
+            qualifying pool. Ignored under `heuristic='correlation'`, which
+            always samples across the full score range (`top_fraction=1.0`).
+        heuristic : {'correlation', 'diff_abundance'}, default='correlation'
+            Which cluster-ordering heuristic to use -- see above.
+
+            .. note::
+               Changed in this version: the default changed from the only
+               heuristic that used to exist (now `'diff_abundance'`) to
+               `'correlation'`. Existing callers that rely on the old
+               behavior must now pass `heuristic='diff_abundance'`
+               explicitly to get identical `cluster_order` results.
         show_progress : bool, default=True
             Whether to show progress bars
         tile_key : str, default='tiles'
@@ -308,7 +343,16 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
 
         Returns
         -------
-        self, with `cluster_order` updated.
+        self, with `cluster_order` updated (and, under `heuristic='correlation'`,
+        `self.fit_diagnostics_` populated).
+
+        Attributes Set
+        ---------------
+        fit_diagnostics_ : np.ndarray, shape (n_positive, n_clusters + 1)
+            Only set by `heuristic='correlation'`. Column `c` (for
+            `c < n_clusters`) is each sampled patch's token count in
+            (canonical, post-`cluster_order`) cluster `c`; the last column
+            is that patch's `_feature_score`. See `plot_cluster_feature_correlation`.
 
         Examples
         --------
@@ -318,14 +362,14 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
         ...     slides,
         ...     feature_name='UNI_SAE_12345',
         ...     n_positive=100,
-        ...     n_negative=100,
         ... )  # model defaults to re-resolving clusterizer.model_name ('uni2' here)
         >>> # Now the clusterizer will use this ordering when rasterizing
         >>> from mesoslide.preprocessing import extract_cluster_maps
         >>> masks = extract_cluster_maps(patches, clusterizer)
+        >>> clusterizer.plot_cluster_feature_correlation()
         """
-        from mesoslide._patch_selector import select_top_patches, select_negative_patches
-        from mesoslide.tools._feature_extraction import run_model_stages
+        if heuristic not in ("diff_abundance", "correlation"):
+            raise ValueError(f"heuristic must be 'diff_abundance' or 'correlation', got {heuristic!r}")
 
         resolved_model, model_name = _resolve_model(
             model if model is not None else self.model_name,
@@ -340,6 +384,25 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
                 f"equivalent one) used to construct it."
             )
 
+        if heuristic == "diff_abundance":
+            return self._fit_diff_abundance(
+                slides, feature_name, resolved_model, n_positive, n_negative,
+                batch_size, top_fraction, show_progress, take_every, tile_key, image_slides,
+            )
+        return self._fit_correlation(
+            slides, feature_name, resolved_model, n_positive,
+            batch_size, show_progress, take_every, tile_key, image_slides,
+        )
+
+    def _fit_diff_abundance(
+        self, slides, feature_name, resolved_model, n_positive, n_negative,
+        batch_size, top_fraction, show_progress, take_every, tile_key, image_slides,
+    ) -> "TokenClusterizer":
+        """Original heuristic: rank clusters by differential pooled-token abundance
+        between top-scoring and zero-score patches. See `fit`'s docstring."""
+        from mesoslide._patch_selector import select_top_patches, select_negative_patches
+        from mesoslide.tools._feature_extraction import run_model_stages
+
         if show_progress:
             print(f"Selecting patches for feature '{feature_name}'...")
 
@@ -353,7 +416,6 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
             top_fraction=top_fraction,  # Only top fraction of patches
             take_every=take_every,
         )
-        print(top_fraction)
 
         # Negative patches: evenly sampled from zero-score patches
         negative_patches_anndata = select_negative_patches(
@@ -426,3 +488,146 @@ class TokenClusterizer(TransformerMixin, BaseEstimator):
             print(f"Differential abundances: {diff_percentage[cluster_order[:3]]}")
 
         return self
+
+    def _fit_correlation(
+        self, slides, feature_name, resolved_model, n_positive,
+        batch_size, show_progress, take_every, tile_key, image_slides,
+    ) -> "TokenClusterizer":
+        """Rank clusters by each cluster's Spearman correlation (per-patch token
+        count vs. feature score) across patches spread over the full score
+        range. See `fit`'s docstring."""
+        from mesoslide._patch_selector import select_top_patches
+        from mesoslide.tools._feature_extraction import run_model_stages
+
+        if show_progress:
+            print(f"Selecting patches for feature '{feature_name}'...")
+
+        # Patches spread across the entire score range, not just top-scoring.
+        patches_anndata = select_top_patches(
+            slides,
+            feature_name,
+            n=n_positive,
+            tile_key=tile_key,
+            min_score=None,
+            top_fraction=1.0,
+            take_every=take_every,
+        )
+
+        if show_progress:
+            print(f"Extracting {len(patches_anndata)} patches across the full score range...")
+
+        dense_key = "_fit_dense"
+        fm_stage = ImageModelStage(resolved_model, dense=True, name=dense_key, device=self.device)
+
+        run_model_stages(
+            patches_anndata, [fm_stage], slides=image_slides,
+            tile_key=tile_key, batch_size=batch_size,
+            progress_bar=show_progress, save=False,
+        )
+
+        pos_dense = patches_anndata.obsm[dense_key]  # (n_patches, N_tokens, D)
+        n_patches = pos_dense.shape[0]
+        positive_tokens = pos_dense.reshape(-1, pos_dense.shape[-1]).astype(np.float64)
+
+        if show_progress:
+            print("Predicting cluster labels...")
+
+        # Fit KMeans if not already fitted
+        if not hasattr(self.kmeans, 'cluster_centers_'):
+            if show_progress:
+                print("Fitting KMeans on all tokens...")
+            self.kmeans = KMeans(n_clusters=3, random_state=0).fit(positive_tokens)
+
+        # Raw (pre-cluster_order) per-patch token label grids: (n_patches, gh, gw)
+        raw_cluster_maps = self._cluster_tokens(pos_dense)
+
+        n_clusters = len(np.unique(raw_cluster_maps))
+        if hasattr(self.kmeans, 'n_clusters'):
+            n_clusters = self.kmeans.n_clusters
+
+        # Per-patch, per-cluster token counts -- no rasterization needed,
+        # since raw_cluster_maps already has one label per token.
+        raw_token_counts = np.stack([
+            np.bincount(raw_cluster_maps[i].ravel(), minlength=n_clusters)
+            for i in range(n_patches)
+        ]).astype(np.float64)  # (n_patches, n_clusters)
+
+        feature_scores = patches_anndata.obs['_feature_score'].to_numpy().astype(np.float64)
+
+        # Spearman correlation per raw cluster id vs. feature score.
+        correlations = np.array([
+            spearmanr(raw_token_counts[:, c], feature_scores)[0]
+            for c in range(n_clusters)
+        ])
+
+        # Rank clusters by correlation (low to high)
+        cluster_order = np.argsort(np.argsort(correlations))
+        self.cluster_order = cluster_order
+
+        # Remap diagnostic columns into canonical order so they line up with
+        # what transform()/extract_cluster_maps will output going forward.
+        diagnostics = np.zeros((n_patches, n_clusters + 1), dtype=np.float64)
+        for raw_id in range(n_clusters):
+            diagnostics[:, cluster_order[raw_id]] = raw_token_counts[:, raw_id]
+        diagnostics[:, -1] = feature_scores
+        self.fit_diagnostics_ = diagnostics
+
+        if show_progress:
+            print(f"Cluster order computed and stored. Top 3 correlated clusters: {cluster_order[:3]}")
+            print(f"Spearman correlations: {correlations[cluster_order[:3]]}")
+
+        return self
+
+    def plot_cluster_feature_correlation(self, ax=None):
+        """
+        Scatter each cluster's per-patch token count against the patch's SAE
+        feature score, with each series' Spearman correlation in the legend.
+
+        Requires `fit(..., heuristic='correlation')` to have been called
+        first (populates `self.fit_diagnostics_`).
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure/axes is created if omitted.
+
+        Returns
+        -------
+        (fig, ax) : the figure and axes the plot was drawn into.
+        """
+        if not hasattr(self, "fit_diagnostics_"):
+            raise RuntimeError(
+                "plot_cluster_feature_correlation() requires fit(..., "
+                "heuristic='correlation') to have been called first -- no "
+                "diagnostics found (fit() may not have been called, or was "
+                "called with heuristic='diff_abundance')."
+            )
+
+        import matplotlib.pyplot as plt
+
+        diagnostics = self.fit_diagnostics_
+        n_clusters = diagnostics.shape[1] - 1
+        counts = diagnostics[:, :n_clusters]
+        feature_scores = diagnostics[:, -1]
+
+        if ax is None:
+            fig, ax = plt.subplots(figsize=(6, 5))
+        else:
+            fig = ax.figure
+
+        colors = plt.cm.viridis(np.linspace(0, 1, n_clusters))
+        for c in range(n_clusters):
+            rho, pval = spearmanr(counts[:, c], feature_scores)
+            ax.scatter(
+                feature_scores, counts[:, c],
+                s=24, color=colors[c], alpha=0.8,
+                label=f"Cluster {c} (Spearman ρ={rho:.2f}, p={pval:.2g})",
+            )
+
+        ax.set_xlabel("_feature_score")
+        ax.set_ylabel("Token count")
+        ax.set_title(f"{self.feature_name}: feature score vs. cluster token count" if self.feature_name
+                     else "Feature score vs. cluster token count")
+        ax.legend(loc="best", fontsize=8, frameon=False)
+        fig.tight_layout()
+        return fig, ax
