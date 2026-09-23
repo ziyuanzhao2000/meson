@@ -1,6 +1,6 @@
 [project]
 name = "mesoslide"
-version = "0.8.0"
+version = "0.9.0"
 description = "A package for mesoscale tissue analysis using multiomics data"
 authors = [{ name = "Ziyuan Zhao", email = "ziyuanzhao@fas.harvard.edu" }]
 readme = "README.md"
