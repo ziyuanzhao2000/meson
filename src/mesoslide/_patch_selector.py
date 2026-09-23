@@ -458,11 +458,13 @@ def select_top_patches(
     if top_fraction is not None:
         top_count = max(1, int(np.ceil(top_fraction * len(scores))))
         scores, codes, rows = scores[:top_count], codes[:top_count], rows[:top_count]
-        take_every = max(1, top_count // n)
-
-    if take_every is None:
-        take_every = max(1, len(scores) // n) if n is not None else 1
-    scores, codes, rows = scores[::take_every], codes[::take_every], rows[::take_every]
+        
+        take_at_indices = np.linspace(0, top_count-1, n).astype(np.int64)
+        scores, codes, rows = scores[take_at_indices], codes[take_at_indices], rows[take_at_indices]
+    if take_every is None and n is not None:
+        take_at_indices = np.linspace(0, len(scores)-1, n).astype(np.int64)
+        scores, codes, rows = scores[take_at_indices], codes[take_at_indices], rows[take_at_indices]
+    
     if n is not None:
         scores, codes, rows = scores[:n], codes[:n], rows[:n]
 
