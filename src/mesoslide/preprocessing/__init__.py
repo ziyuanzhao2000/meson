@@ -9,6 +9,8 @@ __getattr__, __dir__, __all__ = lazy.attach(
     '_extract_patches': ['extract_patch_images'],
     '_utils': ['channel_indices_from_markers'],
     '_extract_cluster_maps': ['extract_cluster_maps'],
+    '_extract_cells': ['extract_patch_cells'],
+    '_extract_cell_phenotypes': ['extract_patch_cell_phenotypes'],
     '_registration': ['ForwardTransform'],
     }
 )

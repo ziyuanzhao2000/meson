@@ -19,7 +19,8 @@ import numpy as np
 import pandas as pd
 from matplotlib.colors import to_rgba
 from shapely.affinity import affine_transform
-from shapely.geometry import box as shapely_box
+
+from mesoslide.preprocessing._extract_cells import cells_in_patch  # noqa: F401 (re-exported)
 
 #: lazyslide's own default qualitative palette (`lazyslide.plotting._wsi_viewer`),
 #: reused here for visual parity with `lazyslide.pl.WSIViewer` at low cardinality.
@@ -33,13 +34,6 @@ LAZYSLIDE_PALETTE = (
 #: given category count always gets the same colors across calls/sessions,
 #: not a fresh random draw each time.
 _DISTINCT_COLOR_SEED = 0
-
-
-def cells_in_patch(cells_gdf, x: int, y: int, w: int, h: int):
-    """`cells_gdf` rows whose geometry intersects the (x, y, w, h) box, in WSI pixel space."""
-    box = shapely_box(x, y, x + w, y + h)
-    idx = cells_gdf.sindex.query(box, predicate="intersects")
-    return cells_gdf.iloc[idx]
 
 
 def translate_to_patch_local(gdf, x: int, y: int, downsample: float = 1.0):

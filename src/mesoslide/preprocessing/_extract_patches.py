@@ -16,8 +16,8 @@ from mesoslide._slides import (
 )
 
 if TYPE_CHECKING:
-    import anndata as ad
     from wsidata import WSIData
+    from mesoslide._patch_data import PatchData
 
 
 def _resolve_slides(slides) -> dict:
@@ -36,7 +36,7 @@ def _resolve_slides(slides) -> dict:
     )
 
 
-def _resolve_slides_from_ref(patches: "ad.AnnData") -> "tuple[dict, list]":
+def _resolve_slides_from_ref(patches: "PatchData") -> "tuple[dict, list]":
     """Build {slide_id: WSIData} from patches.obs[SLIDE_REF], the fallback
     used when no `slides` argument is given.
 
@@ -100,7 +100,7 @@ def _tile_size(wsi: "WSIData", tile_key: str) -> tuple:
 
 
 def _resolve_obsm_key_pre_read(
-    patches: "ad.AnnData",
+    patches: "PatchData",
     channels: Optional[List[int]],
     obsm_key: Optional[str],
 ) -> Optional[str]:
@@ -147,7 +147,7 @@ def _resolve_obsm_key_post_read(
 
 
 def extract_patch_images(
-    patches: "ad.AnnData",
+    patches: "PatchData",
     slides=None,
     *,
     channels: Optional[List[int]] = None,
@@ -156,6 +156,7 @@ def extract_patch_images(
     progress_bar: bool = True,
     skip_errors: bool = True,
     cache: bool = True,
+    overwrite: bool = False,
     obsm_key: Optional[str] = None,
 ) -> Union[np.ndarray, List[np.ndarray]]:
     """
@@ -171,7 +172,8 @@ def extract_patch_images(
     If a matching cached array is already populated in `patches.obsm` (e.g.
     from a previous call with `cache=True`), it is returned directly
     (converted to the requested `channel_first` layout) and no slide is
-    read -- see `obsm_key` below for which key is checked.
+    read -- see `obsm_key` below for which key is checked -- unless
+    `overwrite=True`.
 
     Otherwise, coordinates come from ``patches.obs['x']`` / ``['y']`` (a
     tile's top-left corner at level 0) and the tile size from each slide's
@@ -179,7 +181,7 @@ def extract_patch_images(
 
     Parameters
     ----------
-    patches : AnnData
+    patches : PatchData
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
         Required .obs columns: 'x', 'y'; plus 'slide_id' when `slides` covers
         more than one slide.
@@ -205,12 +207,15 @@ def extract_patch_images(
     progress_bar : bool, default=True
     skip_errors : bool, default=True
         Skip failed reads instead of raising on the first one.
-    cache : bool, default=False
+    cache : bool, default=True
         Store the extracted array (channel-first) in `patches.obsm`, so a
         later call on the same `patches` object can skip reading from
         slides. Skipped (with a warning) if `skip_errors` caused rows to be
         dropped, or if patches have inconsistent shapes, since either case
         cannot be aligned 1:1 with `.obs`.
+    overwrite : bool, default=False
+        Recompute even if a matching array is already cached in
+        `patches.obsm`, replacing the cached value (when `cache=True`).
     obsm_key : str, optional
         `patches.obsm` key to read/write the cache under. Defaults to
         choosing between `mesoslide._slides.HE_PATCH_IMG_KEY` and
@@ -249,10 +254,11 @@ def extract_patch_images(
     use ``ezslide.tile_images(wsi, tile_key=...)`` (block-deduping, and what
     :func:`mesoslide.tl.feature_extraction` uses) or ``wsi.iter.tile_images(key)``.
     """
-    cached_key = _resolve_obsm_key_pre_read(patches, channels, obsm_key)
-    if cached_key is not None:
-        cached = patches.obsm[cached_key]
-        return np.moveaxis(cached, 1, -1) if not channel_first else cached
+    if not overwrite:
+        cached_key = _resolve_obsm_key_pre_read(patches, channels, obsm_key)
+        if cached_key is not None:
+            cached = patches.obsm[cached_key]
+            return np.moveaxis(cached, 1, -1) if not channel_first else cached
 
     opened: list = []
     try:

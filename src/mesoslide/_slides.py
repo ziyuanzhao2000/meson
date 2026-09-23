@@ -40,9 +40,11 @@ from typing import TYPE_CHECKING, Iterator, Mapping, Optional, Sequence, Union
 from ezslide import SLIDE_ID, resolve_manifest, iter_slides, open_slides  # noqa: F401
 
 if TYPE_CHECKING:
+    import geopandas as gpd
     import pandas as pd
     from anndata import AnnData
     from wsidata import WSIData
+    from ._patch_data import PatchData
 
 
 DEFAULT_TILE_KEY = "tiles"
@@ -84,6 +86,11 @@ def slide_id_from(wsi: "WSIData") -> str:
 def _is_anndata(obj) -> bool:
     from anndata import AnnData
     return isinstance(obj, AnnData)
+
+
+def _is_patch_data(obj) -> bool:
+    from ._patch_data import PatchData
+    return isinstance(obj, PatchData)
 
 
 def _is_wsidata(obj) -> bool:
@@ -214,17 +221,40 @@ def _require_table(wsi: "WSIData", table_key: str, slide_id: str) -> "AnnData":
     return table
 
 
+def _require_table_and_shapes(wsi: "WSIData", tile_key: str, slide_id: str):
+    """Like `_require_table`, but also fetches the tile shapes `SlideSource`
+    needs to build a `PatchData` (`concat_slides` doesn't need shapes, so it
+    keeps using the table-only `_require_table` directly)."""
+    table = _require_table(wsi, tile_table_key(tile_key), slide_id)
+    tiles = wsi.shapes.get(tile_key)
+    if tiles is None:
+        raise KeyError(
+            f"Slide '{slide_id}' has no shapes '{tile_key}'. Run "
+            f"lazyslide.pp.tile_tissues on it first; available shapes: {list(wsi.shapes)}"
+        )
+    return table, tiles
+
+
 class SlideSource:
-    """Re-iterable, uniform access to a cohort's per-slide tile tables.
+    """Re-iterable, uniform access to a cohort's per-slide tile tables + tile shapes.
 
-    Accepts whatever a caller naturally has -- one table, one slide, a list, a
-    ``{slide_id: ...}`` mapping, or a cohort manifest -- and presents them all as
-    ``(slide_id, AnnData)`` pairs. Iterating a manifest re-opens the stores, so
-    memory stays bounded to one slide; iterating in-memory inputs is free.
+    Accepts whatever a caller naturally has -- one `PatchData`, one `WSIData`, a
+    list, a ``{slide_id: ...}`` mapping, or a cohort manifest -- and presents
+    them all as ``(slide_id, AnnData, GeoDataFrame)`` triples (table, tile
+    shapes). Iterating a manifest re-opens the stores, so memory stays bounded
+    to one slide; iterating in-memory inputs is free.
 
-    ``slide_id`` is ``None`` for a single bare AnnData, which is how callers know
-    not to stamp a provenance column over one that may already be there (e.g. on
-    the output of :func:`concat_slides`).
+    A plain, shapeless `AnnData` (e.g. a table already in hand, without its
+    owning `WSIData`) is still accepted, exactly as before this module's
+    `PatchData` migration -- but since it carries no tile geometry of its
+    own, `_build_output` falls back to a 1x1-pixel placeholder box at each
+    row's `(x, y)` rather than real tile-sized geometry (see `_build_output`).
+    Pass the `WSIData` it came from, or a `PatchData`, when real tile shapes
+    are needed.
+
+    ``slide_id`` is ``None`` for a single `PatchData`/bare-`AnnData` input,
+    which is how callers know not to stamp a provenance column over one that
+    may already be there.
     """
 
     def __init__(
@@ -242,73 +272,72 @@ class SlideSource:
         self._manifest = None
         self._items: Optional[list] = None
         # {slide_id: ref}, ref = the original WSIData for an in-memory branch
-        # (None for an entry that was already a bare AnnData table) -- stashed
-        # here because `_coerce` below discards the original object down to
-        # just its table. Only populated for the in-memory branches; the
-        # manifest branch computes refs lazily in iter_with_ref() instead,
+        # (None for an entry that was already a PatchData) -- stashed here
+        # because `_coerce` below discards the original object down to just
+        # its (table, tiles) pair. Only populated for the in-memory branches;
+        # the manifest branch computes refs lazily in iter_with_ref() instead,
         # since it needs no opening (unlike the table, which does).
         self._refs: dict = {}
 
         if _is_slides_table(slides):
             self._manifest = slides
+        elif _is_patch_data(slides):
+            from ._patch_data import TILES_KEY, TILES_TABLE_KEY
+            self._items = [(None, slides.tables[TILES_TABLE_KEY], slides.shapes[TILES_KEY])]
         elif _is_anndata(slides):
-            self._items = [(None, slides)]
+            self._items = [(None, slides, None)]
         elif _is_wsidata(slides):
             slide_id = slide_id_from(slides)
-            self._items = [(slide_id, _require_table(slides, self._table_key, slide_id))]
+            table, tiles = _require_table_and_shapes(slides, tile_key, slide_id)
+            self._items = [(slide_id, table, tiles)]
             self._refs[slide_id] = slides
         elif isinstance(slides, Mapping):
-            self._items = [(str(k), self._coerce(v, str(k))) for k, v in slides.items()]
+            self._items = [(str(k), *self._coerce(v, str(k))) for k, v in slides.items()]
         elif isinstance(slides, Sequence) and not isinstance(slides, (str, bytes)):
             self._items = [
-                (self._default_id(v, i), self._coerce(v, self._default_id(v, i)))
+                (self._default_id(v, i), *self._coerce(v, self._default_id(v, i)))
                 for i, v in enumerate(slides)
             ]
         else:
             raise TypeError(
-                "slides must be an AnnData, a WSIData, a sequence or mapping of "
-                f"either, or a slides_table DataFrame; got {type(slides).__name__}."
+                "slides must be an AnnData, a PatchData, a WSIData, a sequence or "
+                f"mapping of any of these, or a slides_table DataFrame; got {type(slides).__name__}."
             )
 
     def _default_id(self, obj, i: int) -> str:
         return slide_id_from(obj) if _is_wsidata(obj) else str(i)
 
-    def _coerce(self, obj, slide_id: str) -> "AnnData":
+    def _coerce(self, obj, slide_id: str):
+        if _is_patch_data(obj):
+            from ._patch_data import TILES_KEY, TILES_TABLE_KEY
+            self._refs[slide_id] = None
+            return obj.tables[TILES_TABLE_KEY], obj.shapes[TILES_KEY]
         if _is_anndata(obj):
             self._refs[slide_id] = None
-            return obj
+            return obj, None
         if _is_wsidata(obj):
             self._refs[slide_id] = obj
-            return _require_table(obj, self._table_key, slide_id)
+            return _require_table_and_shapes(obj, self._tile_key, slide_id)
         raise TypeError(
-            f"slides entry '{slide_id}' must be an AnnData or WSIData, "
-            f"got {type(obj).__name__}."
+            f"slides entry '{slide_id}' must be an AnnData, a PatchData, or a "
+            f"WSIData, got {type(obj).__name__}."
         )
 
     def __iter__(self) -> Iterator[tuple[Optional[str], "AnnData"]]:
-        if self._items is not None:
-            yield from self._items
-            return
-        for slide_id, wsi in iter_slides(
-            self._manifest,
-            store_col=self._store_col,
-            slide_id_col=self._slide_id_col,
-        ):
-            yield slide_id, _require_table(wsi, self._table_key, slide_id)
+        for slide_id, table, _tiles, _ref in self.iter_with_ref():
+            yield slide_id, table
 
-    def iter_with_ref(self) -> Iterator[tuple[Optional[str], "AnnData", object]]:
-        """Like `__iter__`, but also yields each slide's `SLIDE_REF` value.
+    def iter_with_ref(self) -> Iterator[tuple[Optional[str], "AnnData", "gpd.GeoDataFrame", object]]:
+        """Yield each slide's tile table, tile shapes, and `SLIDE_REF` value.
 
         `ref` is the live `WSIData` (in-memory branches, `None` for an entry
-        that was already a bare table) or the store path string (manifest
+        that was already a `PatchData`) or the store path string (manifest
         branch, resolved via `resolve_manifest` -- no extra opening, since
-        the table already being read supplies that). Additive: `__iter__`
-        itself is untouched since it has consumers outside
-        `_patch_selector.py` that don't expect a 3-tuple.
+        the table already being read supplies that).
         """
         if self._items is not None:
-            for slide_id, table in self._items:
-                yield slide_id, table, self._refs.get(slide_id)
+            for slide_id, table, tiles in self._items:
+                yield slide_id, table, tiles, self._refs.get(slide_id)
             return
         stores = dict(resolve_manifest(self._manifest, self._store_col, self._slide_id_col))
         for slide_id, wsi in iter_slides(
@@ -316,7 +345,8 @@ class SlideSource:
             store_col=self._store_col,
             slide_id_col=self._slide_id_col,
         ):
-            yield slide_id, _require_table(wsi, self._table_key, slide_id), stores.get(slide_id)
+            table, tiles = _require_table_and_shapes(wsi, self._tile_key, slide_id)
+            yield slide_id, table, tiles, stores.get(slide_id)
 
     def first(self) -> "AnnData":
         """The first slide's table, for deriving an empty result with the right schema."""
@@ -325,7 +355,7 @@ class SlideSource:
         raise ValueError("No slides to read from.")
 
 
-def strip_slide_refs(patches: "AnnData") -> "AnnData":
+def strip_slide_refs(patches: "PatchData") -> "PatchData":
     """Normalise `patches.obs[SLIDE_REF]` to plain, serializable path strings.
 
     Any live `WSIData` entry is replaced by its `.path`; existing path
@@ -347,12 +377,12 @@ def strip_slide_refs(patches: "AnnData") -> "AnnData":
 
 
 def attach_slide_ref(
-    patches: "AnnData",
+    patches: "PatchData",
     slides,
     *,
     slide_id_col: str = SLIDE_ID,
     slide_id_map: Optional[Mapping[str, str]] = None,
-) -> "AnnData":
+) -> "PatchData":
     """(Re)point `patches.obs[SLIDE_REF]` at `slides`, by (mapped) slide_id.
 
     Two uses, same mechanism:

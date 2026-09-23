@@ -5,6 +5,7 @@ import numpy as np
 
 if TYPE_CHECKING:
     from mesoslide.tools.segmenters import TokenClusterizer
+    from mesoslide._patch_data import PatchData
 
 
 CLUSTER_IMG_SUFFIX = "_cluster_img"
@@ -16,7 +17,7 @@ def cluster_img_key(clusterizer: "TokenClusterizer") -> str:
 
 
 def extract_cluster_maps(
-    patches,
+    patches: "PatchData",
     clusterizer: "TokenClusterizer",
     model=None,
     *,
@@ -25,6 +26,7 @@ def extract_cluster_maps(
     batch_size: int = 16,
     progress_bar: bool = True,
     cache: bool = True,
+    overwrite: bool = False,
     token: Optional[str] = None,
     model_path=None,
 ) -> Union[np.ndarray, List[np.ndarray]]:
@@ -35,7 +37,7 @@ def extract_cluster_maps(
     If the cluster map is already cached in
     `patches.obsm[cluster_img_key(clusterizer)]` (e.g. from a previous call
     with `cache=True`), it's returned directly -- no pixel read, no model
-    call. Otherwise, this embeds `patches` with a vision model (dense,
+    call -- unless `overwrite=True`. Otherwise, this embeds `patches` with a vision model (dense,
     per-token, via `run_model_stages`) and hands the result to
     `clusterizer.transform`, which clusters and rasterizes it up to each
     patch's native pixel size. Renamed from the earlier
@@ -60,7 +62,7 @@ def extract_cluster_maps(
 
     Parameters
     ----------
-    patches : AnnData
+    patches : PatchData
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
     clusterizer : TokenClusterizer
         Must have a non-empty `feature_name` -- used as this clusterizer's
@@ -91,6 +93,10 @@ def extract_cluster_maps(
         the same clusterizer skips re-computing it. Skipped (with a
         warning) if the result can't be stacked into a single per-patch
         array (inconsistent pixel shapes across patches).
+    overwrite : bool, default=False
+        Recompute even if a cluster map is already cached in
+        `patches.obsm[cluster_img_key(clusterizer)]`, replacing the cached
+        value (when `cache=True`).
     token, model_path
         Forwarded to model resolution when `model` is omitted.
 
@@ -128,7 +134,7 @@ def extract_cluster_maps(
         )
 
     key = cluster_img_key(clusterizer)
-    if key in patches.obsm:
+    if key in patches.obsm and not overwrite:
         return patches.obsm[key]
 
     from mesoslide.preprocessing._extract_patches import extract_patch_images

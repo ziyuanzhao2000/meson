@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 from matplotlib.colors import to_rgba
 from matplotlib.patches import Patch
 
-from mesoslide._slides import DEFAULT_TILE_KEY, SLIDE_ID
+from mesoslide._slides import CYCIF_PATCH_IMG_KEY, DEFAULT_TILE_KEY, SLIDE_ID
 from mesoslide.preprocessing._extract_patches import (
     _resolve_slides,
     _resolve_slides_from_ref,
@@ -25,11 +25,12 @@ from mesoslide.preprocessing._extract_patches import (
     extract_patch_images,
 )
 from mesoslide.preprocessing._extract_cluster_maps import extract_cluster_maps
+from mesoslide.preprocessing._extract_cells import extract_patch_cells
+from mesoslide.preprocessing._extract_cell_phenotypes import extract_patch_cell_phenotypes
 from mesoslide.preprocessing._utils import channel_indices_from_markers
 from ._image_grid import _draw_group_border, _draw_corner_label, _group_color_lookup
 from ._cell_overlay import (
     alpha_composite,
-    cells_in_patch,
     rasterize_cell_polygons,
     resolve_categorical_palette,
     translate_to_patch_local,
@@ -37,7 +38,7 @@ from ._cell_overlay import (
 from ._utils import _finish_plot, FLUOROPHORE_COLORS, MARKER_COLOR_DEFAULTS
 
 if TYPE_CHECKING:
-    import anndata as ad
+    from mesoslide._patch_data import PatchData
     from mesoslide.tools.segmenters import TokenClusterizer
 
 
@@ -126,7 +127,7 @@ class GalleryPlan:
     >>> plan.render(output_path='gallery.png', patches_per_row=10, max_rows_per_page=6)
     """
 
-    def __init__(self, patches: "ad.AnnData"):
+    def __init__(self, patches: "PatchData"):
         self.patches = patches
         self.n_patches = len(patches.obs)
         self._blocks: List[_RowBlock] = []
@@ -142,6 +143,7 @@ class GalleryPlan:
         border_extend: float = 0.1,
         border_alpha: float = 1.0,
         cache: bool = False,
+        overwrite: bool = False,
     ) -> "GalleryPlan":
         """Add one row per patch of H&E images."""
         if group_col is not None and group_col not in self.patches.obs.columns:
@@ -150,7 +152,7 @@ class GalleryPlan:
         images = extract_patch_images(
             self.patches, slides,
             tile_key=tile_key, channel_first=False,
-            progress_bar=True, skip_errors=True, cache=cache,
+            progress_bar=True, skip_errors=True, cache=cache, overwrite=overwrite,
         )
         images = list(images) if isinstance(images, np.ndarray) else images
 
@@ -181,6 +183,7 @@ class GalleryPlan:
         saliency_alpha_power: float = 1.0,
         batch_size: int = 16,
         cache: bool = False,
+        overwrite: bool = False,
     ) -> "GalleryPlan":
         """Add one row per clusterizer, each a cluster-map overlay.
 
@@ -202,7 +205,7 @@ class GalleryPlan:
         per_clusterizer_maps = [
             extract_cluster_maps(
                 self.patches, c, model, slides=slides,
-                batch_size=batch_size, progress_bar=True, cache=cache,
+                batch_size=batch_size, progress_bar=True, cache=cache, overwrite=overwrite,
             )
             for c in clusterizers
         ]
@@ -263,14 +266,44 @@ class GalleryPlan:
         merge_colors: Optional[Dict[str, Union[str, Tuple[float, float, float]]]] = None,
         single_channel_color: Union[str, Tuple[float, float, float]] = 'white',
         cache: bool = True,
+        overwrite: bool = False,
     ) -> "GalleryPlan":
         """Add an optional multicolor-merge row followed by one row per CyCIF channel."""
         channel_idx = channel_indices_from_markers(channels, marker_table, marker_col)
-        cycif_arr = extract_patch_images(
+
+        # Always extract/cache the *full* native channel set under the fixed
+        # CYCIF_PATCH_IMG_KEY, then select the requested markers ourselves --
+        # rather than requesting just `channel_idx` from extract_patch_images.
+        # extract_patch_images's cache is keyed only by CYCIF_PATCH_IMG_KEY,
+        # with no record of which channel subset populated it; requesting a
+        # subset directly means a later call for a *different* marker subset
+        # on the same patches (e.g. a different clusterizer's marker panel)
+        # would hit that stale cache and silently misindex it, since a cache
+        # hit is returned as-is regardless of which channels were asked for
+        # this time. Always requesting the full set makes every cache hit
+        # self-consistent: `full_cycif_arr`'s channel axis is always the
+        # slide's native channel order, so indexing by `channel_idx` (an
+        # absolute channel index) is always correct.
+        full_cycif_arr = extract_patch_images(
             self.patches, slides,
-            channels=channel_idx, tile_key=tile_key,
-            progress_bar=True, skip_errors=True, cache=cache,
+            channels=None, tile_key=tile_key, obsm_key=CYCIF_PATCH_IMG_KEY,
+            progress_bar=True, skip_errors=True, cache=cache, overwrite=overwrite,
         )
+        if isinstance(full_cycif_arr, np.ndarray):
+            n_available = full_cycif_arr.shape[1]
+        else:
+            n_available = full_cycif_arr[0].shape[0]
+        if n_available <= max(channel_idx):
+            raise ValueError(
+                f"patches.obsm['{CYCIF_PATCH_IMG_KEY}'] only has {n_available} channels, "
+                f"but marker(s) {channels} resolve to channel index {max(channel_idx)}. "
+                "This usually means a stale cache from before channels were tracked "
+                "correctly -- call with overwrite=True to force a fresh read."
+            )
+        if isinstance(full_cycif_arr, np.ndarray):
+            cycif_arr = full_cycif_arr[:, channel_idx]
+        else:
+            cycif_arr = [arr[channel_idx] for arr in full_cycif_arr]
 
         vmin_map = _resolve_per_channel(vmin, channels)
         vmax_map = _resolve_per_channel(vmax, channels)
@@ -336,6 +369,8 @@ class GalleryPlan:
         blend_with_previous: bool = True,
         background_color: Optional[Union[str, Tuple]] = None,
         label: str = "Cells",
+        cache: bool = True,
+        overwrite: bool = False,
     ) -> "GalleryPlan":
         """Overlay cell polygons (from `wsidata.shapes[cells_key]`) onto each patch.
 
@@ -386,6 +421,17 @@ class GalleryPlan:
             cells-slide: white for an H&E slide, black for CyCIF/mIF (the
             same 3-channel heuristic used in
             `preprocessing._extract_patches`).
+        cache : bool, default=True
+            Forwarded to :func:`mesoslide.pp.extract_patch_cells`/
+            :func:`mesoslide.pp.extract_patch_cell_phenotypes` -- caches the
+            per-patch cell/phenotype extraction in `self.patches.shapes`/
+            `self.patches.tables` for reuse by a later call (e.g.
+            re-rendering with a different `color_by`).
+        overwrite : bool, default=False
+            Forwarded to :func:`mesoslide.pp.extract_patch_cells`/
+            :func:`mesoslide.pp.extract_patch_cell_phenotypes` -- recompute
+            even if already cached, replacing the cached value (when
+            `cache=True`).
 
         Returns
         -------
@@ -448,22 +494,46 @@ class GalleryPlan:
 
             bg_cache: Dict = {}
 
+            # Per-patch cell polygons/phenotypes go through the same cacheable
+            # extraction functions add_cluster_map_rows/add_cycif_rows use for
+            # their own pixel/embedding data, rather than filtering inline --
+            # phenotype extraction is called purely to warm its cache (its
+            # return value is unused here; color_by only ever reads shapes
+            # columns, see the docstring). It's a KeyError, not a hard
+            # requirement, when no phenotype table exists yet -- cell
+            # polygons alone (no add_cell_phenotypes call) are a fully
+            # supported, independent use of this method. Only attempted when
+            # cache=True: extract_patch_cell_phenotypes always internally
+            # re-warms the cell-polygon cache regardless of its own `cache`
+            # argument (mirroring extract_cluster_maps's own unconditional
+            # pixel-cache warm-up) -- calling it at all when the caller asked
+            # for no caching would populate patches.uns anyway and redundantly
+            # recompute cell polygons a second time.
+            cell_gdfs = extract_patch_cells(
+                self.patches, slides, cells_key=cells_key, tile_key=tile_key,
+                progress_bar=True, cache=cache,
+            )
+            if cache:
+                try:
+                    extract_patch_cell_phenotypes(
+                        self.patches, slides, cells_key=cells_key, tile_key=tile_key,
+                        progress_bar=True, cache=cache,
+                    )
+                except KeyError:
+                    pass
+            empty_gdf = cell_gdfs.iloc[:0]
+            by_patch = dict(tuple(cell_gdfs.groupby("patch_idx"))) if len(cell_gdfs) else {}
+
             frames = []
             for i in range(self.n_patches):
                 patch = patch_df.iloc[i]
                 cells_slide_id = None if cells_single else patch[SLIDE_ID]
                 ref_slide_id = None if ref_single else patch[SLIDE_ID]
                 wsi = cells_slide_map[cells_slide_id]
-                if cells_key not in wsi.shapes:
-                    raise KeyError(
-                        f"wsidata.shapes has no '{cells_key}' for slide '{cells_slide_id}'. "
-                        "Run mesoslide.tl.add_cell_polygons first."
-                    )
                 h, w = sizes[ref_slide_id]
                 x, y = int(patch.x), int(patch.y)
 
-                cells_gdf = wsi.shapes[cells_key]
-                local = translate_to_patch_local(cells_in_patch(cells_gdf, x, y, w, h), x, y)
+                local = translate_to_patch_local(by_patch.get(i, empty_gdf), x, y)
 
                 if blend_with_previous:
                     base = _to_float01_rgb(self._blocks[-1].frames[i][-1])

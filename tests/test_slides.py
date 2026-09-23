@@ -128,24 +128,30 @@ class TestSlideSource:
             list(SlideSource(one_slide))
 
     def test_iter_with_ref_matches_iter_for_slide_id_and_table(self, manifest):
-        """Additive: the 3-tuple's first two elements must match __iter__'s pair."""
+        """Additive: the 4-tuple's first two elements must match __iter__'s pair."""
         plain = list(SlideSource(manifest))
         with_ref = list(SlideSource(manifest).iter_with_ref())
-        assert [sid for sid, _ in plain] == [sid for sid, _, _ in with_ref]
-        assert [len(table) for _, table in plain] == [len(table) for _, table, _ in with_ref]
+        assert [sid for sid, _ in plain] == [sid for sid, _, _, _ in with_ref]
+        assert [len(table) for _, table in plain] == [len(table) for _, table, _, _ in with_ref]
+
+    def test_iter_with_ref_yields_tile_shapes(self, manifest):
+        """The tile shapes match the table's own row count for each slide."""
+        for _, table, tiles, _ in SlideSource(manifest).iter_with_ref():
+            assert len(tiles) == len(table)
 
     def test_iter_with_ref_mapping_yields_the_live_objects(self, open_cohort):
-        for slide_id, _, ref in SlideSource(open_cohort).iter_with_ref():
+        for slide_id, _, _, ref in SlideSource(open_cohort).iter_with_ref():
             assert ref is open_cohort[slide_id]
 
     def test_iter_with_ref_manifest_yields_store_paths(self, manifest):
         stores = set(manifest["store"])
-        for _, _, ref in SlideSource(manifest).iter_with_ref():
+        for _, _, _, ref in SlideSource(manifest).iter_with_ref():
             assert isinstance(ref, str) and ref in stores
 
     def test_iter_with_ref_bare_table_yields_none(self, one_table):
-        (_, _, ref), = list(SlideSource(one_table).iter_with_ref())
+        (_, _, tiles, ref), = list(SlideSource(one_table).iter_with_ref())
         assert ref is None
+        assert tiles is None, "a bare table has no owning WSIData to source tile shapes from"
 
 
 class TestAttachSlideRef:

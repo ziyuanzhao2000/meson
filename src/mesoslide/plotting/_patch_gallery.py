@@ -9,9 +9,9 @@ from ._gallery_plan import GalleryPlan
 from ._image_grid import _plot_image_grid
 
 if TYPE_CHECKING:
-    import anndata as ad
     from wsidata import WSIData
     from mesoslide.tools.segmenters import TokenClusterizer
+    from mesoslide._patch_data import PatchData
 
 
 @deprecated_kwargs(
@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     show_image_names=rename('show_slide_ids'),
 )
 def plot_patch_gallery_with_saliency(
-    patches: "ad.AnnData",
+    patches: "PatchData",
     clusterizers: List["TokenClusterizer"],
     model=None,
     slides=None,
@@ -36,10 +36,11 @@ def plot_patch_gallery_with_saliency(
     return_buffer: bool = False,
     progress_bar: bool = True,
     saliency_alpha_power: float = 1.0,
-    batch_size: int = 16,
+    batch_size: int = 128,
     cache: bool = False,
+    overwrite: bool = False,
     blend_with_previous: bool = True,
-    cmap='viridis_r',
+    cmap='viridis',
 ) -> Optional[Union[Tuple[plt.Figure, np.ndarray], List[io.BytesIO]]]:
     """
     Create a gallery of patches with H&E images and token cluster saliency maps.
@@ -61,7 +62,7 @@ def plot_patch_gallery_with_saliency(
 
     Parameters
     ----------
-    patches : AnnData
+    patches : PatchData
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
         Required .obs columns: 'x', 'y' (plus 'slide_id' across slides).
         Optional column: 'score' (used when show_scores=True).
@@ -103,12 +104,16 @@ def plot_patch_gallery_with_saliency(
     progress_bar : bool, default=True
     saliency_alpha_power : float, default=1.0
         Exponent applied to normalised cluster values for alpha contrast.
-    batch_size : int, default=16
+    batch_size : int, default=128
         Batch size passed to clusterizers during inference.
-    cache : bool, default=False
+    cache : bool, default=True
         Forwarded to :func:`extract_patch_images`/:func:`extract_cluster_maps`:
         persist freshly extracted pixels/cluster maps into `patches.obsm` so
         later calls on the same `patches` skip re-reading from slides.
+    overwrite : bool, default=False
+        Forwarded to :func:`extract_patch_images`/:func:`extract_cluster_maps`:
+        recompute even if already cached, replacing the cached value (when
+        `cache=True`).
 
     Returns
     -------
@@ -140,12 +145,12 @@ def plot_patch_gallery_with_saliency(
     """
     plan = (
         GalleryPlan(patches)
-        .add_he_row(slides, tile_key=tile_key, cache=cache)
+        .add_he_row(slides, tile_key=tile_key, cache=cache, overwrite=overwrite)
         .add_cluster_map_rows(
             clusterizers, model, slides,
-            tile_key=tile_key, 
+            tile_key=tile_key,
             saliency_alpha_power=saliency_alpha_power,
-            batch_size=batch_size, cache=cache,
+            batch_size=batch_size, cache=cache, overwrite=overwrite,
             blend_with_previous=blend_with_previous,
             cmap=cmap
         )
@@ -170,7 +175,7 @@ def plot_patch_gallery_with_saliency(
     show_image_names=rename('show_slide_ids'),
 )
 def plot_patch_gallery(
-    patches: "ad.AnnData",
+    patches: "PatchData",
     slides=None,
     output_path: Optional[str] = None,
     tile_key: str = DEFAULT_TILE_KEY,
@@ -189,6 +194,7 @@ def plot_patch_gallery(
     return_buffer: bool = False,
     progress_bar: bool = True,
     cache: bool = False,
+    overwrite: bool = False,
 ) -> Optional[Union[Tuple[plt.Figure, np.ndarray], List[io.BytesIO]]]:
     """
     Create a grid gallery of tissue patches.
@@ -199,7 +205,7 @@ def plot_patch_gallery(
 
     Parameters
     ----------
-    patches : AnnData
+    patches : PatchData
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
         Required .obs columns: 'x', 'y' (plus 'slide_id' across slides).
     slides : WSIData, list of WSIData, or {slide_id: WSIData}, optional
@@ -231,6 +237,9 @@ def plot_patch_gallery(
         Forwarded to :func:`extract_patch_images`: cache the extracted array
         in ``patches.obsm['he_patch_img']`` so later calls on the same `patches`
         skip re-reading from slides.
+    overwrite : bool, default=False
+        Forwarded to :func:`extract_patch_images`: recompute even if already
+        cached, replacing the cached value (when `cache=True`).
 
     Returns
     -------
@@ -259,6 +268,7 @@ def plot_patch_gallery(
     plan = GalleryPlan(patches).add_he_row(
         slides, tile_key=tile_key, group_col=group_col, cmap=cmap,
         border_extend=border_extend, border_alpha=border_alpha, cache=cache,
+        overwrite=overwrite,
     )
 
     return plan.render(

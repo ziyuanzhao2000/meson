@@ -10,7 +10,9 @@ The per-slide loop is deliberate. Selection reads one score vector per slide
 40-slide cohort costs megabytes. Concatenating the cohort first would copy
 ~8 GB of embeddings that selection never looks at -- see :mod:`mesoslide._slides`.
 
-All functions return AnnData with consistent metadata columns:
+All functions return a `PatchData` (a `spatialdata.SpatialData`-backed patch
+table; `.obs`/`.obsm`/`.X`/`.var` proxy the same way a bare AnnData already
+did) with consistent metadata columns:
     slide_id       : str   -- which slide the patch came from
     _feature_name  : str   -- feature used for ranking (where applicable)
     _feature_rank  : int   -- rank within its feature (1 = best)
@@ -26,9 +28,13 @@ from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 import anndata as ad
+import geopandas as gpd
+import shapely.geometry
+from spatialdata.models import ShapesModel, TableModel
 
 from mesoslide._utils import get_patch_scores
 from mesoslide._slides import SLIDE_ID, SLIDE_REF, DEFAULT_TILE_KEY, SlideSource
+from mesoslide._patch_data import PatchData, TILES_KEY, TILES_TABLE_KEY
 from mesoslide._deprecated import (
     SLIDES_HINT,
     check_not_spatialdata,
@@ -49,7 +55,60 @@ def _source(slides, tile_key: str, func_name: str = "select") -> SlideSource:
 
 
 def _empty_result(source: SlideSource) -> ad.AnnData:
+    """A deliberate exception to "every selector returns PatchData":
+    `spatialdata.models.ShapesModel` unconditionally disallows an empty
+    shapes element (`len(geometry) == 0` always raises, even via
+    `.parse()`), so a genuinely empty selection (nothing matched) cannot be
+    represented as a `PatchData` at all. Returns a bare, empty AnnData
+    instead -- unaffected by the PatchData migration, since `source.first()`
+    already returns a plain per-slide table, not a wrapped object.
+    """
     return source.first()[[]].copy()
+
+
+def _parse_patch_data(table: "ad.AnnData", tiles: "gpd.GeoDataFrame") -> "PatchData":
+    """Wrap one row-aligned `(table, tiles)` pair into a validated `PatchData`.
+
+    Adds/refreshes a `_patch_uid` obs column mirroring `table.obs_names`, and
+    uses it as SpatialData's `instance_key` (rather than the original
+    `tile_id` column) -- `tile_id` restarts at 0 per slide, so after a
+    multi-slide `ad.concat(..., index_unique="-")` re-suffixes `obs_names`,
+    the raw `tile_id` values would silently stop matching the shapes
+    element's (also re-indexed) index. `_patch_uid` is *defined* to equal
+    `obs_names`, so it stays correct through any such re-suffixing.
+    """
+    table = table.copy()
+    table.obs["_patch_uid"] = table.obs_names.to_numpy()
+    table.obs["library_id"] = pd.Categorical([TILES_KEY] * len(table))
+    tiles = tiles.copy()
+    tiles.index = table.obs_names
+    return PatchData(
+        shapes={TILES_KEY: ShapesModel.parse(tiles)},
+        tables={TILES_TABLE_KEY: TableModel.parse(
+            table, region=TILES_KEY, region_key="library_id", instance_key="_patch_uid",
+            overwrite_metadata=True,
+        )},
+    )
+
+
+def _concat_patch_data(parts: list) -> "PatchData":
+    """Merge single-slide `PatchData` objects into one.
+
+    Tile ids restart at 0 on every slide, so the table half is concatenated
+    exactly as a bare AnnData always was (`ad.concat(..., index_unique="-")`
+    to avoid duplicate obs_names); the shapes half is `pd.concat`-ed in the
+    same part order (so row position stays aligned) and then re-parsed via
+    `_parse_patch_data`, which derives a fresh `_patch_uid`/index from the
+    table's own post-concat `obs_names` rather than trying to independently
+    replicate `ad.concat`'s own suffixing scheme for `tile_id`.
+    """
+    tables = [p.tables[TILES_TABLE_KEY] for p in parts]
+    merged_table = ad.concat(tables, join="outer", merge="same", index_unique="-")
+    merged_tiles = gpd.GeoDataFrame(
+        pd.concat([p.shapes[TILES_KEY] for p in parts], ignore_index=True),
+        geometry="geometry",
+    )
+    return _parse_patch_data(merged_table, merged_tiles)
 
 
 def _build_output(
@@ -58,7 +117,7 @@ def _build_output(
     selected_scores: Optional[dict] = None,
     extra_obs: Optional[dict] = None,
     sort_by_score: bool = False,
-) -> ad.AnnData:
+):
     """Materialise the selected rows, one slide at a time.
 
     This is the piece that keeps memory bounded: it copies only selected rows,
@@ -71,51 +130,65 @@ def _build_output(
     selected_scores  : {slide_id: [score, ...]}  optional
     extra_obs        : {col_name: {slide_id: [value, ...]}}  optional
     sort_by_score    : sort output by _feature_score descending
+
+    Returns
+    -------
+    PatchData, or a bare empty AnnData if nothing matched (see `_empty_result`).
     """
     subsets = []
-    for slide_id, table, ref in source.iter_with_ref():
+    for slide_id, table, tiles, ref in source.iter_with_ref():
         idx_list = selected_indices.get(slide_id, [])
         if len(idx_list) == 0:
             continue
-        subset = table[np.asarray(idx_list, dtype=np.int64)].copy()
+        idx_arr = np.asarray(idx_list, dtype=np.int64)
+        subset_table = table[idx_arr].copy()
+        if tiles is not None:
+            subset_tiles = tiles.iloc[idx_arr]
+        else:
+            # A bare AnnData input (no owning WSIData/shapes) carries no
+            # known tile size -- fall back to a 1x1-pixel placeholder box at
+            # each row's own (x, y), just enough to satisfy PatchData's
+            # structural requirement for a shapes element. Not meaningful
+            # geometry; pass the owning WSIData/a PatchData instead of a
+            # bare table when real tile shapes are needed.
+            x = subset_table.obs["x"].to_numpy()
+            y = subset_table.obs["y"].to_numpy()
+            subset_tiles = gpd.GeoDataFrame(
+                {"tile_id": np.arange(len(subset_table))},
+                geometry=[shapely.geometry.box(xi, yi, xi + 1, yi + 1) for xi, yi in zip(x, y)],
+            )
 
-        # A bare AnnData carries slide_id None: it may already have a slide_id
-        # column (e.g. from concat_slides) that we must not overwrite.
+        # A PatchData input carries slide_id None: it may already have a
+        # slide_id column that we must not overwrite.
         if slide_id is not None:
-            subset.obs[SLIDE_ID] = slide_id
+            subset_table.obs[SLIDE_ID] = slide_id
 
         # Object-dtype Series, not a bare scalar assignment -- a bare `ref`
         # (a WSIData) would otherwise get interpreted as array-like by pandas.
-        subset.obs[SLIDE_REF] = pd.Series(
-            [ref] * len(subset), index=subset.obs.index, dtype=object,
+        subset_table.obs[SLIDE_REF] = pd.Series(
+            [ref] * len(subset_table), index=subset_table.obs.index, dtype=object,
         )
 
         if selected_scores is not None:
-            subset.obs["_feature_score"] = np.asarray(
+            subset_table.obs["_feature_score"] = np.asarray(
                 selected_scores[slide_id], dtype=np.float32
             )
 
         if extra_obs is not None:
             for col, slide_vals in extra_obs.items():
                 if slide_id in slide_vals:
-                    subset.obs[col] = slide_vals[slide_id]
+                    subset_table.obs[col] = slide_vals[slide_id]
 
-        subsets.append(subset)
+        subsets.append(_parse_patch_data(subset_table, subset_tiles))
 
     if not subsets:
         return _empty_result(source)
 
-    # Tile ids restart at 0 on every slide, so concatenating across slides would
-    # otherwise produce duplicate obs_names.
-    out = (
-        subsets[0]
-        if len(subsets) == 1
-        else ad.concat(subsets, join="outer", merge="same", index_unique="-")
-    )
+    out = subsets[0] if len(subsets) == 1 else _concat_patch_data(subsets)
 
     if sort_by_score and "_feature_score" in out.obs.columns:
         order = np.argsort(-out.obs["_feature_score"].to_numpy())
-        out = out[order].copy()
+        out = out[order]
 
     return out
 
@@ -178,7 +251,7 @@ def select_random_patches(
     *,
     tile_key: str = DEFAULT_TILE_KEY,
     random_state: Optional[int] = None,
-) -> ad.AnnData:
+) -> "PatchData":
     """
     Randomly sample n patches across one or more slides.
 
@@ -238,7 +311,7 @@ def select_patches_for_binary_feature(
     tile_key: str = DEFAULT_TILE_KEY,
     random_state: Optional[int] = None,
     deprecated_rng: bool = False,
-) -> ad.AnnData:
+) -> "PatchData":
     """
     Sample patches where a binary feature (stored in .obs) equals 1.
 
@@ -321,7 +394,7 @@ def select_top_patches(
     min_score: Optional[float] = None,
     take_every: Optional[int] = None,
     top_fraction: Optional[float] = None,
-) -> ad.AnnData:
+) -> "PatchData":
     """
     Select top-scoring patches for a feature across slides, globally sorted
     by score descending.
@@ -421,7 +494,7 @@ def select_negative_patches(
     *,
     tile_key: str = DEFAULT_TILE_KEY,
     take_every: Optional[int] = None,
-) -> ad.AnnData:
+) -> "PatchData":
     """
     Select patches with zero score for a feature.
 
@@ -481,7 +554,7 @@ def select_exemplar_patches(
     *,
     tile_key: str = DEFAULT_TILE_KEY,
     min_score: float = 0.0,
-) -> ad.AnnData:
+) -> "PatchData":
     """
     For each feature, select the top-n_exemplars highest-scoring patches.
 
@@ -536,4 +609,4 @@ def select_exemplar_patches(
     if not per_feature:
         return _empty_result(source)
 
-    return ad.concat(per_feature, join="outer", merge="same")
+    return per_feature[0] if len(per_feature) == 1 else _concat_patch_data(per_feature)
