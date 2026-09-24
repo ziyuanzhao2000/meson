@@ -11,7 +11,7 @@ from sklearn.cluster import KMeans
 import mesoslide as ms
 from mesoslide.preprocessing import extract_cluster_maps
 from mesoslide.tools._model_stage import ImageModelStage
-from mesoslide.tools.segmenters import TokenClusterer, fit_token_clusterer
+from mesoslide.tools.segmenters import TokenClusterer, fit_token_clusterer, predict_token_labels
 from tests.conftest import StubViTEncoder, TILE_PX
 
 
@@ -60,8 +60,19 @@ def test_n_clusters_and_random_state_are_honored():
     assert c.n_clusters_ == 5
     assert c.kmeans_.random_state == 7
     assert c.cluster_order_.tolist() == list(range(5))  # no y -> identity order
-    ref = KMeans(n_clusters=5, random_state=7).fit(X.reshape(-1, X.shape[-1]))
+    assert c.kmeans_.n_init == 10   # default: best of 10 initializations
+    ref = KMeans(n_clusters=5, random_state=7, n_init=10).fit(X.reshape(-1, X.shape[-1]))
     np.testing.assert_allclose(c.cluster_centers_, ref.cluster_centers_)
+    assert TokenClusterer(n_init=1).fit(X).kmeans_.n_init == 1
+
+
+def test_clusterer_pickled_without_n_init_loads_with_sklearn_default():
+    c = TokenClusterer().fit(_tokens(n_tokens=9))
+    state = c.__getstate__()
+    del state["n_init"]
+    old = TokenClusterer.__new__(TokenClusterer)
+    old.__setstate__(state)
+    assert old.get_params()["n_init"] == "auto"
 
 
 def test_predict_matches_kmeans_predict():
@@ -70,6 +81,21 @@ def test_predict_matches_kmeans_predict():
     c = TokenClusterer(n_clusters=4).fit(X, y)
     raw = c.kmeans_.predict(X.reshape(-1, X.shape[-1])).reshape(10, 4, 4)
     assert np.array_equal(c.predict(X), c.cluster_order_[raw])
+
+
+def test_predict_token_labels_matches_per_clusterer_predict():
+    X = _tokens(n_patches=10, n_tokens=16, seed=12)
+    y = np.random.default_rng(4).random(10)
+    clusterers = [
+        TokenClusterer(n_clusters=k, random_state=s).fit(_tokens(n_patches=10, n_tokens=16, seed=s), y)
+        for k, s in [(3, 0), (4, 1), (2, 2)]
+    ]
+    expected = np.stack([c.predict(X) for c in clusterers])
+    out = predict_token_labels(clusterers, X, chunk_size=37)  # uneven chunks
+    assert out.shape == (3, 10, 4, 4) and out.dtype == np.uint8
+    assert np.array_equal(out, expected)
+    with pytest.raises(ValueError, match="share grid_size_"):
+        predict_token_labels([clusterers[0], TokenClusterer().fit(_tokens(n_tokens=9))], X)
 
 
 def test_refit_keeps_centroids_and_only_reorders():
@@ -98,22 +124,6 @@ def test_clone_needs_no_model():
     fresh = clone(c)
     assert fresh.get_params() == c.get_params()
     assert not hasattr(fresh, "cluster_centers_")
-
-
-def test_save_load_roundtrip(tmp_path):
-    c = fitted_clusterer(name="saved", n_clusters=3)
-    c.fit_order(_tokens(seed=9), np.arange(8.0))
-    c.feature_name_ = "UNI_SAE_1"
-    path = tmp_path / "c.npz"
-    c.save(path)
-    loaded = TokenClusterer.load(path)
-    assert type(loaded) is TokenClusterer
-    assert loaded.get_params() == c.get_params()
-    for attr in ("grid_size_", "patch_size_", "model_name_", "feature_name_", "n_clusters_"):
-        assert getattr(loaded, attr) == getattr(c, attr)
-    np.testing.assert_array_equal(loaded.fit_diagnostics_, c.fit_diagnostics_)
-    X = _tokens(seed=10)
-    assert np.array_equal(loaded.transform(X), c.transform(X))
 
 
 def test_legacy_pickle_is_migrated():

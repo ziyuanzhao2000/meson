@@ -312,7 +312,7 @@ class LocalityConstrainedCoding(TransformerMixin, BaseEstimator):
 
     def transform(self, X, column_keep_indices=None, device=None, *,
                   obsm_key=None, tile_key="tiles", sparse_key_added=None,
-                  overwrite=False, save=True):
+                  overwrite=False, save=True, progress_bar=False):
         if obsm_key is not None:
             from mesoslide.tools._feature_extraction import _write_sparse_features
 
@@ -325,7 +325,8 @@ class LocalityConstrainedCoding(TransformerMixin, BaseEstimator):
                     v.startswith(f"{sparse_key}_") for v in table.var_names
                 ):
                     matrix = self.transform(
-                        table.obsm[obsm_key], column_keep_indices, device
+                        table.obsm[obsm_key], column_keep_indices, device,
+                        progress_bar=progress_bar,
                     )
                     table = _write_sparse_features(table, sparse_key, matrix)
                     slide.tables[table_key] = table
@@ -343,7 +344,7 @@ class LocalityConstrainedCoding(TransformerMixin, BaseEstimator):
         dataloader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False)
         rows, cols, vals = [], [], []
         with torch.no_grad():
-            for idx, batch in enumerate(dataloader):
+            for idx, batch in enumerate(tqdm(dataloader, disable=not progress_bar)):
                 code = self.model_.encode(
                     batch[0].to(device),
                     n_neighbors=self.n_neighbors,

@@ -190,15 +190,16 @@ class ImageModelStage:
             "output_kind": self.output_kind,
         }
 
-    def __call__(self, image_batch: torch.Tensor) -> torch.Tensor:
+    def _prepare(self, image_batch: torch.Tensor) -> torch.Tensor:
+        """Move the model to `device` once, then apply the model's own transform."""
         if not self._moved:
             self.model.to(self.device)
             self.model.model.eval()
             self._moved = True
-
         transform = self.model.get_transform()
-        batch = transform(image_batch) if transform is not None else image_batch
+        return transform(image_batch) if transform is not None else image_batch
 
+    def _encode(self, batch: torch.Tensor) -> torch.Tensor:
         amp_on = bool(self.amp) and "cuda" in str(self.device)
         with torch.inference_mode():
             with torch.autocast(device_type=self.device, dtype=torch.float16, enabled=amp_on):
@@ -206,6 +207,56 @@ class ImageModelStage:
                 if self.dense:
                     return self.model.encode_image_dense(batch).patch_tokens
                 return self.model.encode_image(batch)
+
+    def __call__(self, image_batch: torch.Tensor) -> torch.Tensor:
+        return self._encode(self._prepare(image_batch))
+
+    def encode_kept_tokens(self, image_batch: torch.Tensor, keep_idx) -> torch.Tensor:
+        """Encode images using only a subset of their patch tokens.
+
+        Same output as `__call__`, but each image is run on the prefix tokens
+        (CLS/registers) plus the patch tokens in its row of `keep_idx`; all
+        other patch tokens are removed right after the position embedding. The
+        model's own pooling applies to what remains (e.g. CLS for UNI, CLS
+        concatenated with the mean of the kept patch tokens for Virchow).
+        Requires a timm VisionTransformer backbone (`self.model.model`).
+
+        Parameters
+        ----------
+        image_batch : torch.Tensor of shape (B, C, H, W)
+        keep_idx : array-like of int, shape (B, n_keep)
+            Row-major patch-token indices to keep, per image.
+        """
+        from timm.models import VisionTransformer
+
+        vit = getattr(self.model, "model", None)
+        if not isinstance(vit, VisionTransformer):
+            raise NotImplementedError(
+                f"encode_kept_tokens requires a timm VisionTransformer backbone; "
+                f"'{self.model_name}' does not have one."
+            )
+        batch = self._prepare(image_batch)
+        keep_idx = torch.as_tensor(np.asarray(keep_idx), dtype=torch.long, device=self.device)
+        original = vit.patch_drop
+        vit.patch_drop = _KeepPatchTokens(keep_idx, vit.num_prefix_tokens)
+        try:
+            return self._encode(batch)
+        finally:
+            vit.patch_drop = original
+
+
+class _KeepPatchTokens(torch.nn.Module):
+    """Stand-in for timm's `patch_drop`: keeps prefix tokens and selected patch tokens."""
+
+    def __init__(self, keep_idx: torch.Tensor, num_prefix_tokens: int):
+        super().__init__()
+        self.keep_idx = keep_idx
+        self.num_prefix_tokens = num_prefix_tokens
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        prefix, patches = x[:, :self.num_prefix_tokens], x[:, self.num_prefix_tokens:]
+        idx = self.keep_idx.unsqueeze(-1).expand(-1, -1, x.shape[-1])
+        return torch.cat([prefix, patches.gather(1, idx)], dim=1)
 
 
 class CallableStage:

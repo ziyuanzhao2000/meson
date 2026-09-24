@@ -1,9 +1,10 @@
-import json
+import zlib
 from pathlib import Path
 from typing import Optional, Union
 
 import cv2
 import numpy as np
+import pandas as pd
 import torch
 from scipy.stats import spearmanr
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -19,9 +20,8 @@ from mesoslide.tools._model_stage import (
     _resolve_model,
 )
 
-_ORDERINGS = ("correlation", "diff_abundance")
+_ORDERINGS = ("correlation", "diff_abundance", "ablation")
 _INTERPOLATIONS = {"nearest": cv2.INTER_NEAREST_EXACT, "bilinear": cv2.INTER_LINEAR}
-_SAVE_FORMAT_VERSION = 1
 
 
 def _as_tokens(X) -> np.ndarray:
@@ -53,13 +53,17 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
     ----------
     n_clusters : int, default=3
         Number of KMeans clusters (at most 256; maps are uint8).
-    ordering : {'correlation', 'diff_abundance'}, default='correlation'
-        How `fit_order` ranks clusters against the feature score `y`:
+    ordering : {'correlation', 'diff_abundance', 'ablation'}, default='correlation'
+        How clusters are ranked against the feature score:
 
         - 'correlation': Spearman correlation, across patches, between each
-          cluster's per-patch token count and the patch's score.
+          cluster's per-patch token count and the patch's score (`fit_order`).
         - 'diff_abundance': pooled token frequency in positive (`y > 0`)
-          minus negative (`y <= 0`) patches.
+          minus negative (`y <= 0`) patches (`fit_order`).
+        - 'ablation': how much the score drops when the cluster's tokens are
+          removed from the vision model's input, beyond removing the same
+          number of random tokens (`fit_order_ablation`; needs pixels, a
+          vision model and a scorer, see :func:`fit_token_clusterer`).
     interpolation : {'nearest', 'bilinear'}, default='nearest'
         Upsampling method used by `transform`.
     name : str, optional
@@ -69,11 +73,16 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
         `feature_name_` when unset (see `display_name`).
     random_state : int, default=0
         Seed for KMeans.
+    n_init : int or 'auto', default=10
+        Number of KMeans initializations; the run with the lowest inertia is
+        kept. More than one makes the result robust to small changes in the
+        input tokens, which can otherwise land a single run in a worse local
+        optimum.
 
     Attributes
     ----------
     kmeans_ : sklearn.cluster.KMeans
-        The fitted KMeans. Not restored by `load` (only its centroids are).
+        The fitted KMeans. Persist the whole clusterer with joblib.
     cluster_centers_ : ndarray of shape (n_clusters, D)
     cluster_order_ : ndarray of shape (n_clusters,)
         Maps raw KMeans id -> canonical id.
@@ -91,7 +100,16 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
     feature_name_ : str or None
         Feature the cluster order was fit against, set by `fit_token_clusterer`.
     order_scores_ : ndarray of shape (n_clusters,)
-        Per-cluster Spearman rho or differential abundance, in canonical order.
+        Per-cluster Spearman rho, differential abundance or mean excess drop
+        (ablation), in canonical order.
+    ablation_summary_ : pd.DataFrame
+        Only under ordering='ablation': :func:`mesoslide.tools.summarize_token_ablation`
+        output indexed by canonical cluster id.
+    ablation_results_ : pd.DataFrame
+        Only under ordering='ablation': per-patch :func:`mesoslide.tools.token_ablation`
+        output, with a `cluster` column holding canonical cluster ids.
+    ablation_seed_ : int
+        Only under ordering='ablation': seed of the random-token controls.
     fit_diagnostics_ : ndarray of shape (n_patches, n_clusters + 1)
         Only under ordering='correlation'. Columns 0..n_clusters-1 are each
         patch's token count per canonical cluster; the last column is `y`.
@@ -105,8 +123,7 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
     --------
     >>> from mesoslide.tools.segmenters import TokenClusterer, fit_token_clusterer
     >>> clusterer = fit_token_clusterer(slides, "UNI_SAE_12345", model="uni")
-    >>> clusterer.save("UNI_SAE_12345.npz")
-    >>> clusterer = TokenClusterer.load("UNI_SAE_12345.npz")
+    >>> joblib.dump(clusterer, "UNI_SAE_12345.pkl")
     >>> from mesoslide.preprocessing import extract_cluster_maps
     >>> masks = extract_cluster_maps(patches, clusterer)   # (N, H, W) uint8
     """
@@ -119,12 +136,19 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
         interpolation: str = "nearest",
         name: Optional[str] = None,
         random_state: Optional[int] = 0,
+        n_init: Union[int, str] = 10,
     ):
         self.n_clusters = n_clusters
         self.ordering = ordering
         self.interpolation = interpolation
         self.name = name
         self.random_state = random_state
+        self.n_init = n_init
+
+    def __setstate__(self, state):
+        # Clusterers pickled before `n_init` existed were fit with sklearn's default.
+        state.setdefault("n_init", "auto")
+        super().__setstate__(state)
 
     @property
     def display_name(self) -> str:
@@ -184,7 +208,8 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
         self._set_grid_size(n_tokens)
 
         if not hasattr(self, "cluster_centers_"):
-            self.kmeans_ = KMeans(n_clusters=self.n_clusters, random_state=self.random_state)
+            self.kmeans_ = KMeans(n_clusters=self.n_clusters, random_state=self.random_state,
+                                  n_init=self.n_init)
             self.kmeans_.fit(X.reshape(-1, dim))
             self.cluster_centers_ = self.kmeans_.cluster_centers_
             self.n_clusters_ = self.cluster_centers_.shape[0]
@@ -198,6 +223,11 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
         if y_order is None:
             self.cluster_order_ = np.arange(self.n_clusters_)
             return self
+        if self.ordering == "ablation":
+            raise ValueError(
+                "ordering='ablation' needs patch pixels and a vision model: call "
+                "fit(X) then fit_order_ablation(...), or use fit_token_clusterer."
+            )
         return self.fit_order(X_order, y_order)
 
     def fit_order(self, X, y) -> "TokenClusterer":
@@ -217,6 +247,8 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
         """
         check_is_fitted(self, "cluster_centers_")
         self._validate_params()
+        if self.ordering == "ablation":
+            raise ValueError("ordering='ablation' is fit with fit_order_ablation, not fit_order.")
         X = _as_tokens(X)
         y = np.asarray(y, dtype=np.float64).ravel()
         if len(y) != len(X):
@@ -234,10 +266,7 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
             neg_freq = counts[~positive].sum(0) / (counts[~positive].sum() + 1e-12)
             scores = pos_freq - neg_freq
 
-        order = np.argsort(np.argsort(scores))
-        self.cluster_order_ = order
-        self.order_scores_ = np.empty(k)
-        self.order_scores_[order] = scores
+        order = self._set_order(scores)
 
         if self.ordering == "correlation":
             diagnostics = np.zeros((len(X), k + 1), dtype=np.float64)
@@ -245,6 +274,68 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
             diagnostics[:, -1] = y
             self.fit_diagnostics_ = diagnostics
         elif hasattr(self, "fit_diagnostics_"):
+            del self.fit_diagnostics_
+        return self
+
+    def _set_order(self, scores) -> np.ndarray:
+        """Rank raw cluster ids by ascending `scores`; sets `cluster_order_` and `order_scores_`."""
+        order = np.argsort(np.argsort(scores))
+        self.cluster_order_ = order
+        self.order_scores_ = np.empty(len(scores))
+        self.order_scores_[order] = scores
+        return order
+
+    def fit_order_ablation(self, images, X, model, scorer, *, full_scores=None, device=None,
+                           batch_size: int = 64, seed: int = 0,
+                           progress_bar: bool = True) -> "TokenClusterer":
+        """
+        Recompute `cluster_order_` by token ablation, keeping centroids.
+
+        Each cluster is ranked by its mean `excess_drop` over patches (see
+        :func:`mesoslide.tools.token_ablation`): how much more the feature
+        score falls when the cluster's tokens are removed than when the same
+        number of random tokens are removed. Clusters absent from every patch
+        rank lowest.
+
+        Parameters
+        ----------
+        images : array-like of shape (n_patches, C, H, W)
+            Patch pixels (uint8).
+        X : array-like or torch.Tensor of shape (n_patches, n_tokens, D)
+            Token embeddings of the same patches, used to assign clusters.
+        model : str or lazyslide_models.ImageModel
+            The vision model `X` came from.
+        scorer : callable
+            Patch embeddings (n, D) -> feature scores (n,), e.g.
+            :func:`mesoslide.tools.feature_scorer`.
+        full_scores : array-like of shape (n_patches,), optional
+            Stored patch scores, reported in `ablation_summary_`.
+        device, batch_size, seed, progress_bar
+            Forwarded to :func:`mesoslide.tools.token_ablation`.
+
+        Returns
+        -------
+        self
+        """
+        from mesoslide.tools._token_ablation import summarize_token_ablation, token_ablation
+
+        check_is_fitted(self, "cluster_centers_")
+        self._validate_params()
+        results = token_ablation(
+            images, self._raw_labels(_as_tokens(X)), model, scorer, full_scores=full_scores,
+            device=device, batch_size=batch_size, seed=seed, progress_bar=progress_bar,
+        )
+        self.ablation_seed_ = seed
+        summary = summarize_token_ablation(results)
+        scores = np.full(self.n_clusters_, -np.inf)
+        scores[summary.index.to_numpy()] = summary["excess_drop"].to_numpy()
+        order = self._set_order(scores)
+
+        results.insert(1, "cluster", order[results.pop("label").to_numpy()])
+        summary.index = pd.Index(order[summary.index.to_numpy()], name="cluster")
+        self.ablation_results_ = results
+        self.ablation_summary_ = summary.sort_index()
+        if hasattr(self, "fit_diagnostics_"):
             del self.fit_diagnostics_
         return self
 
@@ -315,54 +406,6 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
             output_kind="dense", cache=cache, overwrite=overwrite, device="cpu",
         )
 
-    def save(self, path: Union[str, Path]) -> None:
-        """
-        Save parameters and fitted state to an `.npz` file.
-
-        Stores only arrays and JSON metadata (no pickled classes), so files
-        stay loadable across package refactors. `kmeans_` is not stored;
-        `predict`/`transform` only need `cluster_centers_`.
-        """
-        check_is_fitted(self, "cluster_order_")
-        from importlib.metadata import version
-
-        patch_size = getattr(self, "patch_size_", None)
-        meta = {
-            "format_version": _SAVE_FORMAT_VERSION,
-            "mesoslide_version": version("mesoslide"),
-            "params": self.get_params(),
-            "grid_size_": [int(v) for v in self.grid_size_],
-            "patch_size_": None if patch_size is None else [int(v) for v in patch_size],
-            "model_name_": getattr(self, "model_name_", None),
-            "feature_name_": getattr(self, "feature_name_", None),
-        }
-        arrays = {
-            "cluster_centers_": self.cluster_centers_,
-            "cluster_order_": self.cluster_order_,
-        }
-        for key in ("order_scores_", "fit_diagnostics_"):
-            if hasattr(self, key):
-                arrays[key] = getattr(self, key)
-        np.savez(path, _meta=np.array(json.dumps(meta)), **arrays)
-
-    @classmethod
-    def load(cls, path: Union[str, Path]) -> "TokenClusterer":
-        """Load a clusterer written by `save`."""
-        with np.load(path, allow_pickle=False) as data:
-            meta = json.loads(str(data["_meta"]))
-            if meta["format_version"] > _SAVE_FORMAT_VERSION:
-                raise ValueError(f"{path} uses save format {meta['format_version']}, newer than supported")
-            self = cls(**meta["params"])
-            for key in data.files:
-                if key != "_meta":
-                    setattr(self, key, data[key])
-        self.n_clusters_, self.n_features_in_ = self.cluster_centers_.shape
-        self.grid_size_ = tuple(meta["grid_size_"])
-        self.patch_size_ = None if meta["patch_size_"] is None else tuple(meta["patch_size_"])
-        self.model_name_ = meta["model_name_"]
-        self.feature_name_ = meta["feature_name_"]
-        return self
-
     def plot_cluster_feature_correlation(self, ax=None):
         """
         Scatter each cluster's per-patch token count against the patch's
@@ -415,6 +458,115 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
         fig.tight_layout()
         return fig, ax
 
+    def plot_cluster_ablation(self, axes=None):
+        """
+        Per-patch token-ablation diagnostics.
+
+        Left: each patch's score with the cluster's tokens removed vs. with the
+        same number of random tokens removed; points below the diagonal mean
+        the cluster matters beyond its size. Right: excess drop vs. the
+        fraction of the patch the cluster covers, to check that the ranking is
+        not driven by cluster size. Requires a fit with ordering='ablation'
+        (uses `ablation_results_` and `ablation_summary_`).
+
+        Parameters
+        ----------
+        axes : sequence of two matplotlib.axes.Axes, optional
+            Axes to draw into. A new figure is created if omitted.
+
+        Returns
+        -------
+        (fig, axes)
+        """
+        if not hasattr(self, "ablation_results_"):
+            raise RuntimeError(
+                "plot_cluster_ablation() requires a fit with ordering='ablation'; "
+                "no ablation_results_ found."
+            )
+
+        import matplotlib.pyplot as plt
+
+        results, summary = self.ablation_results_, self.ablation_summary_
+        if axes is None:
+            fig, axes = plt.subplots(1, 2, figsize=(11, 4.5))
+        else:
+            fig = axes[0].figure
+
+        colors = plt.cm.viridis(np.linspace(0, 1, self.n_clusters_))
+        top = results[["score_label_removed", "score_random_removed"]].to_numpy().max() * 1.05
+        for k in summary.index:
+            rows, stats = results[results["cluster"] == k], summary.loc[k]
+            axes[0].scatter(
+                rows["score_random_removed"], rows["score_label_removed"], s=16, alpha=0.7,
+                color=colors[k],
+                label=(f"Cluster {k}: excess drop {stats['excess_drop']:.3f} "
+                       f"(p={stats['wilcoxon_p']:.2g}, n={int(stats['n_patches'])})"),
+            )
+            axes[1].scatter(rows["token_fraction"], rows["excess_drop"], s=16, alpha=0.7, color=colors[k])
+
+        axes[0].plot([0, top], [0, top], "k--", lw=1)
+        axes[0].set(xlabel="Score, random tokens removed", ylabel="Score, cluster tokens removed",
+                    xlim=(0, top), ylim=(0, top))
+        axes[0].legend(loc="upper left", fontsize=8, frameon=False)
+        axes[1].axhline(0, color="k", lw=1, ls="--")
+        axes[1].set(xlabel="Fraction of patch tokens in cluster", ylabel="Excess drop")
+        title = self.display_name or "Token ablation"
+        fig.suptitle(f"{title}: token ablation (below diagonal = cluster matters beyond its size)")
+        fig.tight_layout()
+        return fig, axes
+
+
+def predict_token_labels(clusterers, X, *, chunk_size: int = 50_000) -> np.ndarray:
+    """
+    Canonical token labels from several clusterers on the same token embeddings.
+
+    Same result as ``np.stack([c.predict(X) for c in clusterers])``, but the
+    distances to every clusterer's centroids come from one matrix product per
+    chunk of tokens instead of one pass per clusterer.
+
+    Parameters
+    ----------
+    clusterers : sequence of TokenClusterer
+        Fitted clusterers sharing the same `grid_size_` and embedding dimension.
+    X : array-like or torch.Tensor of shape (B, N_tokens, D)
+    chunk_size : int, default=50000
+        Tokens per matrix product, bounding memory at chunk_size x total centroids.
+
+    Returns
+    -------
+    labels : ndarray of shape (n_clusterers, B, grid_h, grid_w), dtype uint8
+    """
+    clusterers = list(clusterers)
+    if not clusterers:
+        raise ValueError("At least one clusterer must be provided.")
+    for c in clusterers:
+        check_is_fitted(c, "cluster_order_")
+    gh, gw = clusterers[0].grid_size_
+    dim = clusterers[0].n_features_in_
+    for c in clusterers[1:]:
+        if tuple(c.grid_size_) != (gh, gw) or c.n_features_in_ != dim:
+            raise ValueError("All clusterers must share grid_size_ and n_features_in_.")
+
+    X = _as_tokens(X)
+    B, N, D = X.shape
+    if N != gh * gw or D != dim:
+        raise ValueError(f"Expected tokens of shape (B, {gh * gw}, {dim}), got {X.shape}")
+    flat = X.reshape(-1, D)
+
+    centers = np.concatenate([c.cluster_centers_ for c in clusterers])  # (total centroids, D)
+    centers_sq = (centers ** 2).sum(1)
+    bounds = np.cumsum([0] + [c.n_clusters_ for c in clusterers])
+
+    labels = np.empty((len(clusterers), len(flat)), dtype=np.uint8)
+    for start in range(0, len(flat), chunk_size):
+        block = flat[start:start + chunk_size]
+        # Squared Euclidean distance up to the per-token ||x||^2 term, which doesn't change argmin.
+        dist = centers_sq[None, :] - 2.0 * block @ centers.T
+        for k, c in enumerate(clusterers):
+            raw = dist[:, bounds[k]:bounds[k + 1]].argmin(1)
+            labels[k, start:start + len(block)] = c.cluster_order_[raw]
+    return labels.reshape(len(clusterers), B, gh, gw)
+
 
 def _embed_patches(patches, model, *, image_slides, tile_key, batch_size, device, progress_bar):
     """Dense token embeddings and feature scores (None if absent) for selected patches."""
@@ -448,6 +600,7 @@ def fit_token_clusterer(
     batch_size: int = 128,
     device: Optional[str] = None,
     progress_bar: bool = True,
+    scorer=None,
     token: Optional[str] = None,
     model_path: "str | Path | None" = None,
 ) -> TokenClusterer:
@@ -456,16 +609,20 @@ def fit_token_clusterer(
 
     Patch sampling depends on `clusterer.ordering`:
 
-    - 'correlation': KMeans is fit on `n_patches` patches from the top
-      `top_fraction` of scores (skipped if `clusterer` is already fitted).
-      The cluster order is then computed on a second, separate set of
-      `n_patches` patches spread over the full score range, so the order
-      reflects how each cluster's abundance tracks the score across its
-      whole distribution. `n_patches` sizes both sets by design;
-      `n_negative` is unused.
+    - 'correlation': `n_patches` patches from the top `top_fraction` of
+      scores. KMeans is fit on them (skipped if `clusterer` is already
+      fitted), and clusters are ranked by the Spearman correlation, across
+      the same patches, between each cluster's token count and the patch
+      score. `n_negative` is unused.
     - 'diff_abundance': `n_patches` top-scoring patches (`top_fraction`) and
       `n_negative` zero-score patches. KMeans is fit on the top-scoring
       patches (if not already fitted); the order compares the two sets.
+    - 'ablation': `n_patches` top-scoring patches (`top_fraction`). KMeans is
+      fit on them (if not already fitted), then clusters are ranked by token
+      ablation on the same patches (see `TokenClusterer.fit_order_ablation`),
+      which needs `scorer`. Costs 2 vision-model passes per cluster present
+      in each patch. The random-token controls are seeded from `feature_name`
+      (CRC32), so refits of the same feature are reproducible.
 
     Parameters
     ----------
@@ -500,6 +657,12 @@ def fit_token_clusterer(
     device : str, optional
         Torch device for the vision model. Defaults to "cuda" if available.
     progress_bar : bool, default=True
+    scorer : sparse-coding model or callable, optional
+        Required for ordering='ablation'. Either a fitted sparse-coding model
+        (`SparseAutoencoder`, `LocalityConstrainedCoding`, or anything with the
+        same `transform`), scored on `feature_name`'s column with `device`
+        (see :func:`mesoslide.tools.feature_scorer`); or any callable mapping
+        patch embeddings (n, D) to scores (n,), used as is.
     token, model_path
         Forwarded to model resolution.
 
@@ -544,11 +707,31 @@ def fit_token_clusterer(
             min_score=min_score, top_fraction=fraction, take_every=take_every,
         )
 
-    X_fit = None
-    if clusterer.ordering == "correlation":
+    if clusterer.ordering == "ablation":
+        from mesoslide.preprocessing._extract_patches import extract_patch_images
+        from mesoslide.tools.sparse_coding._feature_scorer import feature_scorer
+
+        if scorer is None:
+            raise ValueError("ordering='ablation' requires scorer (a sparse-coding model or a callable).")
+        score_fn = feature_scorer(scorer, feature_name, device=device) if hasattr(scorer, "transform") else scorer
+        top = select_top(top_fraction)
+        X, y = embed(top)
+        # Pixels were cached in `top` by the embedding step above.
+        images = extract_patch_images(top, image_slides, tile_key=tile_key, channel_first=True,
+                                      progress_bar=False)
         if not fitted:
-            X_fit, _ = embed(select_top(top_fraction))
-        X_order, y_order = embed(select_top(1.0))
+            clusterer.fit(X)
+        clusterer.fit_order_ablation(
+            images, X, resolved, score_fn, full_scores=y, device=device,
+            batch_size=batch_size, seed=zlib.crc32(feature_name.encode()),
+            progress_bar=progress_bar,
+        )
+        clusterer.feature_name_ = feature_name
+        return clusterer
+
+    if clusterer.ordering == "correlation":
+        X_fit, y = embed(select_top(top_fraction))
+        X_order, y_order = X_fit, y
     else:
         X_pos, _ = embed(select_top(top_fraction))
         X_neg, _ = embed(select_negative_patches(

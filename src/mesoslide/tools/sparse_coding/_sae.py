@@ -42,10 +42,12 @@ class SimpleAutoencoder(nn.Module):
             self.encoder.bias.data.zero_()
             self.decoder.bias.data.zero_()
 
+    def encode(self, x):
+        """Sparse codes: encoder with ReLU activation."""
+        return F.relu(self.encoder(x))
+
     def forward(self, x):
-        # Encoder with ReLU activation
-        h = F.relu(self.encoder(x))
-        # Decoder
+        h = self.encode(x)
         x_hat = self.decoder(h)
         return x_hat, h
 
@@ -250,7 +252,7 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
 
     def transform(self, X, column_keep_indices=None, device=None, *,
                   obsm_key=None, tile_key="tiles", sparse_key_added=None,
-                  overwrite=False, save=True):
+                  overwrite=False, save=True, progress_bar=True):
         if obsm_key is not None:
             from mesoslide.tools._feature_extraction import _write_sparse_features
 
@@ -263,7 +265,8 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
                     v.startswith(f"{sparse_key}_") for v in table.var_names
                 ):
                     matrix = self.transform(
-                        table.obsm[obsm_key], column_keep_indices, device
+                        table.obsm[obsm_key], column_keep_indices, device,
+                        progress_bar=progress_bar,
                     )
                     table = _write_sparse_features(table, sparse_key, matrix)
                     slide.tables[table_key] = table
@@ -283,8 +286,8 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
         cols = []
         vals = []
         with torch.no_grad():
-            for idx, batch in enumerate(tqdm(dataloader)):
-                _, X_ = self.model_.forward(batch[0].to(device))
+            for idx, batch in enumerate(tqdm(dataloader, disable=not progress_bar)):
+                X_ = self.model_.encode(batch[0].to(device))
                 if column_keep_indices is not None:
                     X_ = X_[:, column_keep_indices]
                 arr = X_.to_sparse().cpu()

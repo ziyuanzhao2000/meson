@@ -5,7 +5,7 @@ migrates their attributes to the `TokenClusterer` layout.
 """
 
 import warnings
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 
@@ -23,6 +23,7 @@ class TokenClusterizer(TokenClusterer):
         interpolation: str = "nearest",
         name: Optional[str] = None,
         random_state: Optional[int] = 0,
+        n_init: Union[int, str] = 10,
     ):
         warnings.warn(
             "TokenClusterizer is deprecated, use TokenClusterer. Its constructor no "
@@ -32,7 +33,7 @@ class TokenClusterizer(TokenClusterer):
         )
         super().__init__(
             n_clusters, ordering=ordering, interpolation=interpolation,
-            name=name, random_state=random_state,
+            name=name, random_state=random_state, n_init=n_init,
         )
 
     def __setstate__(self, state):
@@ -54,6 +55,7 @@ def _migrate_legacy_state(old: dict) -> dict:
         "interpolation": old.get("interpolation", "nearest"),
         "name": feature_name,
         "random_state": kmeans.random_state,
+        "n_init": kmeans.n_init,
         "kmeans_": kmeans,
         "cluster_centers_": centers,
         "cluster_order_": np.arange(len(centers)) if order is None else np.asarray(order),
