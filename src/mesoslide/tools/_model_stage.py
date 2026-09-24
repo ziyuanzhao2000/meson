@@ -25,8 +25,9 @@ def iter_array_batches(x, batch_size: int):
     """Yield `x` in row-chunks of `batch_size`, as torch tensors.
 
     `x` may be a numpy array, a torch tensor, or anything indexable with
-    integer slices. Uint8 input is scaled to float [0, 1]; other dtypes are
-    passed through as float.
+    integer slices. Uint8 input (pixels) is kept as uint8, matching the
+    slide-level tile loader, so the model's transform sees the same input on
+    both paths; other dtypes are cast to float.
     """
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
@@ -35,11 +36,7 @@ def iter_array_batches(x, batch_size: int):
         batch = x[i:i + batch_size]
         if isinstance(batch, np.ndarray):
             batch = torch.from_numpy(batch)
-        if batch.dtype == torch.uint8:
-            batch = batch.float() / 255.0
-        else:
-            batch = batch.float()
-        yield batch
+        yield batch if batch.dtype == torch.uint8 else batch.float()
 
 
 def to_numpy(x) -> np.ndarray:
