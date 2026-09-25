@@ -52,8 +52,7 @@ from ._model_stage import (
     CallableStage,
     ImageModelStage,
     ModelStage,
-    _require_dense_capable,
-    _resolve_model,
+    _model_name,
     iter_array_batches,
     to_numpy,
 )
@@ -319,7 +318,7 @@ def run_model_stages(
     table_key: Optional[str] = None,
     overwrite: Optional[bool] = None,
     device: Union[str, Sequence[str], None] = None,
-    batch_size: int = 32,
+    batch_size: Optional[int] = 32,
     num_workers: int = 0,
     block: bool = True,
     cache_size: int = 4,
@@ -357,7 +356,11 @@ def run_model_stages(
         None (default) respects each stage's own `.device`; a single string
         overrides every stage for this call; a sequence the same length as
         `stages` overrides positionally.
-    batch_size, num_workers, block, cache_size
+    batch_size : int or None, default=32
+        Rows per batch, shared by every stage in the chain. None passes the
+        whole `obsm` array as one batch; only allowed when the chain starts
+        from `input_key` rather than images.
+    num_workers, block, cache_size
         Forwarded to the pixel-reading path (whole-slide `ezslide.tile_images`
         / `DataLoader`, or `extract_patch_images` at patch-table scale).
     save : bool, default=True
@@ -432,6 +435,12 @@ def run_model_stages(
     first = active[0]
 
     if first.input_kind == "image":
+        if batch_size is None:
+            raise ValueError(
+                f"batch_size=None is only supported when the chain starts "
+                f"from an obsm array (input_key); stage '{first.name}' reads "
+                f"images."
+            )
         if is_patch_table:
             from mesoslide.preprocessing._extract_patches import extract_patch_images
             pixels = extract_patch_images(
@@ -459,7 +468,8 @@ def run_model_stages(
             batches = (b["image"].permute(0, 3, 1, 2).contiguous() for b in loader)
     else:
         start_key = input_key if run_from == 0 else stages[run_from - 1].name
-        batches = iter_array_batches(table.obsm[start_key], batch_size)
+        start = table.obsm[start_key]
+        batches = iter_array_batches(start, batch_size or max(len(start), 1))
 
     accum: Dict[int, list] = {j: [] for j in range(len(active)) if active[j].cache}
 
@@ -512,6 +522,7 @@ def feature_extraction(
     sparse: bool = False,
     sparse_transform: "Callable[[np.ndarray], sp.spmatrix] | None" = None,
     sparse_key_added: str | None = None,
+    sparse_batch_size: int | None = None,
     batch_size: int = 32,
     num_workers: int = 0,  # >0 uses multiprocessing_context="spawn" below, since
                             # tensorstore-backed readers aren't fork-safe
@@ -586,9 +597,14 @@ def feature_extraction(
         Required when `sparse=True` and the result still needs computing.
         Maps the entire table's pooled embedding, `(N_tiles, D)`, to a sparse
         feature matrix, `(N_tiles, M)` (e.g. a sparse autoencoder's
-        `.transform()`). Called once on the fully materialized pooled array,
-        not per batch -- unlike `reducer`, it never sees a live
-        `torch.Tensor`, and owns any device placement it needs internally.
+        `.transform()`). Runs after the pooled embedding is cached, reading it
+        back from `obsm` in chunks of `sparse_batch_size` rows. Unlike
+        `reducer`, it receives a numpy array, and owns any device placement
+        it needs internally.
+    sparse_batch_size
+        Rows per `sparse_transform` call, independent of `batch_size`. None
+        (default) calls it once on the full pooled array, leaving batching to
+        the transform itself (e.g. `SparseAutoencoder.batch_size`).
     sparse_key_added
         Prefix for the new `var` names, written as `f"{sparse_key_added}_{i}"`
         for `i` in `range(M)`. Defaults to `f"{key_added}_sparse"`, mirroring
@@ -629,11 +645,9 @@ def feature_extraction(
             "(N_tiles, M); pass sparse_transform=..."
         )
 
-    resolved_model, model_name = _resolve_model(model, model_path=model_path, token=token)
-    key_added = key_added or model_name
+    key_added = key_added or (model if isinstance(model, str) else _model_name(model))
 
     if dense:
-        _require_dense_capable(resolved_model, model_name)
         dense_key = dense_key_added or f"{key_added}_dense"
 
         def _validated_reducer(patch_tokens):
@@ -641,8 +655,9 @@ def feature_extraction(
 
         stages: List[ModelStage] = [
             ImageModelStage(
-                resolved_model, dense=True, name=dense_key, cache=False,
+                model, dense=True, name=dense_key, cache=False,
                 overwrite=overwrite, device=device, amp=amp,
+                model_path=model_path, token=token,
             ),
             CallableStage(
                 _validated_reducer, name=dense_key, input_kind="dense",
@@ -652,31 +667,36 @@ def feature_extraction(
     else:
         stages = [
             ImageModelStage(
-                resolved_model, dense=False, name=key_added, cache=True,
+                model, dense=False, name=key_added, cache=True,
                 overwrite=overwrite, device=device,
+                model_path=model_path, token=token,
             ),
         ]
-        if sparse:
-            def _validated_sparse_transform(pooled):
-                if torch.is_tensor(pooled):
-                    pooled = pooled.detach().cpu().numpy()
-                matrix = sparse_transform(pooled)
-                _validate_sparse_shape(matrix, pooled.shape[0])
-                return matrix
 
-            sparse_key = sparse_key_added or f"{key_added}_sparse"
-            stages.append(
-                CallableStage(
-                    _validated_sparse_transform, name=sparse_key,
-                    input_kind="pooled", output_kind="sparse", cache=True,
-                    overwrite=overwrite,
-                )
-            )
-
-    return run_model_stages(
+    slide = run_model_stages(
         slide, stages, tile_key=tile_key, table_key=table_key,
         batch_size=batch_size, num_workers=num_workers, block=block,
         cache_size=cache_size, save=save, progress_bar=progress_bar,
+    )
+    if not sparse:
+        return slide
+
+    # Separate call so sparse coding reads the cached pooled embedding with
+    # its own batch size instead of running inside the image batch loop.
+    def _validated_sparse_transform(pooled):
+        pooled = to_numpy(pooled)
+        matrix = sparse_transform(pooled)
+        _validate_sparse_shape(matrix, pooled.shape[0])
+        return matrix
+
+    sparse_stage = CallableStage(
+        _validated_sparse_transform, name=sparse_key_added or f"{key_added}_sparse",
+        input_kind="pooled", output_kind="sparse", cache=True, overwrite=overwrite,
+    )
+    return run_model_stages(
+        slide, [sparse_stage], input_key=key_added, tile_key=tile_key,
+        table_key=table_key, batch_size=sparse_batch_size, save=save,
+        progress_bar=progress_bar,
     )
 
 

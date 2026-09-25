@@ -91,22 +91,96 @@ def _canonical_registry_name(name: str) -> str:
     return name
 
 
+# lazyslide-models registry key -> (model class name, dense-capable), for
+# the image encoders. Hard-coded so a model name can be checked and named
+# without importing lazyslide_models (~5 s) or loading weights. The class
+# name is what an instance's `.name` reports, so provenance matches caches
+# written with a loaded model. Dense-capable means instances satisfy
+# `lazyslide_models.base.ViTModelProtocol` (grid_size, patch_size,
+# encode_image_dense).
+_IMAGE_MODELS: dict = {
+    "biomedclip": ("BiomedCLIP", False),
+    "conch": ("CONCH", False),
+    "medsiglip": ("MedSigLip", False),
+    "musk": ("MUSK", False),
+    "omiclip": ("OmiCLIP", False),
+    "plip": ("PLIP", False),
+    "quiltnet-b32": ("QuiltNetB32", False),
+    "quiltnet-b16": ("QuiltNetB16", False),
+    "quiltnet-b16-pmb": ("QuiltNetB16PMB", False),
+    "titan": ("Titan", False),
+    "conch_v1.5": ("Titan", False),
+    "chief": ("CHIEF", False),
+    "ctranspath": ("CTransPath", False),
+    "genbio-pathfm": ("GenBioPathFM", True),
+    "gigapath": ("GigaPath", True),
+    "gpfm": ("GPFM", False),
+    "h-optimus-0": ("HOptimus0", True),
+    "h-optimus-1": ("HOptimus1", True),
+    "h0-mini": ("H0Mini", True),
+    "hibou-b": ("HibouB", False),
+    "hibou-l": ("HibouL", False),
+    "lunit-bt": ("LunitResNet50BT", False),
+    "lunit-mocov2": ("LunitResNet50MoCoV2", False),
+    "lunit-swav": ("LunitResNet50SwAV", False),
+    "lunit-dino-s8": ("LunitDINOPatch8", True),
+    "lunit-dino-s16": ("LunitDINOPatch16", True),
+    "midnight": ("Midnight", True),
+    "open-midnight": ("OpenMidnight", True),
+    "path_orchestra": ("PathOrchestra", False),
+    "phikon": ("Phikon", False),
+    "phikonv2": ("PhikonV2", False),
+    "uni": ("UNI", True),
+    "uni2": ("UNI2", True),
+    "virchow": ("Virchow", True),
+    "virchow2": ("Virchow2", True),
+}
+
+
+def _registry_entry(name: str):
+    """`(class name, dense-capable)` for a model name, or None if unregistered."""
+    entry = _IMAGE_MODELS.get(name)
+    if entry is not None:
+        return entry
+    from lazyslide_models import MODEL_REGISTRY
+    from lazyslide_models.base import TimmViTModel
+
+    cls = MODEL_REGISTRY.get(name)
+    if cls is None:
+        return None
+    dense = isinstance(cls, type) and issubclass(cls, TimmViTModel)
+    return cls.__name__, dense
+
+
+def _model_name(model) -> str:
+    """The `.name` a model name/instance has once loaded, without loading it."""
+    if isinstance(model, str):
+        entry = _registry_entry(model)
+        # Unregistered names load as a generic TimmModel.
+        return entry[0] if entry is not None else "TimmModel"
+    return getattr(model, "name", type(model).__name__)
+
+
 def _require_dense_capable(model, model_name: str) -> None:
     """Check the model can produce per-token embeddings (encode_image_dense).
 
-    Raises rather than letting AttributeError surface later mid-loop, and
-    names which registered models already work: everything built on
-    `lazyslide_models.base.TimmViTModel` (uni, uni2, virchow, virchow2, ...).
+    A model name is looked up in `_IMAGE_MODELS` (no loading); an
+    instance is checked against `lazyslide_models.base.ViTModelProtocol`.
+    Raises rather than letting AttributeError surface later mid-loop.
     """
-    from lazyslide_models.base import ViTModelProtocol
+    if isinstance(model, str):
+        entry = _registry_entry(model)
+        capable = entry is not None and entry[1]
+    else:
+        from lazyslide_models.base import ViTModelProtocol
+        capable = isinstance(model, ViTModelProtocol)
 
-    if not isinstance(model, ViTModelProtocol):
+    if not capable:
         raise NotImplementedError(
             f"This requires a ViT-style model exposing grid_size, patch_size "
             f"and encode_image_dense (see lazyslide_models.base."
-            f"ViTModelProtocol); '{model_name}' does not. Registered models "
-            f"built on lazyslide_models.base.TimmViTModel (uni, uni2, "
-            f"virchow, virchow2, ...) support this."
+            f"ViTModelProtocol); '{model_name}' does not. Supported registered "
+            f"models: {', '.join(k for k, (_, d) in _IMAGE_MODELS.items() if d)}."
         )
 
 
@@ -160,14 +234,18 @@ class ImageModelStage:
         model_path: "str | Path | None" = None,
         token: Optional[str] = None,
     ):
-        self.model, self.model_name = (
-            _resolve_model(model, model_path=model_path, token=token)
-            if isinstance(model, str) or not hasattr(model, "encode_image")
-            else (model, getattr(model, "name", type(model).__name__))
+        # Loaded on first access of `self.model`, so a stage skipped by the
+        # cache never loads its weights.
+        self._model_spec = model
+        self._model_path = model_path
+        self._token = token
+        self._model = (
+            model if not isinstance(model, str) and hasattr(model, "encode_image") else None
         )
+        self.model_name = _model_name(model)
         self.dense = dense
         if dense:
-            _require_dense_capable(self.model, self.model_name)
+            _require_dense_capable(model, self.model_name)
         self.output_kind: Literal["pooled", "dense"] = "dense" if dense else "pooled"
         self.name = name or (f"{self.model_name}_dense" if dense else self.model_name)
         self.cache = cache
@@ -175,6 +253,14 @@ class ImageModelStage:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         self.amp = amp
         self._moved = False
+
+    @property
+    def model(self):
+        if self._model is None:
+            self._model, _ = _resolve_model(
+                self._model_spec, model_path=self._model_path, token=self._token,
+            )
+        return self._model
 
     def to(self, device: str) -> "ImageModelStage":
         self.device = device

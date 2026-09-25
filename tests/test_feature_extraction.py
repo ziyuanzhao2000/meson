@@ -354,3 +354,109 @@ class TestSparseMode:
         finally:
             stub_encoder.encode_image = orig_encode
         assert calls == []
+
+    def test_sparse_transform_sees_full_array_by_default(self, one_slide, stub_encoder):
+        seen = []
+
+        def recording_transform(pooled):
+            seen.append(len(pooled))
+            return self._double_transform(pooled)
+
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="sparse_full",
+            sparse=True, sparse_transform=recording_transform,
+            batch_size=16, device="cpu", save=False,
+        )
+        assert seen == [one_slide.tables["tiles_table"].n_obs]
+
+    def test_sparse_batch_size_is_independent_of_batch_size(self, one_slide, stub_encoder):
+        seen = []
+
+        def recording_transform(pooled):
+            seen.append(len(pooled))
+            return self._double_transform(pooled)
+
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="sparse_chunked",
+            sparse=True, sparse_transform=recording_transform, sparse_batch_size=5,
+            batch_size=16, device="cpu", save=False,
+        )
+        table = one_slide.tables["tiles_table"]
+        n = table.n_obs
+        assert len(seen) > 1
+        assert seen == [min(5, n - i) for i in range(0, n, 5)]
+        assert np.allclose(table.X.toarray(), table.obsm["sparse_chunked"][:, :2] * 2)
+
+    def test_llc_transform_matches_direct_call(self, one_slide, stub_encoder):
+        from mesoslide.tools.sparse_coding._llc import LocalityConstrainedCoding
+
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="llc_pooled",
+            batch_size=16, device="cpu", save=False,
+        )
+        pooled = one_slide.tables["tiles_table"].obsm["llc_pooled"]
+        llc = LocalityConstrainedCoding(n_codewords=4, n_neighbors=2, random_state=0)
+        llc.fit(pooled, device="cpu")
+        expected = llc.transform(pooled, device="cpu").toarray()
+
+        ms.tl.feature_extraction(
+            one_slide, stub_encoder, key_added="llc_pooled", sparse=True,
+            sparse_transform=lambda x: llc.transform(x, device="cpu"),
+            batch_size=16, device="cpu", save=False,
+        )
+        assert np.allclose(one_slide.tables["tiles_table"].X.toarray(), expected)
+
+    def test_batch_size_none_rejects_image_input(self, one_slide, stub_encoder):
+        from mesoslide.tools._feature_extraction import run_model_stages
+        from mesoslide.tools._model_stage import ImageModelStage
+
+        stage = ImageModelStage(stub_encoder, name="none_batch", device="cpu")
+        with pytest.raises(ValueError, match="batch_size=None"):
+            run_model_stages(one_slide, [stage], batch_size=None, save=False)
+
+
+class TestLazyModelLoading:
+    """A model given by name is loaded only if its image stage actually runs."""
+
+    @pytest.fixture
+    def no_model_loading(self, monkeypatch):
+        from mesoslide.tools import _model_stage
+
+        def _fail(*args, **kwargs):
+            raise AssertionError("model was loaded")
+
+        monkeypatch.setattr(_model_stage, "_resolve_model", _fail)
+
+    def test_cached_pooled_skips_model_loading(self, one_slide, no_model_loading):
+        table = one_slide.tables["tiles_table"]
+        pooled = np.random.default_rng(0).random((table.n_obs, 4), dtype=np.float32)
+        table.obsm["lazy_uni"] = pooled
+        ms.tl.feature_extraction(
+            one_slide, "uni", key_added="lazy_uni",
+            sparse=True, sparse_transform=lambda x: csr_matrix(x[:, :2]),
+            batch_size=16, device="cpu", save=False,
+        )
+        table = one_slide.tables["tiles_table"]
+        assert np.allclose(table.X.toarray(), pooled[:, :2])
+
+    def test_dense_check_by_name_does_not_load(self, no_model_loading):
+        from mesoslide.tools._model_stage import ImageModelStage
+
+        stage = ImageModelStage("uni", dense=True, device="cpu")
+        assert stage.name == "UNI_dense"
+        with pytest.raises(NotImplementedError, match="Phikon"):
+            ImageModelStage("phikon", dense=True, device="cpu")
+
+    def test_image_model_table_matches_registry(self):
+        from lazyslide_models import MODEL_REGISTRY
+        from lazyslide_models.base import ViTModelProtocol
+
+        from mesoslide.tools._model_stage import _IMAGE_MODELS
+
+        # grid_size/patch_size are instance attributes, so only the method is checkable per class.
+        assert set(ViTModelProtocol.__annotations__) == {"grid_size", "patch_size"}
+        for key, (cls_name, dense) in _IMAGE_MODELS.items():
+            cls = MODEL_REGISTRY[key]
+            assert cls.__name__ == cls_name, key
+            if dense:
+                assert hasattr(cls, "encode_image_dense"), key
