@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 from tqdm.auto import tqdm
 from scipy.sparse import diags, issparse
@@ -110,6 +112,8 @@ class FeatureClusterer:
     ...                       feature_indices=selected_idx)
     >>> clusterer.cluster(threshold=25, criterion='maxclust')
     >>> clusterer.plot_heatmap()
+    >>> clusterer.select_exemplars(slides)
+    >>> clusterer.plot_feature_gallery(groups=[1, 2, 3], return_fig=True)
     >>> cluster_ids = clusterer.get_cluster_assignments()
     """
 
@@ -120,11 +124,16 @@ class FeatureClusterer:
         self.iou_soft_: Optional[np.ndarray] = None   # all-active binary IoU
         self.iou_strict_: Optional[np.ndarray] = None  # threshold-filtered binary IoU
         self.feature_indices_: Optional[np.ndarray] = None
+        self.feature_prefix_: Optional[str] = None
+        self.tile_key_: str = "tiles"
 
         # set after cluster()
         self.reordered_idx_: Optional[List[int]] = None
         self.reordered_clusters_: Optional[np.ndarray] = None
         self.linkage_matrix_: Optional[np.ndarray] = None
+
+        # set after select_exemplars()
+        self.exemplar_patches_ = None
         self._is_fitted = False
         self._is_clustered = False
 
@@ -169,6 +178,8 @@ class FeatureClusterer:
 
         source = slides if isinstance(slides, SlideSource) else SlideSource(slides, tile_key=tile_key)
         feature_names = [f'{feature_prefix}_{i}' for i in feature_indices]
+        self.feature_prefix_ = feature_prefix
+        self.tile_key_ = tile_key
 
         # Pass 1: max-normalisation constant, as an associative max over slides.
         col_max = None
@@ -322,94 +333,160 @@ class FeatureClusterer:
         )
         return g
 
-    def plot_feature_gallery(
+    def select_exemplars(
         self,
-        exemplar_patches: Optional[dict] = None,
-        slides=None,
-        image_slides=None,
-        feature_prefix: Optional[str] = None,
-        tile_key: str = "tiles",
-        show_labels: bool = True,
-        n_cols: int = 10,
-        patch_size: float = 2.0,
-        border_extend: float = 0.05,
-        cmap: str = 'tab10',
-        fontsize: float = 6,
+        slides,
+        *,
+        n_exemplars: int = 1,
+        min_score: float = 0.0,
+        tile_key: Optional[str] = None,
     ):
         """
-        Plot exemplar patches ordered and coloured by cluster assignment.
+        Select exemplar patches for every clustered feature, in dendrogram order.
 
-        Supply either `exemplar_patches` (pre-loaded dict) **or**
-        (`slides`, `feature_prefix`) to extract top-1 patches on the fly via
-        select_exemplar_patches.
+        The result is cached on `exemplar_patches_` and used by
+        `plot_feature_gallery`. Rows are sorted by (`feature_order`,
+        `_feature_rank`), and annotated with these `.obs` columns:
+
+        - feature_id    : global feature index
+        - group_id      : cluster label (as in `reordered_clusters_`)
+        - feature_order : position in dendrogram order
 
         Parameters
         ----------
-        exemplar_patches : dict, optional
-            Mapping global feature index → array (N, H, W, 3). Index [0] is used.
-        slides : slides_table, AnnData, WSIData, or sequence/mapping, optional
-            Where to select exemplars from. Required when exemplar_patches is None.
-        image_slides : WSIData / list / {slide_id: WSIData}, optional
-            Slides to read pixels from, with image data attached. Defaults to
-            `slides` when that is already a mapping of open slides.
-        feature_prefix : str, optional
-            e.g. 'UNI_SAE'. Required when exemplar_patches is None.
-        tile_key : str, default='tiles'
-        show_labels, n_cols, patch_size, border_extend, cmap
-            Forwarded to plot_feature_gallery.
+        slides : slides_table, AnnData, WSIData, or sequence/mapping of either
+            Where to select exemplars from, as for `select_exemplar_patches`.
+        n_exemplars : int, default=1
+            Top patches kept per feature. The gallery plots rank 1 only.
+        min_score : float, default=0.0
+        tile_key : str, optional
+            Defaults to the `tile_key` passed to `compute_iou`.
 
         Returns
         -------
-        fig, axs
+        PatchData
         """
-        from mesoslide.preprocessing._extract_patches import extract_patch_images
         from mesoslide._patch_selector import select_exemplar_patches
 
         self._check_clustered()
-        ordered_idx = self.feature_indices_[self.reordered_idx_]
+        tile_key = tile_key or self.tile_key_
+        ordered_idx = self.get_reordered_feature_indices()
+        names = [f"{self.feature_prefix_}_{idx}" for idx in ordered_idx]
+        exemplars = select_exemplar_patches(
+            slides, names, n_exemplars=n_exemplars, min_score=min_score,
+            tile_key=tile_key,
+        )
+        if len(exemplars) == 0:
+            raise ValueError("No exemplar patches found for any clustered feature.")
 
-        if exemplar_patches is not None:
-            images = [exemplar_patches[idx][0] for idx in ordered_idx]
-        else:
-            if slides is None or feature_prefix is None:
-                raise ValueError(
-                    "Provide either exemplar_patches, or both of (slides, feature_prefix)."
-                )
-            if image_slides is None:
-                if isinstance(slides, dict):
-                    image_slides = slides
-                else:
-                    raise ValueError(
-                        "Reading exemplar pixels needs slides with image data "
-                        "attached. Pass image_slides=mesoslide.open_slides(manifest)."
-                    )
-            feature_names = [f"{feature_prefix}_{idx}" for idx in ordered_idx]
-            exemplar_adata = select_exemplar_patches(
-                slides,
-                feature_names,
-                n_exemplars=1,
-                tile_key=tile_key,
+        position = {name: i for i, name in enumerate(names)}
+        obs = exemplars.obs
+        feature_order = obs["_feature_name"].astype(str).map(position).to_numpy().astype(int)
+        obs["feature_order"] = feature_order
+        obs["feature_id"] = ordered_idx[feature_order]
+        obs["group_id"] = self.reordered_clusters_[feature_order]
+        exemplars = exemplars[np.lexsort((obs["_feature_rank"].to_numpy(), feature_order))]
+
+        n_missing = len(names) - len(np.unique(feature_order))
+        if n_missing:
+            warnings.warn(
+                f"{n_missing} of {len(names)} features have no exemplar patch "
+                f"(no activation above min_score={min_score}); they are left "
+                f"out of the gallery.",
+                UserWarning,
+                stacklevel=2,
             )
-            images = extract_patch_images(
-                exemplar_adata, image_slides, tile_key=tile_key,
-                channel_first=False, progress_bar=True,
+        self.exemplar_patches_ = exemplars
+        self._exemplar_tile_key = tile_key
+        return exemplars
+
+    def plot_feature_gallery(
+        self,
+        groups: Optional[Sequence[int]] = None,
+        *,
+        image_slides=None,
+        show_labels: bool = True,
+        n_cols: int = 10,
+        patch_size: float = 1.0,
+        border_extend: float = 0.05,
+        border_alpha: float = 1.0,
+        cmap="tab20",
+        fontsize: float = 6,
+        output_path: Optional[str] = None,
+        dpi: int = 300,
+        return_fig: bool = False,
+        return_buffer: bool = False,
+        progress_bar: bool = True,
+    ):
+        """
+        Plot the top exemplar of each feature, in dendrogram order, with
+        borders coloured by cluster.
+
+        Requires `select_exemplars` first. Pixels are read once and cached in
+        `exemplar_patches_.obsm`, so repeated calls (e.g. for different
+        `groups`) do not re-read slides.
+
+        Parameters
+        ----------
+        groups : sequence of int, optional
+            Cluster labels to include. Defaults to all.
+        image_slides : WSIData / list / {slide_id: WSIData}, optional
+            Slides to read pixels from. Not needed when the exemplars'
+            `_slide_ref` column resolves to slides with image data, or when
+            pixels are already cached.
+        show_labels : bool, default=True
+            Label each patch with its feature_id.
+        n_cols, patch_size, border_extend, border_alpha, cmap, fontsize
+            Forwarded to `mesoslide.plotting.plot_feature_gallery`. A
+            `ListedColormap` is indexed by group id.
+        output_path, dpi, return_fig, return_buffer
+            Forwarded to `mesoslide.plotting.plot_feature_gallery`.
+        progress_bar : bool, default=True
+
+        Returns
+        -------
+        (fig, axs), a buffer, or None
+        """
+        from mesoslide.preprocessing._extract_patches import extract_patch_images
+
+        if self.exemplar_patches_ is None:
+            raise RuntimeError("Call select_exemplars() before plot_feature_gallery().")
+        exemplars = self.exemplar_patches_
+        images = extract_patch_images(
+            exemplars, image_slides, tile_key=self._exemplar_tile_key,
+            channel_first=False, cache=True, progress_bar=progress_bar,
+        )
+        if len(images) != len(exemplars):
+            raise ValueError(
+                f"Read {len(images)} images for {len(exemplars)} exemplar patches; "
+                f"some reads failed, so images cannot be matched to features."
             )
 
-        labels = [str(idx) for idx in ordered_idx] if show_labels else None
-        group_ids = self.reordered_clusters_.tolist()
+        obs = exemplars.obs
+        keep = (obs["_feature_rank"] == 1).to_numpy().copy()
+        if groups is not None:
+            keep &= obs["group_id"].isin(list(groups)).to_numpy()
+        rows = np.flatnonzero(keep)
+        if len(rows) == 0:
+            raise ValueError(f"No exemplars belong to groups {list(groups)}.")
 
+        feature_ids = obs["feature_id"].to_numpy()[rows]
         return plot_feature_gallery(
-            images=images,
-            group_ids=group_ids,
-            labels=labels,
+            images=[images[i] for i in rows],
+            group_ids=obs["group_id"].to_numpy()[rows].tolist(),
+            labels=[str(f) for f in feature_ids] if show_labels else None,
             n_cols=n_cols,
             patch_size=patch_size,
             border_extend=border_extend,
-            border_alpha=1.0,
+            border_alpha=border_alpha,
             cmap=cmap,
             fontsize=fontsize,
+            output_path=output_path,
+            dpi=dpi,
+            return_fig=return_fig,
+            return_buffer=return_buffer,
         )
-    
+
     def get_cluster_assignments(self) -> np.ndarray:
         """
         Return cluster labels aligned to the dendrogram order.

@@ -10,8 +10,9 @@ from typing import Optional, List, Union
 def _group_color_lookup(group_ids: List, cmap: str) -> dict:
     """Map each distinct group id in `group_ids` to a color from `cmap`."""
     if isinstance(cmap, ListedColormap):
-        # index directly by group_id — color[3] is always group 3's color
-        return {g: cmap(g) for g in set(group_ids)}
+        # index directly by group_id — color[3] is always group 3's color.
+        # Wrap ids >= N; cmap(N) would return the "over" color (the last entry).
+        return {g: cmap(int(g) % cmap.N) for g in set(group_ids)}
     # string cmap: index directly (with wraparound) rather than normalizing
     # -- colormap(x) for a float x >= 1.0 clips to the colormap's last
     # entry instead of wrapping, so `g / n` collapses every group_id >= n
@@ -98,7 +99,7 @@ def _plot_image_grid(
         figsize=(patch_size * n_cols, patch_size * n_rows),
         layout='constrained'
     )
-    axs = np.array(axs).flatten() if n > 1 else np.array([axs])
+    axs = np.atleast_1d(axs).ravel()
 
     # Build color lookup once
     if group_ids is not None:

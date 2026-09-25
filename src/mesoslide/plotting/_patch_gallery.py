@@ -7,6 +7,7 @@ from mesoslide._slides import DEFAULT_TILE_KEY, HE_PATCH_IMG_KEY, SLIDE_ID, SLID
 from mesoslide._deprecated import SLIDES_HINT, deprecated_kwargs, removed, rename
 from ._gallery_plan import GalleryPlan
 from ._image_grid import _plot_image_grid
+from ._utils import _finish_plot
 
 if TYPE_CHECKING:
     from wsidata import WSIData
@@ -298,12 +299,18 @@ def plot_feature_gallery(
     border_alpha: float = 1.0,
     cmap: str = 'tab10',
     fontsize: float = 6,
-) -> tuple:
+    output_path: Optional[str] = None,
+    dpi: int = 300,
+    return_fig: bool = False,
+    return_buffer: bool = False,
+) -> Optional[Union[Tuple[plt.Figure, np.ndarray], io.BytesIO]]:
     """
     Plot a grid of pre-extracted image arrays with cluster-coloured borders.
 
     Thin wrapper around _plot_image_grid for the SAE feature gallery use-case
-    where images are already in memory.
+    where images are already in memory. See
+    :meth:`mesoslide.tools.FeatureClusterer.plot_feature_gallery` for the
+    version that selects and orders exemplars itself.
 
     Parameters
     ----------
@@ -314,14 +321,22 @@ def plot_feature_gallery(
     patch_size : float
     border_extend : float
     border_alpha : float
-    cmap : str
+    cmap : str or matplotlib.colors.ListedColormap
+        A ListedColormap is indexed by group id (wrapping at its length).
     fontsize : float
+    output_path : str, optional
+        File path to save the figure to.
+    dpi : int, default=300
+    return_fig : bool, default=False
+        Return (fig, axs) instead of closing the figure.
+    return_buffer : bool, default=False
+        Return an in-memory PNG buffer (takes precedence over return_fig).
 
     Returns
     -------
-    fig, axs : tuple
+    (fig, axs), a buffer, or None
     """
-    return _plot_image_grid(
+    fig, axs = _plot_image_grid(
         images=images,
         labels=labels,
         group_ids=group_ids,
@@ -332,3 +347,11 @@ def plot_feature_gallery(
         cmap=cmap,
         fontsize=fontsize,
     )
+    keep_alive = return_fig and not return_buffer
+    result = _finish_plot(fig, axs, show=keep_alive, save=output_path,
+                          return_fig=return_fig, return_buffer=return_buffer, dpi=dpi)
+    if output_path is not None:
+        print(f"Saved: {output_path}")
+    if return_buffer or return_fig:
+        return result
+    return None

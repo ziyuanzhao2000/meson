@@ -266,3 +266,96 @@ class TestCreateFeaturePdf:
         )
         assert buf.getvalue()[:4] == b"%PDF"
         assert not any(tmp_path.iterdir())  # nothing written anywhere
+
+
+class TestFeatureClustererGallery:
+    """FeatureClusterer.select_exemplars + plot_feature_gallery."""
+
+    PREFIX = "UNI_SAE"
+    N_FEATURES = 6
+
+    @pytest.fixture
+    def clusterer(self, open_cohort, stub_encoder):
+        from scipy.sparse import csr_matrix
+
+        from mesoslide.tools.sparse_coding import FeatureClusterer
+
+        def centered_relu(x):
+            x = np.concatenate([x, x[:, ::-1]], axis=1)[:, :self.N_FEATURES]
+            return csr_matrix(np.maximum(x - x.mean(0), 0))
+
+        for wsi in open_cohort.values():
+            ms.tl.feature_extraction(
+                wsi, stub_encoder, key_added="stub_embedding", sparse=True,
+                sparse_transform=centered_relu, sparse_key_added=self.PREFIX,
+                device="cpu", save=False, progress_bar=False,
+            )
+        c = FeatureClusterer(high_activation_threshold=0.3)
+        c.compute_iou(open_cohort, self.PREFIX, np.arange(self.N_FEATURES), progress=False)
+        return c.cluster(threshold=2, criterion="maxclust")
+
+    def test_select_exemplars_requires_cluster(self, open_cohort):
+        from mesoslide.tools.sparse_coding import FeatureClusterer
+
+        with pytest.raises(RuntimeError, match="compute_iou"):
+            FeatureClusterer().select_exemplars(open_cohort)
+
+    def test_select_exemplars_orders_and_annotates(self, clusterer, open_cohort):
+        exemplars = clusterer.select_exemplars(open_cohort)
+        assert clusterer.exemplar_patches_ is exemplars
+        obs = exemplars.obs
+        assert np.array_equal(obs["feature_id"].to_numpy(), clusterer.get_reordered_feature_indices())
+        assert np.array_equal(obs["group_id"].to_numpy(), clusterer.get_cluster_assignments())
+        assert list(obs["feature_order"]) == list(range(self.N_FEATURES))
+
+    def test_select_exemplars_sorts_ranks_within_feature(self, clusterer, open_cohort):
+        obs = clusterer.select_exemplars(open_cohort, n_exemplars=2).obs
+        key = list(zip(obs["feature_order"], obs["_feature_rank"]))
+        assert key == sorted(key)
+
+    def test_plot_requires_select_exemplars(self, clusterer):
+        with pytest.raises(RuntimeError, match="select_exemplars"):
+            clusterer.plot_feature_gallery()
+
+    def test_plot_draws_one_image_per_feature(self, clusterer, open_cohort):
+        clusterer.select_exemplars(open_cohort, n_exemplars=2)
+        fig, axs = clusterer.plot_feature_gallery(return_fig=True, progress_bar=False)
+        assert sum(bool(ax.images) for ax in axs) == self.N_FEATURES
+
+    def test_plot_filters_by_group(self, clusterer, open_cohort):
+        clusterer.select_exemplars(open_cohort)
+        n_group1 = int((clusterer.get_cluster_assignments() == 1).sum())
+        fig, axs = clusterer.plot_feature_gallery(groups=[1], return_fig=True, progress_bar=False)
+        assert sum(bool(ax.images) for ax in axs) == n_group1
+
+    def test_pixels_are_read_once(self, clusterer, open_cohort, monkeypatch):
+        from mesoslide.preprocessing import _extract_patches
+
+        clusterer.select_exemplars(open_cohort)
+        clusterer.plot_feature_gallery(return_fig=True, progress_bar=False)
+        assert "he_patch_img" in clusterer.exemplar_patches_.obsm
+
+        def _fail(*args, **kwargs):
+            raise AssertionError("slides were read again")
+
+        monkeypatch.setattr(_extract_patches, "_resolve_slides", _fail)
+        monkeypatch.setattr(_extract_patches, "_resolve_slides_from_ref", _fail)
+        clusterer.plot_feature_gallery(groups=[2], return_fig=True, progress_bar=False)
+
+    def test_plot_output_modes(self, clusterer, open_cohort, tmp_path):
+        clusterer.select_exemplars(open_cohort)
+        out = tmp_path / "gallery.png"
+        assert clusterer.plot_feature_gallery(output_path=str(out), progress_bar=False) is None
+        assert out.read_bytes()[:4] == b"\x89PNG"
+        buf = clusterer.plot_feature_gallery(return_buffer=True, progress_bar=False)
+        assert buf.getvalue()[:4] == b"\x89PNG"
+
+
+def test_listed_cmap_group_colors_do_not_collide():
+    from matplotlib.colors import ListedColormap
+
+    from mesoslide.plotting._image_grid import _group_color_lookup
+
+    cmap = ListedColormap(["red", "green", "blue"])
+    colors = _group_color_lookup([1, 2, 3], cmap)
+    assert len(set(colors.values())) == 3
