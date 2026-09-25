@@ -411,14 +411,13 @@ def select_top_patches(
         Minimum score threshold; defaults to 0 when n is None or top_fraction is
         set, -inf otherwise.
     take_every : int, optional
-        Stride through the score-sorted list before applying the n cap.
-        None (default) auto-computes a stride that spreads the selection over
-        the whole qualifying range. Mutually exclusive with top_fraction.
+        Keep every `take_every`-th patch of the score-sorted pool, then apply
+        the n cap (take_every=1 gives the top n). None (default) spreads
+        min(n, pool size) picks evenly over the whole pool.
     top_fraction : float, optional
-        Restrict selection to the top fraction (0, 1] of qualifying (score >
-        min_score) patches, e.g. 0.1 keeps only the top 10% by score. take_every
-        is then auto-derived to spread n picks evenly across that restricted
-        pool. Mutually exclusive with take_every; requires n.
+        Restrict the pool to the top fraction (0, 1] of qualifying (score >
+        min_score) patches, e.g. 0.1 keeps only the top 10% by score, before
+        take_every/n are applied. Requires n.
 
     Returns
     -------
@@ -432,11 +431,11 @@ def select_top_patches(
     if n == 0:
         return _empty_result(source)
 
+    if take_every is not None and take_every < 1:
+        raise ValueError("take_every must be >= 1 or None.")
     if top_fraction is not None:
         if not (0 < top_fraction <= 1):
             raise ValueError("top_fraction must be in (0, 1].")
-        if take_every is not None:
-            raise ValueError("top_fraction and take_every are mutually exclusive.")
         if n is None:
             raise ValueError("n is required when top_fraction is set.")
 
@@ -458,15 +457,15 @@ def select_top_patches(
     if top_fraction is not None:
         top_count = max(1, int(np.ceil(top_fraction * len(scores))))
         scores, codes, rows = scores[:top_count], codes[:top_count], rows[:top_count]
-        
-        take_at_indices = np.linspace(0, top_count-1, n).astype(np.int64)
-        scores, codes, rows = scores[take_at_indices], codes[take_at_indices], rows[take_at_indices]
-    if take_every is None and n is not None:
-        take_at_indices = np.linspace(0, len(scores)-1, n).astype(np.int64)
-        scores, codes, rows = scores[take_at_indices], codes[take_at_indices], rows[take_at_indices]
-    
-    if n is not None:
-        scores, codes, rows = scores[:n], codes[:n], rows[:n]
+
+    if take_every is not None:
+        pick = np.arange(0, len(scores), take_every)[:n]
+    elif n is not None:
+        # Spread picks over the pool; at most one pick per row.
+        pick = np.linspace(0, len(scores) - 1, min(n, len(scores))).astype(np.int64)
+    else:
+        pick = np.arange(len(scores))
+    scores, codes, rows = scores[pick], codes[pick], rows[pick]
 
     selected_indices, selected_scores = _group(codes, rows, slide_order, scores)
 

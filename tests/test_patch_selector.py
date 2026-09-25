@@ -120,9 +120,28 @@ class TestSelectTop:
         with pytest.raises(ValueError, match="n is required"):
             ms.select_top_patches(one_table, "score", n=None, top_fraction=0.1)
 
-    def test_top_fraction_rejects_take_every(self, one_table):
-        with pytest.raises(ValueError, match="mutually exclusive"):
-            ms.select_top_patches(one_table, "score", n=5, top_fraction=0.1, take_every=2)
+    def test_top_fraction_and_take_every_compose(self, one_table):
+        dense = ms.select_top_patches(one_table, "score", n=None, min_score=0, take_every=1)
+        sorted_scores = dense.obs["_feature_score"].to_numpy()
+        top_count = max(1, int(np.ceil(0.5 * len(sorted_scores))))
+        out = ms.select_top_patches(one_table, "score", n=3, top_fraction=0.5, take_every=2)
+        assert np.allclose(out.obs["_feature_score"].to_numpy(), sorted_scores[:top_count:2][:3])
+
+    def test_n_and_take_every_stride_then_cap(self, one_table):
+        dense = ms.select_top_patches(one_table, "score", n=None, min_score=-1, take_every=1)
+        sorted_scores = dense.obs["_feature_score"].to_numpy()
+        out = ms.select_top_patches(one_table, "score", n=5, min_score=-1, take_every=2)
+        assert np.allclose(out.obs["_feature_score"].to_numpy(), sorted_scores[[0, 2, 4, 6, 8]])
+
+    def test_n_larger_than_pool_has_no_duplicates(self, one_table):
+        pool = int((one_table.obs["sparse_score"] > 0).sum())
+        out = ms.select_top_patches(one_table, "sparse_score", n=pool + 10, min_score=0)
+        assert out.n_obs == pool
+        assert out.obs_names.is_unique
+
+    def test_take_every_must_be_positive(self, one_table):
+        with pytest.raises(ValueError, match="take_every must be"):
+            ms.select_top_patches(one_table, "score", n=5, take_every=0)
 
     def test_top_fraction_out_of_range_rejected(self, one_table):
         with pytest.raises(ValueError, match="top_fraction must be"):

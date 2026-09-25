@@ -411,7 +411,7 @@ class FeatureClusterer:
         border_extend: float = 0.05,
         border_alpha: float = 1.0,
         cmap="tab20",
-        fontsize: float = 6,
+        fontsize: float = 10,
         output_path: Optional[str] = None,
         dpi: int = 300,
         return_fig: bool = False,
