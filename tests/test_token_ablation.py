@@ -136,7 +136,7 @@ def _fitted_sparse_models(dim=8):
     sae.fit(X, device="cpu")
     llc = LocalityConstrainedCoding(n_codewords=16, batch_size=16, random_state=0).fit(X, device="cpu")
     dl = MiniBatchDictionaryCoding(n_components=16, alpha=0.1, batch_size=16, max_iter=2, n_jobs=1,
-                                   random_state=0).fit(X)
+                                   device="cpu", random_state=0).fit(X)
     return X, {"sae": sae, "llc": llc, "dl": dl}
 
 
