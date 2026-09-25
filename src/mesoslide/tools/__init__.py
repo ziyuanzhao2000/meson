@@ -5,6 +5,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
     'segmenters': ['GenericSegmenter', 'TokenClusterer', 'fit_token_clusterer', 'predict_token_labels',
                    'TokenClusterizer', 'adaptive_sample_wsi'],
     'sparse_coding': ['FeatureSelector', 'FeatureClusterer', 'SparseAutoencoder', 'LocalityConstrainedCoding',
+                       'MiniBatchDictionaryCoding',
                        'FeatureGroupAggregator', 'aggregate_feature_groups', 'feature_scorer'],
     '_feature_extraction': ['feature_extraction', 'embed_patch'],
     '_token_ablation': ['token_ablation', 'summarize_token_ablation'],

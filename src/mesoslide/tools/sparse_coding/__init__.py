@@ -1,6 +1,7 @@
 """Sparse coding of patch embeddings.
 
-Sparse-coding models (`SparseAutoencoder`, `LocalityConstrainedCoding`) share
+Sparse-coding models (`SparseAutoencoder`, `LocalityConstrainedCoding`,
+`MiniBatchDictionaryCoding`) share
 one fitted interface, which `feature_scorer`, `feature_extraction(sparse=True)`
 and `fit_token_clusterer(scorer=model)` rely on:
 
@@ -17,6 +18,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
         '_feature_clusterer': ['FeatureClusterer'],
         '_sae': ['SimpleAutoencoder', 'train_simple_sae', 'SparseAutoencoder'],
         '_llc': ['LLCModel', 'fit_codebook', 'LocalityConstrainedCoding'],
+        '_dictionary_learning': ['MiniBatchDictionaryCoding'],
         '_kmeans_backends': ['TorchMiniBatchKMeans', 'fit_kmeans_backend'],
         '_feature_aggregator': ['FeatureGroupAggregator', 'aggregate_feature_groups'],
         '_feature_scorer': ['feature_scorer', 'feature_column_index'],

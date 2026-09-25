@@ -9,7 +9,11 @@ import mesoslide as ms
 from mesoslide.tools import summarize_token_ablation, token_ablation
 from mesoslide.tools._model_stage import ImageModelStage
 from mesoslide.tools.segmenters import TokenClusterer, fit_token_clusterer
-from mesoslide.tools.sparse_coding import LocalityConstrainedCoding, SparseAutoencoder
+from mesoslide.tools.sparse_coding import (
+    LocalityConstrainedCoding,
+    MiniBatchDictionaryCoding,
+    SparseAutoencoder,
+)
 from mesoslide.tools.sparse_coding._feature_scorer import feature_column_index, feature_scorer
 from tests.conftest import TILE_PX
 
@@ -131,10 +135,12 @@ def _fitted_sparse_models(dim=8):
     sae = SparseAutoencoder(expansion_factor=2, batch_size=16, num_steps=20, random_state=0)
     sae.fit(X, device="cpu")
     llc = LocalityConstrainedCoding(n_codewords=16, batch_size=16, random_state=0).fit(X, device="cpu")
-    return X, {"sae": sae, "llc": llc}
+    dl = MiniBatchDictionaryCoding(n_components=16, alpha=0.1, batch_size=16, max_iter=2, n_jobs=1,
+                                   random_state=0).fit(X)
+    return X, {"sae": sae, "llc": llc, "dl": dl}
 
 
-@pytest.mark.parametrize("kind", ["sae", "llc"])
+@pytest.mark.parametrize("kind", ["sae", "llc", "dl"])
 def test_feature_scorer_matches_transform_column(kind):
     X, models = _fitted_sparse_models()
     model = models[kind]
@@ -204,7 +210,7 @@ def test_fit_token_clusterer_ablation_with_callable_scorer(manifest, open_cohort
                                c.ablation_results_["score_random_removed"])
 
 
-@pytest.mark.parametrize("kind", ["sae", "llc"])
+@pytest.mark.parametrize("kind", ["sae", "llc", "dl"])
 def test_fit_token_clusterer_ablation_routes_sparse_models_through_feature_scorer(manifest, open_cohort, kind):
     """A sparse-coding model is wrapped with feature_scorer on feature_name, so a
     feature name without a column index is rejected before any work is done."""

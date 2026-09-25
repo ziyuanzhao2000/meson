@@ -26,7 +26,7 @@ def feature_scorer(model, feature_name: str, *, device: Optional[str] = None) ->
 
     Parameters
     ----------
-    model : SparseAutoencoder, LocalityConstrainedCoding, or compatible
+    model : SparseAutoencoder, LocalityConstrainedCoding, MiniBatchDictionaryCoding, or compatible
         Fitted model with `transform(X, column_keep_indices=None, device=None, *,
         progress_bar=...)` returning an (n, M) matrix.
     feature_name : str

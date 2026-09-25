@@ -659,8 +659,8 @@ def fit_token_clusterer(
     progress_bar : bool, default=True
     scorer : sparse-coding model or callable, optional
         Required for ordering='ablation'. Either a fitted sparse-coding model
-        (`SparseAutoencoder`, `LocalityConstrainedCoding`, or anything with the
-        same `transform`), scored on `feature_name`'s column with `device`
+        (`SparseAutoencoder`, `LocalityConstrainedCoding`, `MiniBatchDictionaryCoding`,
+        or anything with the same `transform`), scored on `feature_name`'s column with `device`
         (see :func:`mesoslide.tools.feature_scorer`); or any callable mapping
         patch embeddings (n, D) to scores (n,), used as is.
     token, model_path
