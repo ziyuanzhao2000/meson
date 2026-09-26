@@ -4,7 +4,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
     submod_attrs={
     'segmenters': ['GenericSegmenter', 'TokenClusterer', 'fit_token_clusterer', 'predict_token_labels',
                    'TokenClusterizer', 'adaptive_sample_wsi'],
-    'sparse_coding': ['FeatureSelector', 'FeatureClusterer', 'SparseAutoencoder', 'LocalityConstrainedCoding',
+    'sparse_coding': ['FeatureSelector', 'FeatureClusterer', 'SparseAutoencoder', 'MatchingPursuitSAE', 'LocalityConstrainedCoding',
                        'MiniBatchDictionaryCoding',
                        'FeatureGroupAggregator', 'aggregate_feature_groups', 'feature_scorer'],
     '_feature_extraction': ['feature_extraction', 'embed_patch'],

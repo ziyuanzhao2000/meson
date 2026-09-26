@@ -63,7 +63,11 @@ def train_simple_sae(model, embeddings, device='cpu',
               input_norm="sqrt_d",
               lambda_mode="adaptive",
               l1_coefficient=None,
-              loss_normalization="legacy"):
+              loss_normalization="legacy",
+              grad_clip_norm=1.0,
+              adam_eps=1e-8,
+              bias_lr_scale=1.0,
+              bias_adam_eps=None):
     """
     Train the SAE.
 
@@ -73,6 +77,10 @@ def train_simple_sae(model, embeddings, device='cpu',
     loss_normalization: "legacy" uses MSE averaged over batch and features plus
         an L1 term summed over the batch; "per_sample" sums both over features
         and averages over the batch.
+    grad_clip_norm: max total gradient norm; None disables clipping.
+    adam_eps: Adam epsilon.
+    bias_lr_scale: learning-rate multiplier for encoder/decoder biases.
+    bias_adam_eps: Adam epsilon for biases; None uses adam_eps.
     """
     if input_norm not in ("sqrt_d", "d"):
         raise ValueError(f"input_norm must be 'sqrt_d' or 'd', got {input_norm!r}")
@@ -87,7 +95,8 @@ def train_simple_sae(model, embeddings, device='cpu',
 
     # Scale dataset
     print(embeddings.shape)
-    embeddings_tensor = torch.tensor(embeddings, dtype=torch.float32)
+    # Shares memory with float32 input; the scaled copy below is the only copy
+    embeddings_tensor = torch.as_tensor(embeddings, dtype=torch.float32)
     n = embeddings_tensor.shape[1]
     current_norm = torch.mean(torch.sum(embeddings_tensor**2, dim=1))
     if input_norm == "sqrt_d":
@@ -107,17 +116,27 @@ def train_simple_sae(model, embeddings, device='cpu',
     )
 
     model = model.to(device)
+    bias_params = [model.encoder.bias, model.decoder.bias]
+    weight_params = [model.encoder.weight, model.decoder.weight]
     optimizer = Adam(
-        model.parameters(),
+        [
+            dict(params=weight_params, lr_scale=1.0, eps=adam_eps),
+            dict(params=bias_params, lr_scale=bias_lr_scale,
+                 eps=adam_eps if bias_adam_eps is None else bias_adam_eps),
+        ],
         lr=learning_rate,
         betas=(0.9, 0.999),
         weight_decay=0
     )
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = learning_rate * param_group['lr_scale']
 
     losses = []
     sparsities = []
     recon_losses = []
     sparsity_losses = []
+    grad_norms = []
+    lambdas = []
 
     step = 0
 
@@ -161,14 +180,15 @@ def train_simple_sae(model, embeddings, device='cpu',
             # Backward pass
             optimizer.zero_grad()
             loss.backward()
-            # The gradient norm is clipped to 1
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            # Total gradient norm before clipping
+            max_norm = float("inf") if grad_clip_norm is None else grad_clip_norm
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
             optimizer.step()
 
             # Update learning rate
             if step > 0.8 * num_steps:
                 for param_group in optimizer.param_groups:
-                    param_group['lr'] = learning_rate * (1 - (step - 0.8 * num_steps) / (0.2 * num_steps))
+                    param_group['lr'] = learning_rate * param_group['lr_scale'] * (1 - (step - 0.8 * num_steps) / (0.2 * num_steps))
 
             # Adaptive lambda adjustment
             # current_sparsity = (h > 0).float().mean().item()
@@ -196,6 +216,8 @@ def train_simple_sae(model, embeddings, device='cpu',
             sparsities.append(current_sparsity)
             recon_losses.append(recon_loss.item())
             sparsity_losses.append(sparsity_loss.item())
+            grad_norms.append(grad_norm.item())
+            lambdas.append(current_lambda)
 
             if verbose and step % verbose == 0:
                 print(f"\nStep {step}, epoch {epoch}")
@@ -213,7 +235,9 @@ def train_simple_sae(model, embeddings, device='cpu',
         'losses': losses,
         'sparsities': sparsities,
         'recon_losses': recon_losses,
-        'sparsity_losses': sparsity_losses
+        'sparsity_losses': sparsity_losses,
+        'grad_norms': grad_norms,
+        'lambdas': lambdas,
     }
     return scale_factor, logs
 
@@ -230,7 +254,15 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
                  input_norm: str = "sqrt_d",
                  lambda_mode: str = "adaptive",
                  l1_coefficient: "float | None" = None,
-                 loss_normalization: str = "legacy"):
+                 loss_normalization: str = "legacy",
+                 grad_clip_norm: "float | None" = 1.0,
+                 adam_eps: float = 1e-8,
+                 bias_lr_scale: float = 1.0,
+                 bias_adam_eps: "float | None" = None):
+        self.bias_lr_scale = bias_lr_scale
+        self.bias_adam_eps = bias_adam_eps
+        self.grad_clip_norm = grad_clip_norm
+        self.adam_eps = adam_eps
         self.input_norm = input_norm
         self.lambda_mode = lambda_mode
         self.l1_coefficient = l1_coefficient
@@ -286,6 +318,10 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
             lambda_mode=self.lambda_mode,
             l1_coefficient=self.l1_coefficient,
             loss_normalization=self.loss_normalization,
+            grad_clip_norm=self.grad_clip_norm,
+            adam_eps=self.adam_eps,
+            bias_lr_scale=self.bias_lr_scale,
+            bias_adam_eps=self.bias_adam_eps,
         )
         return self
 
