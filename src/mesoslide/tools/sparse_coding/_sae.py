@@ -59,16 +59,41 @@ def train_simple_sae(model, embeddings, device='cpu',
               target_sparsity=0.001,
             #   epsilon=0.05,
               learning_rate=5e-5,
-              verbose=100):  # Target 1% activation
+              verbose=100,
+              input_norm="sqrt_d",
+              lambda_mode="adaptive",
+              l1_coefficient=None,
+              loss_normalization="legacy"):
     """
-    Train the SAE with modified sparsity control
+    Train the SAE.
+
+    input_norm: "sqrt_d" scales inputs so E[||x||^2] = sqrt(d); "d" so E[||x||^2] = d.
+    lambda_mode: "adaptive" tunes lambda in [min_lambda, max_lambda] toward
+        target_sparsity; "fixed" uses l1_coefficient for all steps.
+    loss_normalization: "legacy" uses MSE averaged over batch and features plus
+        an L1 term summed over the batch; "per_sample" sums both over features
+        and averages over the batch.
     """
+    if input_norm not in ("sqrt_d", "d"):
+        raise ValueError(f"input_norm must be 'sqrt_d' or 'd', got {input_norm!r}")
+    if lambda_mode not in ("adaptive", "fixed"):
+        raise ValueError(f"lambda_mode must be 'adaptive' or 'fixed', got {lambda_mode!r}")
+    if lambda_mode == "fixed" and l1_coefficient is None:
+        raise ValueError("l1_coefficient is required when lambda_mode='fixed'")
+    if loss_normalization not in ("legacy", "per_sample"):
+        raise ValueError(
+            f"loss_normalization must be 'legacy' or 'per_sample', got {loss_normalization!r}"
+        )
+
     # Scale dataset
     print(embeddings.shape)
     embeddings_tensor = torch.tensor(embeddings, dtype=torch.float32)
     n = embeddings_tensor.shape[1]
     current_norm = torch.mean(torch.sum(embeddings_tensor**2, dim=1))
-    target_norm = torch.sqrt(torch.tensor(n, dtype=torch.float32))
+    if input_norm == "sqrt_d":
+        target_norm = torch.sqrt(torch.tensor(n, dtype=torch.float32))
+    else:
+        target_norm = torch.tensor(n, dtype=torch.float32)
     scale_factor = torch.sqrt(target_norm / current_norm)
     embeddings_tensor = embeddings_tensor * scale_factor
     print("Scale factor:", scale_factor)
@@ -96,8 +121,7 @@ def train_simple_sae(model, embeddings, device='cpu',
 
     step = 0
 
-    # Adaptive lambda control
-    current_lambda = min_lambda
+    current_lambda = l1_coefficient if lambda_mode == "fixed" else min_lambda
 
     for epoch in tqdm(range((num_steps + len(dataloader) - 1) // len(dataloader))):
         if step >= num_steps:
@@ -113,10 +137,13 @@ def train_simple_sae(model, embeddings, device='cpu',
             x_hat, h = model(x)
 
             # Calculate losses
-            recon_loss = F.mse_loss(x_hat, x)
-            sparsity_loss = current_lambda * torch.sum(
-                torch.abs(h) * torch.norm(model.decoder.weight, dim=0)
-            )
+            weighted_l1 = torch.abs(h) * torch.norm(model.decoder.weight, dim=0)
+            if loss_normalization == "legacy":
+                recon_loss = F.mse_loss(x_hat, x)
+                sparsity_loss = current_lambda * torch.sum(weighted_l1)
+            else:
+                recon_loss = ((x_hat - x) ** 2).sum(dim=1).mean()
+                sparsity_loss = current_lambda * weighted_l1.sum(dim=1).mean()
 
             # Add cosine similarity penalty between dictionary vectors
             # Normalize decoder weights
@@ -152,7 +179,7 @@ def train_simple_sae(model, embeddings, device='cpu',
             #         current_lambda = current_lambda * 1.05
 
             current_sparsity = (h > 0).float().mean().item()
-            if step % 10 == 0:  # Adjust every 10 steps
+            if lambda_mode == "adaptive" and step % 10 == 0:  # Adjust every 10 steps
                 if current_sparsity < target_sparsity * 0.8:  # Too sparse
                     current_lambda = max(min_lambda, current_lambda * 0.95)
                 elif current_sparsity > target_sparsity * 1.2:  # Not sparse enough
@@ -199,7 +226,15 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
                  max_lambda: int = 1,
                  target_sparsity: float = 0.001,
                  learning_rate=5e-5,
-                 random_state=None):
+                 random_state=None,
+                 input_norm: str = "sqrt_d",
+                 lambda_mode: str = "adaptive",
+                 l1_coefficient: "float | None" = None,
+                 loss_normalization: str = "legacy"):
+        self.input_norm = input_norm
+        self.lambda_mode = lambda_mode
+        self.l1_coefficient = l1_coefficient
+        self.loss_normalization = loss_normalization
         self.expansion_factor = expansion_factor
         self.batch_size = batch_size
         self.num_steps = num_steps
@@ -246,7 +281,11 @@ class SparseAutoencoder(TransformerMixin, BaseEstimator):
             max_lambda=self.max_lambda,
             target_sparsity=self.target_sparsity,
             learning_rate=self.learning_rate,
-            verbose=verbose
+            verbose=verbose,
+            input_norm=self.input_norm,
+            lambda_mode=self.lambda_mode,
+            l1_coefficient=self.l1_coefficient,
+            loss_normalization=self.loss_normalization,
         )
         return self
 
