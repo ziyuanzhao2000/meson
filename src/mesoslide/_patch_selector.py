@@ -28,6 +28,7 @@ from tqdm.auto import tqdm
 import numpy as np
 import pandas as pd
 import anndata as ad
+from scipy.sparse import issparse
 import geopandas as gpd
 import shapely.geometry
 from spatialdata.models import ShapesModel, TableModel
@@ -142,6 +143,10 @@ def _build_output(
             continue
         idx_arr = np.asarray(idx_list, dtype=np.int64)
         subset_table = table[idx_arr].copy()
+        # A row selected more than once (e.g. exemplar of several features)
+        # needs a unique obs_name for the PatchData instance key.
+        if len(np.unique(idx_arr)) < len(idx_arr):
+            subset_table.obs_names_make_unique()
         if tiles is not None:
             subset_tiles = tiles.iloc[idx_arr]
         else:
@@ -589,25 +594,91 @@ def select_exemplar_patches(
 
     Notes
     -----
-    A manifest-backed `slides` is re-read once per feature. Pass an in-memory
-    mapping (see :func:`mesoslide.open_slides`) when scanning many features.
+    All features are scored in one pass over the slides and the output is
+    built once, so the result equals calling ``select_top_patches(n=n_exemplars,
+    min_score=min_score, take_every=1)`` per feature (ties included), without
+    re-reading each slide per feature.
     """
     source = _source(slides, tile_key, "select_exemplar_patches")
-
-    per_feature = []
-    for feature_name in tqdm(feature_names):
-        adata = select_top_patches(
-            source,
-            feature_name,
-            n=n_exemplars,
-            min_score=min_score,
-            take_every=1,
-        )
-        if len(adata) == 0:
-            continue
-        per_feature.append(adata)
-
-    if not per_feature:
+    feature_names = list(feature_names)
+    n_feats = len(feature_names)
+    if n_exemplars < 1 or n_feats == 0:
         return _empty_result(source)
 
-    return per_feature[0] if len(per_feature) == 1 else _concat_patch_data(per_feature)
+    # Per feature: lists of (scores, slide_codes, rows) candidate arrays.
+    cand = [([], [], []) for _ in range(n_feats)]
+    slide_order = []
+
+    def _add(f, scores, rows, code):
+        keep = scores > min_score
+        scores, rows = scores[keep], rows[keep]
+        if len(scores) == 0:
+            return
+        top = np.argsort(-scores, kind="stable")[:n_exemplars]
+        cand[f][0].append(scores[top])
+        cand[f][1].append(np.full(len(top), code, dtype=np.int32))
+        cand[f][2].append(rows[top])
+
+    for slide_id, table in tqdm(source, desc="Selecting exemplars"):
+        code = len(slide_order)
+        slide_order.append(slide_id)
+        var_names = table.var_names
+        in_var = np.array([name in var_names for name in feature_names], dtype=bool)
+        var_pos = np.flatnonzero(in_var)
+
+        if len(var_pos):
+            X = table[:, [feature_names[f] for f in var_pos]].X
+            if issparse(X) and min_score >= 0:
+                # Implicit zeros never exceed min_score >= 0, so only stored entries matter.
+                X = X.tocsc()
+                X.sort_indices()
+                for j, f in enumerate(var_pos):
+                    s, e = X.indptr[j], X.indptr[j + 1]
+                    _add(f, np.asarray(X.data[s:e], dtype=np.float64),
+                         X.indices[s:e].astype(np.int64), code)
+            else:
+                X = X.toarray() if issparse(X) else np.asarray(X)
+                rows = np.arange(X.shape[0], dtype=np.int64)
+                for j, f in enumerate(var_pos):
+                    _add(f, X[:, j].astype(np.float64), rows, code)
+
+        # Features stored in .obs rather than .X.
+        for f in np.flatnonzero(~in_var):
+            try:
+                scores = get_patch_scores(table, feature_names[f])
+            except KeyError as exc:
+                raise KeyError(f"{exc} (slide={slide_id!r})") from exc
+            _add(f, np.asarray(scores, dtype=np.float64),
+                 np.arange(len(scores), dtype=np.int64), code)
+
+    selected_indices = defaultdict(list)
+    selected_scores = defaultdict(list)
+    extra_rank, extra_fname = defaultdict(list), defaultdict(list)
+    for f, (sc, cd, rw) in enumerate(cand):
+        if not sc:
+            continue
+        sc, cd, rw = np.concatenate(sc), np.concatenate(cd), np.concatenate(rw)
+        # Stable over (slide order, row order), as in select_top_patches.
+        top = np.argsort(-sc, kind="stable")[:n_exemplars]
+        for rank, k in enumerate(top, start=1):
+            sid = slide_order[cd[k]]
+            selected_indices[sid].append(int(rw[k]))
+            selected_scores[sid].append(float(sc[k]))
+            extra_rank[sid].append(rank)
+            extra_fname[sid].append(feature_names[f])
+
+    if not selected_indices:
+        return _empty_result(source)
+
+    out = _build_output(
+        source,
+        selected_indices,
+        selected_scores=selected_scores,
+        extra_obs={"_feature_rank": extra_rank, "_feature_name": extra_fname},
+    )
+
+    # Feature-major, rank within feature.
+    position = {name: i for i, name in enumerate(feature_names)}
+    feature_pos = out.obs["_feature_name"].astype(str).map(position).to_numpy()
+    order = np.lexsort((out.obs["_feature_rank"].to_numpy(), feature_pos))
+    return out[order]

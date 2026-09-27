@@ -88,6 +88,89 @@ def test_training_reduces_reconstruction_error(data):
     assert recon_err(trained) < recon_err(untrained)
 
 
+def test_replay_gradient_matches_full_pursuit(data):
+    """Training step through the recorded replay equals backprop through the whole pursuit."""
+    torch.manual_seed(0)
+    model = MatchingPursuitDictionary(16, 64, threshold=1e-2).double()
+    x = torch.as_tensor(data[:50], dtype=torch.float64)
+
+    z_full = model._pursuit(x)                      # graph through every iteration
+    loss_full = ((z_full @ model.W - x) ** 2).sum(-1).mean()
+    grad_full, = torch.autograd.grad(loss_full, model.W)
+
+    x_hat, z = model(x)                             # no-grad pursuit + replay
+    loss = ((x_hat - x) ** 2).sum(-1).mean()
+    grad, = torch.autograd.grad(loss, model.W)
+
+    assert torch.equal(z != 0, z_full.detach() != 0)
+    torch.testing.assert_close(loss, loss_full, rtol=1e-10, atol=1e-10)
+    torch.testing.assert_close(grad, grad_full, rtol=1e-8, atol=1e-10)
+
+
+def test_max_iter_bounds_l0(fitted, data):
+    capped = MatchingPursuitSAE(expansion_factor=4, max_iter=3)
+    capped.model_ = MatchingPursuitDictionary(16, 64, threshold=fitted.threshold, max_iter=3)
+    capped.model_.load_state_dict(fitted.model_.state_dict())
+    capped.embed_dim_, capped.n_features_in_ = 64, 16
+    Z = capped.transform(data, device="cpu", progress_bar=False)
+    assert np.diff(Z.indptr).max() <= 3
+    # same first atoms as the uncapped pursuit
+    ref = _legacy_get_acts(fitted.model_.W.detach(), torch.as_tensor(data), fitted.threshold).numpy()
+    assert ((Z.toarray() != 0) <= (ref != 0)).all()
+
+
+def test_large_max_iter_equals_uncapped(fitted, data):
+    model = MatchingPursuitDictionary(16, 64, threshold=fitted.threshold, max_iter=10_000)
+    model.load_state_dict(fitted.model_.state_dict())
+    x = torch.as_tensor(data)
+    assert torch.equal(model.encode(x), fitted.model_.encode(x))
+
+
+def test_replay_gradient_matches_with_max_iter(data):
+    torch.manual_seed(0)
+    model = MatchingPursuitDictionary(16, 64, threshold=1e-2, max_iter=4).double()
+    x = torch.as_tensor(data[:50], dtype=torch.float64)
+    z_full = model._pursuit(x)
+    grad_full, = torch.autograd.grad(((z_full @ model.W - x) ** 2).sum(-1).mean(), model.W)
+    x_hat, _ = model(x)
+    grad, = torch.autograd.grad(((x_hat - x) ** 2).sum(-1).mean(), model.W)
+    torch.testing.assert_close(grad, grad_full, rtol=1e-8, atol=1e-10)
+
+
+def test_model_pickled_without_max_iter_runs_uncapped(fitted, data):
+    """Models saved before max_iter existed (e.g. the converted legacy model) load uncapped."""
+    import copy
+    import pickle
+    old = copy.deepcopy(fitted)
+    del old.__dict__["max_iter"]
+    del old.model_.__dict__["max_iter"]
+    old = pickle.loads(pickle.dumps(old))
+    assert old.max_iter is None and old.model_.max_iter is None
+    a = old.transform(data, device="cpu", progress_bar=False)
+    b = fitted.transform(data, device="cpu", progress_bar=False)
+    assert (a != b).nnz == 0
+
+
+def test_fractional_expansion_factor(data):
+    model = MatchingPursuitSAE(expansion_factor=0.25, num_steps=3, batch_size=8, max_iter=2,
+                               random_state=0).fit(data, device="cpu")
+    assert model.embed_dim_ == 4 and model.components_.shape == (4, 16)
+    assert model.transform(data, device="cpu", progress_bar=False).shape == (300, 4)
+
+
+def test_checkpoints(data, tmp_path):
+    model = MatchingPursuitSAE(expansion_factor=2, num_steps=7, batch_size=8, random_state=0)
+    model.fit(data, device="cpu", checkpoint_every=3, checkpoint_dir=tmp_path)
+    paths = sorted(p.name for p in tmp_path.iterdir())
+    assert paths == ["step_00003.joblib", "step_00006.joblib", "step_00007.joblib"]
+    ckpt = joblib.load(tmp_path / "step_00003.joblib")
+    assert ckpt.checkpoint_step_ == 3 and len(ckpt._training_log["mse"]) == 3
+    assert ckpt.transform(data[:5], device="cpu", progress_bar=False).shape == (5, 32)
+    last = joblib.load(tmp_path / "step_00007.joblib")
+    assert torch.equal(last.model_.W, model.model_.W)
+    assert model.model_.W.device.type == "cpu"
+
+
 def test_components_shape(fitted):
     assert fitted.components_.shape == (64, 16)
 

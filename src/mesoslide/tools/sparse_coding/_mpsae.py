@@ -49,13 +49,19 @@ class MatchingPursuitDictionary(nn.Module):
 
     Unlike the original MatchingPursuitSAE, the optimizer and scheduler are
     not stored on the module; training state lives in `train_mp_sae`.
+
+    max_iter caps the number of pursuit iterations (and so the number of
+    active atoms per sample); None runs to convergence, as the original.
     """
 
-    def __init__(self, d_model, n_latents, threshold=1e-2, normalize=True):
+    max_iter = None  # class default keeps models pickled before this option loadable
+
+    def __init__(self, d_model, n_latents, threshold=1e-2, normalize=True, max_iter=None):
         super().__init__()
         self.d_model = d_model
         self.n_latents = n_latents
         self.threshold = threshold
+        self.max_iter = max_iter
         self.W = nn.Parameter(torch.randn(n_latents, d_model))
         if normalize:
             self.W.data = F.normalize(self.W.data, p=2, dim=1)
@@ -64,18 +70,27 @@ class MatchingPursuitDictionary(nn.Module):
     def device(self):
         return self.W.device
 
-    def _pursuit(self, x):
-        """Greedy matching pursuit; returns codes z of shape (batch, n_latents)."""
+    def _pursuit(self, x, record=False):
+        """Greedy matching pursuit; returns codes z of shape (batch, n_latents).
+
+        With record=True, also returns the per-iteration (atom indices, active
+        mask) needed by `_replay`.
+        """
         residual = x.clone()
         batch_size = x.shape[0]
 
         z = torch.zeros(batch_size, self.n_latents, device=x.device, dtype=x.dtype)
         prev_support = torch.zeros_like(z).bool()
         done = torch.zeros(batch_size, dtype=torch.bool, device=x.device)
+        trace = []
+        n_iter = 0
 
-        while not done.all():
+        while not done.all() and (self.max_iter is None or n_iter < self.max_iter):
+            n_iter += 1
             WTr = torch.relu(residual @ self.W.T)
             values, indices = torch.max(WTr, dim=1, keepdim=True)
+            if record:
+                trace.append((indices.squeeze(1), ~done))
 
             z_ = torch.zeros_like(z)
             z_.scatter_(1, indices, values)
@@ -92,7 +107,26 @@ class MatchingPursuitDictionary(nn.Module):
             done = done | converged
             prev_support = support
 
-        return z
+        return (z, trace) if record else z
+
+    def _replay(self, x, trace):
+        """Differentiable reconstruction from a recorded pursuit.
+
+        Recomputes each selected coefficient relu(<residual, W[i]>) and the
+        residual update with gradients, touching only the selected atoms. Same
+        function of W as `_pursuit` followed by z @ W, since only the argmax
+        entry of each iteration carries gradient; stores (batch, d_model)
+        instead of (batch, n_latents) tensors per iteration.
+        """
+        residual = x
+        x_hat = torch.zeros_like(x)
+        for indices, active in trace:
+            w = self.W[indices]
+            v = torch.relu((residual * w).sum(dim=1)) * active
+            step = v.unsqueeze(1) * w
+            residual = residual - step
+            x_hat = x_hat + step
+        return x_hat
 
     @torch.no_grad()
     def encode(self, x):
@@ -100,8 +134,12 @@ class MatchingPursuitDictionary(nn.Module):
         return self._pursuit(x)
 
     def forward(self, x):
-        z = self._pursuit(x)
-        return z @ self.W, z
+        if not torch.is_grad_enabled():
+            z = self._pursuit(x)
+            return z @ self.W, z
+        with torch.no_grad():
+            z, trace = self._pursuit(x, record=True)
+        return self._replay(x, trace), z
 
 
 def train_mp_sae(model, embeddings, device="cpu",
@@ -110,7 +148,9 @@ def train_mp_sae(model, embeddings, device="cpu",
                  learning_rate=1e-3,
                  grad_clip_norm=1.0,
                  generator=None,
-                 verbose=0):
+                 verbose=0,
+                 checkpoint_every=None,
+                 on_checkpoint=None):
     """
     Train an MP-SAE on raw (unscaled) embeddings.
 
@@ -118,6 +158,9 @@ def train_mp_sae(model, embeddings, device="cpu",
     the per-sample summed squared reconstruction error. Optimizer and schedule
     follow the original implementation: Adam(betas=(0.5, 0.9375)) with a WSD
     schedule (100 warmup steps, 20% cooldown to 0.1x).
+
+    If `checkpoint_every` is set, `on_checkpoint(step, mses)` is called every
+    `checkpoint_every` steps and after the last step.
 
     Returns a log dict with per-step `mse`.
     """
@@ -154,6 +197,8 @@ def train_mp_sae(model, embeddings, device="cpu",
         mses.append(loss.item())
         if verbose and step % verbose == 0:
             print(f"[{step}/{num_steps}] mse={mses[-1]:.6f}")
+        if checkpoint_every and (step % checkpoint_every == 0 or step == num_steps):
+            on_checkpoint(step, mses)
 
     model.eval()
     return {"mse": mses}
@@ -169,10 +214,15 @@ class MatchingPursuitSAE(TransformerMixin, BaseEstimator):
 
     Parameters
     ----------
-    expansion_factor : int, default=8
-        Dictionary size is `expansion_factor * n_features_in_`.
+    expansion_factor : float, default=8
+        Dictionary size is `round(expansion_factor * n_features_in_)`; values
+        below 1 give an undercomplete dictionary (e.g. 0.25 -> 256 atoms for
+        1,024-dim inputs).
     threshold : float, default=1e-2
         Residual-norm stopping threshold of the pursuit.
+    max_iter : int or None, default=None
+        Maximum pursuit iterations, which bounds the number of active features
+        per patch. None runs to convergence, as the original MP-SAE.
     batch_size : int, default=32
         Rows per training step.
     num_steps : int, default=1000
@@ -186,9 +236,12 @@ class MatchingPursuitSAE(TransformerMixin, BaseEstimator):
     random_state : int, RandomState or None
     """
 
+    max_iter = None  # class default keeps models pickled before this option loadable
+
     def __init__(self,
-                 expansion_factor: int = 8,
+                 expansion_factor: float = 8,
                  threshold: float = 1e-2,
+                 max_iter: "int | None" = None,
                  batch_size: int = 32,
                  num_steps: int = 1000,
                  learning_rate: float = 1e-3,
@@ -198,6 +251,7 @@ class MatchingPursuitSAE(TransformerMixin, BaseEstimator):
                  random_state=None):
         self.expansion_factor = expansion_factor
         self.threshold = threshold
+        self.max_iter = max_iter
         self.batch_size = batch_size
         self.num_steps = num_steps
         self.learning_rate = learning_rate
@@ -209,7 +263,19 @@ class MatchingPursuitSAE(TransformerMixin, BaseEstimator):
     def fit(self, X, y=None, *,
             obsm_key=None, tile_key="tiles",
             device=None,
-            verbose: "int | bool" = False):
+            verbose: "int | bool" = False,
+            checkpoint_every: "int | None" = None,
+            checkpoint_dir=None):
+        """
+        Train the dictionary.
+
+        checkpoint_every, checkpoint_dir: if both set, save a loadable copy of
+        the estimator (CPU weights, MSE log so far) as
+        `checkpoint_dir/step_<step>.joblib` every `checkpoint_every` steps
+        and after the last step.
+        """
+        if (checkpoint_every is None) != (checkpoint_dir is None):
+            raise ValueError("checkpoint_every and checkpoint_dir must be set together")
         if obsm_key is not None:
             from mesoslide._slides import SlideSource
             source = SlideSource(X, tile_key=tile_key)
@@ -217,7 +283,7 @@ class MatchingPursuitSAE(TransformerMixin, BaseEstimator):
 
         self.random_state_ = check_random_state(self.random_state)
         X = validate_data(self, X, accept_sparse=False, dtype=np.float32)
-        self.embed_dim_ = X.shape[1] * self.expansion_factor
+        self.embed_dim_ = int(round(X.shape[1] * self.expansion_factor))
 
         seed = int(self.random_state_.randint(0, 2**32 - 1))
         torch.manual_seed(seed)
@@ -226,10 +292,28 @@ class MatchingPursuitSAE(TransformerMixin, BaseEstimator):
             n_latents=self.embed_dim_,
             threshold=self.threshold,
             normalize=self.normalize_init,
+            max_iter=self.max_iter,
         )
         generator = torch.Generator().manual_seed(seed)
         if device is None:
             device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+        on_checkpoint = None
+        if checkpoint_every is not None:
+            import copy
+            from pathlib import Path
+            import joblib
+
+            checkpoint_dir = Path(checkpoint_dir)
+            checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+            def on_checkpoint(step, mses):
+                snapshot = copy.copy(self)
+                snapshot.model_ = copy.deepcopy(self.model_).cpu().eval()
+                snapshot._training_log = {"mse": list(mses)}
+                snapshot.checkpoint_step_ = step
+                joblib.dump(snapshot, checkpoint_dir / f"step_{step:05d}.joblib")
+
         self._training_log = train_mp_sae(
             self.model_, X,
             device=device,
@@ -239,7 +323,11 @@ class MatchingPursuitSAE(TransformerMixin, BaseEstimator):
             grad_clip_norm=self.grad_clip_norm,
             generator=generator,
             verbose=verbose,
+            checkpoint_every=checkpoint_every,
+            on_checkpoint=on_checkpoint,
         )
+        # CPU weights so the saved model loads without a GPU; transform moves it to its device
+        self.model_.cpu()
         return self
 
     @property
