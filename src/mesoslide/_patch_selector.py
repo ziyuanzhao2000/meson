@@ -441,8 +441,8 @@ def select_top_patches(
     if top_fraction is not None:
         if not (0 < top_fraction <= 1):
             raise ValueError("top_fraction must be in (0, 1].")
-        if n is None:
-            raise ValueError("n is required when top_fraction is set.")
+        # if n is None:
+        #     raise ValueError("n is required when top_fraction is set.")
 
     if min_score is None:
         if top_fraction is not None:
