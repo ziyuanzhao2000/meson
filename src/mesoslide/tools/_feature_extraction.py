@@ -101,12 +101,12 @@ def _write_sparse_features(table: AnnData, prefix: str, matrix) -> AnnData:
     new_vars = [f"{prefix}_{i}" for i in range(matrix.shape[1])]
 
     existing_vars = list(table.var_names)
-    diff_vars = [v for v in existing_vars if not v.startswith(f"{prefix}_")]
+    keep_cols = [i for i, v in enumerate(existing_vars) if not v.startswith(f"{prefix}_")]
+    diff_vars = [existing_vars[i] for i in keep_cols]
 
     base = table.X
     base = csr_matrix((table.n_obs, 0)) if base is None else csr_matrix(base)
     if len(diff_vars) < len(existing_vars):
-        keep_cols = [i for i, v in enumerate(existing_vars) if v in diff_vars]
         base = base[:, keep_cols]
 
     return AnnData(
