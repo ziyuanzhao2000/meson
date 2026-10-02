@@ -8,7 +8,7 @@ from matplotlib.colors import LinearSegmentedColormap, Normalize
 import matplotlib.pyplot as plt
 
 from mesoslide._interpolation import interpolate_patch_max
-from mesoslide._slides import DEFAULT_TILE_KEY, tile_table_key
+from mesoslide._slides import DEFAULT_TILE_KEY, table_tile_geometries, tile_table_key
 from mesoslide._deprecated import ELEMENT_NAME_HINT, deprecated_kwargs, drop, removed, rename
 from ._utils import _finish_plot
 
@@ -33,39 +33,55 @@ def _axes_device_px(ax):
     return max(1.0, pos.width * fw * fig.dpi), max(1.0, pos.height * fh * fig.dpi)
 
 
-def _render_slide_background(ax, wsi, *, image_size=2000, oversample=1.5):
-    """Draw a display-resolution slide image behind the tile overlay.
+def _region_bounds(wsi, region):
+    """(x0, y0, w, h) in level-0 px, clipped to the slide; the whole slide when `region` is None."""
+    h0, w0 = wsi.properties.shape  # level 0, NOT image.shape
+    if region is None:
+        return 0, 0, w0, h0
+    x, y, w, h = (int(round(v)) for v in region)
+    x0, y0 = max(x, 0), max(y, 0)
+    x1, y1 = min(x + w, w0), min(y + h, h0)
+    if x1 <= x0 or y1 <= y0:
+        raise ValueError(f"region {tuple(region)} lies outside the slide (w={w0}, h={h0}).")
+    return x0, y0, x1 - x0, y1 - y0
 
-    Reads via wsi.reader.get_region at the pyramid level that resolves the
-    actual rendered axes size (times `oversample`), rather than always
-    reading a fixed-size thumbnail regardless of the figure size -- mirrors
-    how lazyslide.pl.tiles picks its background resolution. Works whether or
-    not the slide was opened with attach_images=True, same as the thumbnail
-    path it replaces.
+
+def _display_downsample(ax, width, height, *, image_size, oversample):
+    """Downsample that resolves the axes (times `oversample`) for a width x height level-0 area,
+    with the longest side capped at `image_size` pixels."""
+    target = max(1.0, width / image_size, height / image_size)
+    axes_px_w, axes_px_h = _axes_device_px(ax)
+    if axes_px_w and axes_px_h:
+        target = max(target, width / (axes_px_w * oversample), height / (axes_px_h * oversample))
+    return target
+
+
+def _render_slide_background(ax, wsi, *, region=None, image_size=2000, oversample=1.5):
+    """Draw a display-resolution image of the slide (or `region`) behind the tile overlay.
+
+    Reads via wsi.reader.get_region at the coarsest pyramid level that still
+    resolves the rendered axes size (times `oversample`) -- mirrors how
+    lazyslide.pl.tiles picks its background resolution. Works whether or
+    not the slide was opened with attach_images=True.
     """
-    from ezslide import resolve_display_level
+    from ezslide import select_level_for_downsample
 
     props = wsi.properties
-    h0, w0 = props.shape  # level 0, NOT image.shape
-    axes_px_w, axes_px_h = _axes_device_px(ax)
-    level, downsample = resolve_display_level(props, axes_px_w, axes_px_h, oversample=oversample)
-
-    while (
-        (w0 / downsample > image_size or h0 / downsample > image_size)
-        and level < props.n_level - 1
-    ):
+    x0, y0, w, h = _region_bounds(wsi, region)
+    target = _display_downsample(ax, w, h, image_size=image_size, oversample=oversample)
+    level, downsample = select_level_for_downsample(props.level_downsample, target, props.n_level)
+    while (w / downsample > image_size or h / downsample > image_size) and level < props.n_level - 1:
         level += 1
         downsample = props.level_downsample[level]
 
-    dw = max(1, math.ceil(w0 / downsample))
-    dh = max(1, math.ceil(h0 / downsample))
-    image = wsi.reader.get_region(0, 0, dw, dh, level=level)
+    dw = max(1, math.ceil(w / downsample))
+    dh = max(1, math.ceil(h / downsample))
+    image = wsi.reader.get_region(x0, y0, dw, dh, level=level)
 
-    ax.imshow(image, extent=[0, w0, h0, 0], origin="upper", zorder=-100)
-    # Force the full-slide extent regardless of what the tile overlay
-    # autoscaled the axes to.
-    ax.set_xlim(0, w0)
-    ax.set_ylim(h0, 0)
+    ax.imshow(image, extent=[x0, x0 + w, y0 + h, y0], origin="upper", zorder=-100)
+    # Force the region's extent regardless of what the tile overlay autoscaled the axes to.
+    ax.set_xlim(x0, x0 + w)
+    ax.set_ylim(y0 + h, y0)
 
 
 def _tile_centers_and_values(wsi, tile_key, table_key, feature_name):
@@ -98,7 +114,6 @@ def _tile_centers_and_values(wsi, tile_key, table_key, feature_name):
             f".var_names."
         )
 
-    tiles = wsi.shapes[tile_key]
     spec = wsi.tile_spec(tile_key)
     if spec.base_width != spec.base_height:
         raise ValueError(
@@ -106,18 +121,7 @@ def _tile_centers_and_values(wsi, tile_key, table_key, feature_name):
             f"{spec.base_width}, base_height={spec.base_height}."
         )
     patch_size = spec.base_width
-
-    instance_key = table.uns.get("spatialdata_attrs", {}).get("instance_key")
-    if instance_key is not None and instance_key in table.obs.columns:
-        tile_ids = table.obs[instance_key].to_numpy()
-        try:
-            tile_ids = tile_ids.astype(tiles.index.dtype)
-        except (TypeError, ValueError):
-            pass
-        bounds = tiles.loc[tile_ids].bounds
-    else:
-        # No instance_key to join on; fall back to row order matching tiles.
-        bounds = tiles.bounds
+    bounds = table_tile_geometries(wsi, tile_key, table_key).bounds
 
     xs = bounds["minx"].to_numpy() + patch_size / 2
     ys = bounds["miny"].to_numpy() + patch_size / 2
@@ -152,6 +156,9 @@ def plot_feature_map(
     dpi=300,
     return_fig=False,
     return_buffer=False,
+    region=None,
+    ax=None,
+    background=True,
 ):
     """
     Plot a per-tile feature as an overlay on the slide image.
@@ -202,6 +209,17 @@ def plot_feature_map(
         Return (fig, ax).
     return_buffer : bool, default=False
         Return an in-memory PNG buffer.
+    region : (x, y, width, height), optional
+        Level-0 pixel box to show instead of the whole slide (clipped to the
+        slide). Both the overlay and the background are rendered at the
+        resolution the axes needs for that box.
+    ax : matplotlib Axes, optional
+        Draw into this axes instead of a new figure (`figsize` is ignored).
+        The figure is left open; (fig, ax) is returned unless
+        `return_buffer=True`.
+    background : bool, default=True
+        Draw the slide image behind the overlay. False gives an overlay-only
+        image (transparent where no tile scores).
 
     Returns
     -------
@@ -221,21 +239,23 @@ def plot_feature_map(
     if title is None:
         title = wsi.name
 
-    props = wsi.properties
-    h0, w0 = props.shape
+    x0, y0, w, h = _region_bounds(wsi, region)
 
-    fig, ax = plt.subplots(figsize=figsize)
-    axes_px_w, axes_px_h = _axes_device_px(ax)
+    own_figure = ax is None
+    if own_figure:
+        fig, ax = plt.subplots(figsize=figsize)
+    else:
+        fig = ax.figure
 
     # The color canvas is computed directly into an array, not read from the
     # slide file, so -- unlike the background image -- it isn't constrained
     # to an existing pyramid level: use the continuous display-target
     # downsample directly, capped by image_size the same way.
-    canvas_downsample = max(1.0, w0 / image_size, h0 / image_size)
-    if axes_px_w and axes_px_h:
-        canvas_downsample = max(
-            canvas_downsample, w0 / (axes_px_w * oversample), h0 / (axes_px_h * oversample)
-        )
+    canvas_downsample = _display_downsample(ax, w, h, image_size=image_size, oversample=oversample)
+
+    # Only tiles that overlap the region can paint it.
+    half = patch_size / 2
+    in_region = (xs + half > x0) & (xs - half < x0 + w) & (ys + half > y0) & (ys - half < y0 + h)
 
     sm = ScalarMappable(norm=norm, cmap=cmap)
     # Skip samples whose score maps to a fully transparent color -- with the
@@ -244,28 +264,42 @@ def plot_feature_map(
     # Safe generally: only skipped when doing so is visually identical to
     # painting it (this cmap already renders a real 0 as invisible).
     zero_is_invisible = sm.to_rgba(0.0)[3] < 1e-9
-    keep = (values != 0) if zero_is_invisible else np.ones(len(values), dtype=bool)
+    keep = in_region & ((values != 0) if zero_is_invisible else True)
 
     samples = dict(zip(
-        zip(xs[keep].astype(int).tolist(), ys[keep].astype(int).tolist()),
+        zip((xs[keep] - x0).astype(int).tolist(), (ys[keep] - y0).astype(int).tolist()),
         values[keep].tolist(),
     ))
-    canvas = interpolate_patch_max(samples, h0, w0, patch_size, downsample=canvas_downsample)
+    canvas = interpolate_patch_max(samples, h, w, patch_size, downsample=canvas_downsample)
 
     rgba = sm.to_rgba(canvas)  # float (H, W, 4) in [0, 1]; keeps cmap's own alpha ramp
     rgba[..., 3] *= fill_alpha
     rgba[np.isnan(canvas), 3] = 0  # background is always fully transparent
-    ax.imshow(rgba, extent=[0, w0, h0, 0], origin="upper", zorder=-99)
+    ax.imshow(rgba, extent=[x0, x0 + w, y0 + h, y0], origin="upper", zorder=-99)
     ax.set_axis_off()  # no ticks, no spines, no frame
-    
+
     if colorbar:
         fig.colorbar(sm, ax=ax)
 
-    _render_slide_background(ax, wsi, image_size=image_size, oversample=oversample)
+    if background:
+        _render_slide_background(ax, wsi, region=(x0, y0, w, h), image_size=image_size,
+                                 oversample=oversample)
+    else:
+        ax.set_xlim(x0, x0 + w)
+        ax.set_ylim(y0 + h, y0)
 
     ax.set_title(title)
     ax.set_xticklabels([])
     ax.set_yticklabels([])
+
+    if not own_figure:
+        # The caller owns the figure: save if asked, never close it.
+        if output_path is not None:
+            fig.savefig(output_path, bbox_inches="tight", dpi=dpi)
+            print(f"Saved: {output_path}")
+        if return_buffer:
+            return _finish_plot(fig, ax, show=True, return_buffer=True, dpi=dpi)
+        return fig, ax
 
     keep_alive = return_fig and not return_buffer
     result = _finish_plot(fig, ax, show=keep_alive, save=output_path,

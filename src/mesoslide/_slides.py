@@ -235,6 +235,38 @@ def _require_table_and_shapes(wsi: "WSIData", tile_key: str, slide_id: str):
     return table, tiles
 
 
+def table_tile_geometries(wsi: "WSIData", tile_key: str = DEFAULT_TILE_KEY,
+                          table_key: Optional[str] = None) -> "gpd.GeoSeries":
+    """Tile polygons of `wsi[tile_key]`, one per row of its tile table, in table row order.
+
+    Rows are joined on the table's ``instance_key`` (``tile_id``); without
+    one, tiles are assumed to be in table row order.
+    """
+    table_key = table_key or tile_table_key(tile_key)
+    if tile_key not in wsi.shapes:
+        raise KeyError(f"Slide has no tiles element '{tile_key}'. Available shapes: {list(wsi.shapes)}")
+    if table_key not in wsi.tables:
+        raise KeyError(f"Slide has no table '{table_key}'. Available tables: {list(wsi.tables)}")
+    tiles, table = wsi.shapes[tile_key], wsi.tables[table_key]
+
+    instance_key = table.uns.get("spatialdata_attrs", {}).get("instance_key")
+    if instance_key is not None and instance_key in table.obs.columns:
+        tile_ids = table.obs[instance_key].to_numpy()
+        try:
+            tile_ids = tile_ids.astype(tiles.index.dtype)
+        except (TypeError, ValueError):
+            pass
+        geometry = tiles.geometry.loc[tile_ids]
+    else:
+        if len(tiles) != table.n_obs:
+            raise ValueError(
+                f"Table '{table_key}' has no instance_key and {table.n_obs} rows, "
+                f"but '{tile_key}' has {len(tiles)} tiles."
+            )
+        geometry = tiles.geometry
+    return geometry.reset_index(drop=True)
+
+
 class SlideSource:
     """Re-iterable, uniform access to a cohort's per-slide tile tables + tile shapes.
 

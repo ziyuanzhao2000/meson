@@ -6,14 +6,14 @@ import numpy as np
 from mesoslide._deprecated import deprecated_kwargs, rename
 
 if TYPE_CHECKING:
-    from mesoslide.tools.segmenters import TokenClusterer
+    from mesoslide.tools.segmenters import TokenClassifier, TokenClusterer
     from mesoslide._patch_data import PatchData
 
 
 CLUSTER_IMG_SUFFIX = "_cluster_img"
 
 
-def cluster_img_key(clusterer: "TokenClusterer") -> str:
+def cluster_img_key(clusterer: "Union[TokenClusterer, TokenClassifier]") -> str:
     """The `patches.obsm` key a clusterer's rasterized cluster map is cached under."""
     return f"{clusterer.display_name}{CLUSTER_IMG_SUFFIX}"
 
@@ -21,7 +21,7 @@ def cluster_img_key(clusterer: "TokenClusterer") -> str:
 @deprecated_kwargs(clusterizer=rename("clusterer"))
 def extract_cluster_maps(
     patches: "PatchData",
-    clusterer: "TokenClusterer",
+    clusterer: "Union[TokenClusterer, TokenClassifier]",
     model=None,
     *,
     slides=None,
@@ -36,7 +36,7 @@ def extract_cluster_maps(
 ) -> Union[np.ndarray, List[np.ndarray]]:
     """
     Generate a token-cluster map, rasterized to pixel resolution, for a set
-    of pre-selected patches, for one `TokenClusterer`.
+    of pre-selected patches, for one `TokenClusterer` or `TokenClassifier`.
 
     If the cluster map is already cached in
     `patches.obsm[cluster_img_key(clusterer)]` (e.g. from a previous call
@@ -58,8 +58,8 @@ def extract_cluster_maps(
     ----------
     patches : PatchData
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
-    clusterer : TokenClusterer
-        Fitted clusterer. Its `display_name` (`name`, else `feature_name_`)
+    clusterer : TokenClusterer or TokenClassifier
+        Fitted token labeler. Its `display_name` (`name`, else `feature_name_`)
         must be non-empty -- it's the `patches.obsm` cache key.
     model : str or lazyslide_models.ImageModel, optional
         The vision model to embed `patches` with -- must match the model

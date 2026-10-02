@@ -58,6 +58,41 @@ class TestFeatureMap:
         with pytest.raises(ValueError, match="attach_images=True"):
             ms.plotting.plot_feature_map(bare, "score")
 
+    def test_region_limits_the_axes_and_both_layers(self, one_slide):
+        x, y = ms.table_tile_geometries(one_slide).bounds[["minx", "miny"]].iloc[0]
+        region = (int(x), int(y), 200, 150)
+        fig, ax = ms.plotting.plot_feature_map(one_slide, "score", region=region, return_fig=True)
+        assert ax.get_xlim() == (region[0], region[0] + 200)
+        assert ax.get_ylim() == (region[1] + 150, region[1])
+        overlay, image = sorted(ax.images, key=lambda im: im.get_zorder(), reverse=True)
+        assert tuple(overlay.get_extent()) == tuple(image.get_extent()) == (
+            region[0], region[0] + 200, region[1] + 150, region[1])
+
+    def test_region_is_clipped_to_the_slide_and_must_overlap_it(self, one_slide):
+        h0, w0 = one_slide.properties.shape
+        fig, ax = ms.plotting.plot_feature_map(one_slide, "score", region=(w0 - 50, h0 - 50, 500, 500),
+                                                return_fig=True)
+        assert ax.get_xlim() == (w0 - 50, w0)
+        with pytest.raises(ValueError, match="outside"):
+            ms.plotting.plot_feature_map(one_slide, "score", region=(w0 + 10, 0, 50, 50))
+
+    def test_draws_into_a_given_axes_without_closing_it(self, one_slide, tmp_path):
+        import matplotlib.pyplot as plt
+
+        fig, axes = plt.subplots(1, 2)
+        out = ms.plotting.plot_feature_map(one_slide, "score", ax=axes[1], output_path=tmp_path / "a.png")
+        assert out == (fig, axes[1])
+        assert axes[1].images and not axes[0].images
+        assert plt.fignum_exists(fig.number)
+        assert (tmp_path / "a.png").exists()
+        plt.close(fig)
+
+    def test_background_false_draws_only_the_overlay(self, one_slide):
+        fig, ax = ms.plotting.plot_feature_map(one_slide, "score", background=False, return_fig=True)
+        assert len(ax.images) == 1
+        h0, w0 = one_slide.properties.shape
+        assert ax.get_xlim() == (0, w0)
+
     def test_unknown_feature_is_reported(self, one_slide):
         with pytest.raises(KeyError, match="neither"):
             ms.plotting.plot_feature_map(one_slide, "no_such_feature")

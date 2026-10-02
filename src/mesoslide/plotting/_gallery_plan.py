@@ -40,7 +40,7 @@ from ._utils import _finish_plot, FLUOROPHORE_COLORS, MARKER_COLOR_DEFAULTS
 
 if TYPE_CHECKING:
     from mesoslide._patch_data import PatchData
-    from mesoslide.tools.segmenters import TokenClusterer
+    from mesoslide.tools.segmenters import TokenClassifier, TokenClusterer
 
 
 def _paged_path(output_path: str, start_idx: int, end_idx: int) -> str:
@@ -175,7 +175,7 @@ class GalleryPlan:
     @deprecated_kwargs(clusterizers=rename("clusterers"))
     def add_cluster_map_rows(
         self,
-        clusterers: List["TokenClusterer"],
+        clusterers: List[Union["TokenClusterer", "TokenClassifier"]],
         model=None,
         slides=None,
         *,
@@ -188,7 +188,7 @@ class GalleryPlan:
         cache: bool = False,
         overwrite: bool = False,
     ) -> "GalleryPlan":
-        """Add one row per clusterer, each a cluster-map overlay.
+        """Add one row per token labeler (`TokenClusterer` or `TokenClassifier`), each a label-map overlay.
 
         When `blend_with_previous=True` (default), each row blends its own
         clusterer's map onto the same-patch-column frame from the most
@@ -229,7 +229,7 @@ class GalleryPlan:
 
         frames = [[] for _ in range(self.n_patches)]
         for k in range(n_clusterers):
-            max_label = max(clusterers[k].n_clusters_ - 1, 1)
+            max_label = max(clusterers[k].n_labels_ - 1, 1)
             for patch_idx in range(self.n_patches):
                 cmap_vals = cluster_maps[patch_idx][k].astype(np.float32) / max_label
                 colored = colormap(np.clip(cmap_vals, 0, 1))[..., :3]

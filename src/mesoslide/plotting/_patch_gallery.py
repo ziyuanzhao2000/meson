@@ -69,7 +69,7 @@ def plot_patch_gallery_with_saliency(
         Selected tiles, e.g. from :func:`mesoslide.select_top_patches`.
         Required .obs columns: 'x', 'y' (plus 'slide_id' across slides).
         Optional column: 'score' (used when show_scores=True).
-    clusterers : list of TokenClusterer
+    clusterers : list of TokenClusterer or TokenClassifier
         Each produces one cluster-map row. Must have distinct, non-empty
         `display_name`s (see :func:`extract_cluster_maps`).
     model : str or lazyslide_models.ImageModel, optional

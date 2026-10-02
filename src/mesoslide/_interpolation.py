@@ -8,6 +8,7 @@ dense array via several strategies:
 - :func:`interpolate_multiclass` – multi-class Voronoi via single EDT pass
 - :func:`interpolate_linear`     – continuous values via scipy griddata
 - :func:`interpolate_patch_max`  – fixed-size squares, highest score wins on overlap
+- :func:`assemble_token_map`     – per-tile token label grids stitched by central windows
 """
 from typing import Dict, Tuple, Optional, List, Union
 
@@ -291,4 +292,91 @@ def interpolate_patch_max(
     painted = acc > -np.inf
     out[painted] = acc[painted]
 
+    return out
+
+def _pixel_span(start: float, stop: float, downsample: float, size: int) -> np.ndarray:
+    """Output pixels whose centres ((j + 0.5) * downsample, level-0) lie in [start, stop)."""
+    j0 = max(int(np.ceil(start / downsample - 0.5)), 0)
+    j1 = min(int(np.ceil(stop / downsample - 0.5)), size)
+    return np.arange(j0, j1)
+
+
+def assemble_token_map(
+    tile_xy: np.ndarray,
+    token_grids: np.ndarray,
+    tile_px: int,
+    stride_px: int,
+    *,
+    shape: Optional[Tuple[int, int]] = None,
+    downsample: float = 1,
+    fill_margins: bool = True,
+    background: int = 0,
+) -> np.ndarray:
+    """
+    Stitch per-tile token label grids into one label map.
+
+    Overlapping tiles laid out on a `stride_px` grid each contribute the
+    central ``stride_px x stride_px`` window of their footprint -- the tokens
+    with the most surrounding context -- so neighbouring windows tile the
+    plane without gaps or double writes. With `fill_margins`, every tile's
+    full footprint is painted first, so tiles at the tissue border also
+    cover their outer margin.
+
+    Works in pixel space: each output pixel takes the token whose footprint
+    contains the pixel centre, so `tile_px` need not be a multiple of the
+    token grid (e.g. 555 px tiles on a 14 x 14 grid).
+
+    Parameters
+    ----------
+    tile_xy : ndarray of shape (n_tiles, 2)
+        Level-0 (x, y) of each tile's top-left corner.
+    token_grids : ndarray of shape (n_tiles, grid_h, grid_w)
+        Integer label per token.
+    tile_px : int
+        Tile side length at level 0.
+    stride_px : int
+        Tile spacing at level 0 (``stride_px <= tile_px``).
+    shape : (height, width), optional
+        Level-0 output extent. Defaults to the extent of the tiles.
+    downsample : float, default=1
+        Output resolution relative to level 0.
+    fill_margins : bool, default=True
+    background : int, default=0
+        Value of pixels no tile covers.
+
+    Returns
+    -------
+    label_map : ndarray of shape (round(height / downsample), round(width / downsample))
+        Same dtype as `token_grids`.
+    """
+    tile_xy = np.asarray(tile_xy, dtype=np.float64)
+    token_grids = np.asarray(token_grids)
+    if tile_xy.ndim != 2 or tile_xy.shape[1] != 2 or token_grids.ndim != 3 or len(tile_xy) != len(token_grids):
+        raise ValueError(
+            f"Expected tile_xy (n, 2) and token_grids (n, gh, gw); got {tile_xy.shape} and {token_grids.shape}"
+        )
+    if not 0 < stride_px <= tile_px:
+        raise ValueError(f"stride_px must be in (0, tile_px], got stride_px={stride_px}, tile_px={tile_px}")
+    if shape is None:
+        shape = (int(np.ceil(tile_xy[:, 1].max() + tile_px)), int(np.ceil(tile_xy[:, 0].max() + tile_px)))
+    out_h, out_w = int(round(shape[0] / downsample)), int(round(shape[1] / downsample))
+    out = np.full((out_h, out_w), background, dtype=token_grids.dtype)
+    if len(tile_xy) == 0:
+        return out
+
+    gh, gw = token_grids.shape[1:]
+    margin = (tile_px - stride_px) / 2
+    passes = [(0.0, float(tile_px))] if fill_margins else []
+    passes.append((margin, margin + stride_px))
+
+    for lo, hi in passes:
+        for (x, y), grid in zip(tile_xy, token_grids):
+            cols = _pixel_span(x + lo, x + hi, downsample, out_w)
+            rows = _pixel_span(y + lo, y + hi, downsample, out_h)
+            if len(cols) == 0 or len(rows) == 0:
+                continue
+            # Token containing each pixel centre, in tile-local level-0 coordinates.
+            tc = np.clip(((cols + 0.5) * downsample - x) * gw // tile_px, 0, gw - 1).astype(np.int64)
+            tr = np.clip(((rows + 0.5) * downsample - y) * gh // tile_px, 0, gh - 1).astype(np.int64)
+            out[np.ix_(rows, cols)] = grid[np.ix_(tr, tc)]
     return out

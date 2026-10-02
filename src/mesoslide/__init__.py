@@ -6,16 +6,19 @@ __getattr__, __dir__, _ = lazy.attach(__name__,
     submod_attrs = {
         '_settings': ['settings'],
         '_interpolation': ['interpolate_edt', 'interpolate_multiclass', 
-                           'interpolate_linear', 'interpolate_patch_max'],
-        '_utils': ['csv2mask', 'get_patch_scores', 'copy_feature_score_to_obs'],
+                           'interpolate_linear', 'interpolate_patch_max',
+                           'assemble_token_map'],
+        '_utils': ['csv2mask', 'gdf2mask', 'get_patch_scores', 'copy_feature_score_to_obs'],
+        '_annotations': ['read_annotations'],
         '_slides': ['iter_slides', 'open_slides', 'concat_slides',
-                    'slide_id_from', 'tile_table_key',
+                    'slide_id_from', 'tile_table_key', 'table_tile_geometries',
                     'attach_slide_ref', 'strip_slide_refs'],
         '_patch_selector': ['select_random_patches', 
                             'select_patches_for_binary_feature',    
                             'select_top_patches', 
                             'select_negative_patches',
-                            'select_exemplar_patches']
+                            'select_exemplar_patches',
+                            'select_region_patches']
     }
 )
 

@@ -2,39 +2,25 @@ import zlib
 from pathlib import Path
 from typing import Optional, Union
 
-import cv2
 import numpy as np
 import pandas as pd
-import torch
 from scipy.stats import spearmanr
-from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.cluster import KMeans
 from sklearn.metrics import pairwise_distances_argmin
 from sklearn.utils.validation import check_is_fitted
 
 from mesoslide.tools._model_stage import (
-    CallableStage,
     ImageModelStage,
     _canonical_registry_name,
     _require_dense_capable,
     _resolve_model,
 )
+from ._token_labeler import _TokenLabeler, _as_tokens
 
 _ORDERINGS = ("correlation", "diff_abundance", "ablation")
-_INTERPOLATIONS = {"nearest": cv2.INTER_NEAREST_EXACT, "bilinear": cv2.INTER_LINEAR}
 
 
-def _as_tokens(X) -> np.ndarray:
-    """Token embeddings as a float64 (B, N_tokens, D) array."""
-    if torch.is_tensor(X):
-        X = X.detach().cpu().numpy()
-    X = np.asarray(X, dtype=np.float64)
-    if X.ndim != 3:
-        raise ValueError(f"Expected token embeddings of shape (B, N_tokens, D), got {X.shape}")
-    return X
-
-
-class TokenClusterer(TransformerMixin, BaseEstimator):
+class TokenClusterer(_TokenLabeler):
     """
     KMeans clustering of ViT token embeddings, ordered by association with a
     feature score, rasterized to per-pixel cluster maps.
@@ -151,34 +137,16 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
         super().__setstate__(state)
 
     @property
-    def display_name(self) -> str:
-        """`name` if set, else `feature_name_`, else ''."""
-        return self.name or getattr(self, "feature_name_", None) or ""
+    def n_labels_(self) -> int:
+        check_is_fitted(self, "cluster_centers_")
+        return self.n_clusters_
 
     def _validate_params(self):
         if self.ordering not in _ORDERINGS:
             raise ValueError(f"ordering must be one of {_ORDERINGS}, got {self.ordering!r}")
-        if self.interpolation not in _INTERPOLATIONS:
-            raise ValueError(
-                f"interpolation must be one of {tuple(_INTERPOLATIONS)}, got {self.interpolation!r}"
-            )
+        self._validate_interpolation()
         if not 1 <= self.n_clusters <= 256:
             raise ValueError(f"n_clusters must be in [1, 256], got {self.n_clusters}")
-
-    def _set_grid_size(self, n_tokens: int):
-        """Keep a grid_size_ already set from the model; otherwise infer a square grid."""
-        grid = getattr(self, "grid_size_", None)
-        if grid is not None:
-            if grid[0] * grid[1] != n_tokens:
-                raise ValueError(f"Expected {grid[0] * grid[1]} tokens ({grid[0]}x{grid[1]} grid), got {n_tokens}")
-            return
-        side = int(round(np.sqrt(n_tokens)))
-        if side * side != n_tokens:
-            raise ValueError(
-                f"Cannot infer a square token grid from {n_tokens} tokens; set grid_size_ "
-                f"(or use fit_token_clusterer, which reads it from the model)."
-            )
-        self.grid_size_ = (side, side)
 
     def fit(self, X, y=None, *, X_order=None, y_order=None) -> "TokenClusterer":
         """
@@ -365,47 +333,6 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
         gh, gw = self.grid_size_
         return self.cluster_order_[self._raw_labels(X)].reshape(len(X), gh, gw).astype(np.uint8)
 
-    def transform(self, X, output_size: Optional[tuple] = None) -> np.ndarray:
-        """
-        Canonical cluster labels upsampled to pixel resolution.
-
-        Parameters
-        ----------
-        X : array-like or torch.Tensor of shape (B, N_tokens, D)
-        output_size : tuple, optional
-            Target (height, width). Defaults to grid_size_ * patch_size_.
-
-        Returns
-        -------
-        cluster_masks : ndarray of shape (B, H, W), dtype uint8
-        """
-        labels = self.predict(X)
-        if output_size is None:
-            if getattr(self, "patch_size_", None) is None:
-                raise ValueError("output_size is required when patch_size_ is unknown.")
-            (gh, gw), (ph, pw) = self.grid_size_, self.patch_size_
-            output_size = (gh * ph, gw * pw)
-        H, W = output_size
-        interp = _INTERPOLATIONS[self.interpolation]
-        out = np.empty((len(labels), H, W), dtype=np.uint8)
-        for i, grid in enumerate(labels):
-            out[i] = cv2.resize(grid, (W, H), interpolation=interp)
-        return out
-
-    def as_stage(self, *, output_size: Optional[tuple] = None, name: Optional[str] = None,
-                 cache: bool = True, overwrite: bool = False) -> CallableStage:
-        """Wrap `transform` as a `ModelStage` for `run_model_stages`.
-
-        Chain it downstream of an `ImageModelStage(dense=True)`. `output_size`
-        is fixed for the whole stage since one batch shares one resolution.
-        """
-        stage_name = name or self.display_name or f"cluster_{id(self)}"
-        return CallableStage(
-            lambda token_embeddings: self.transform(token_embeddings, output_size),
-            name=stage_name, input_kind="dense",
-            output_kind="dense", cache=cache, overwrite=overwrite, device="cpu",
-        )
-
     def plot_cluster_feature_correlation(self, ax=None):
         """
         Scatter each cluster's per-patch token count against the patch's
@@ -518,16 +445,18 @@ class TokenClusterer(TransformerMixin, BaseEstimator):
 
 def predict_token_labels(clusterers, X, *, chunk_size: int = 50_000) -> np.ndarray:
     """
-    Canonical token labels from several clusterers on the same token embeddings.
+    Token labels from several labelers on the same token embeddings.
 
-    Same result as ``np.stack([c.predict(X) for c in clusterers])``, but the
-    distances to every clusterer's centroids come from one matrix product per
-    chunk of tokens instead of one pass per clusterer.
+    Same result as ``np.stack([c.predict(X) for c in clusterers])``. When every
+    labeler is a `TokenClusterer`, the distances to all centroids come from one
+    matrix product per chunk of tokens instead of one pass per clusterer;
+    otherwise (e.g. a `TokenClassifier` is included) each labeler predicts
+    separately.
 
     Parameters
     ----------
-    clusterers : sequence of TokenClusterer
-        Fitted clusterers sharing the same `grid_size_` and embedding dimension.
+    clusterers : sequence of TokenClusterer or TokenClassifier
+        Fitted labelers sharing the same grid and embedding dimension.
     X : array-like or torch.Tensor of shape (B, N_tokens, D)
     chunk_size : int, default=50000
         Tokens per matrix product, bounding memory at chunk_size x total centroids.
@@ -539,6 +468,8 @@ def predict_token_labels(clusterers, X, *, chunk_size: int = 50_000) -> np.ndarr
     clusterers = list(clusterers)
     if not clusterers:
         raise ValueError("At least one clusterer must be provided.")
+    if not all(isinstance(c, TokenClusterer) for c in clusterers):
+        return np.stack([c.predict(X) for c in clusterers])
     for c in clusterers:
         check_is_fitted(c, "cluster_order_")
     gh, gw = clusterers[0].grid_size_

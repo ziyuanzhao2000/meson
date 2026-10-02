@@ -682,3 +682,48 @@ def select_exemplar_patches(
     feature_pos = out.obs["_feature_name"].astype(str).map(position).to_numpy()
     order = np.lexsort((out.obs["_feature_rank"].to_numpy(), feature_pos))
     return out[order]
+
+
+def select_region_patches(wsi, region, *, tile_key: str = DEFAULT_TILE_KEY) -> "PatchData":
+    """
+    Non-overlapping patches of the slide's tile size covering a level-0 region.
+
+    Unlike the other selectors, the patches are not rows of the slide's tile
+    table: they form a fresh grid anchored at the region's top-left corner,
+    so a field of view can be embedded or labelled exactly as tiled (e.g.
+    with :func:`mesoslide.preprocessing.extract_cluster_maps`). Patch pixels
+    are read with the size of ``wsi.tile_spec(tile_key)``.
+
+    Parameters
+    ----------
+    wsi : WSIData
+    region : (x, y, width, height)
+        Level-0 pixels. Width and height are rounded up to whole tiles.
+    tile_key : str, default='tiles'
+
+    Returns
+    -------
+    PatchData in row-major order, with `.obs` columns 'x', 'y', 'row', 'col',
+    'slide_id' and '_slide_ref', and `.uns['grid_shape'] = (n_rows, n_cols)`.
+    """
+    from mesoslide._slides import slide_id_from
+
+    spec = wsi.tile_spec(tile_key)
+    tile_w, tile_h = int(spec.base_width), int(spec.base_height)
+    x0, y0, width, height = (int(round(v)) for v in region)
+    n_cols, n_rows = -(-width // tile_w), -(-height // tile_h)
+    rows, cols = np.divmod(np.arange(n_rows * n_cols), n_cols)
+    x = x0 + cols * tile_w
+    y = y0 + rows * tile_h
+
+    obs = pd.DataFrame({"tile_id": np.arange(len(x)), "x": x, "y": y, "row": rows, "col": cols,
+                        SLIDE_ID: slide_id_from(wsi)})
+    obs.index = obs["tile_id"].astype(str)
+    obs[SLIDE_REF] = pd.Series([wsi] * len(obs), index=obs.index, dtype=object)
+    tiles = gpd.GeoDataFrame(
+        {"tile_id": obs["tile_id"].to_numpy()},
+        geometry=[shapely.geometry.box(xi, yi, xi + tile_w, yi + tile_h) for xi, yi in zip(x, y)],
+    )
+    patches = _parse_patch_data(ad.AnnData(obs=obs), tiles)
+    patches.tables[TILES_TABLE_KEY].uns["grid_shape"] = (int(n_rows), int(n_cols))
+    return patches

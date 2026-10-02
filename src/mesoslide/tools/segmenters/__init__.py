@@ -4,6 +4,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
     submod_attrs={
     'UNet': ['GenericSegmenter'],
     '_token_clusterer': ['TokenClusterer', 'fit_token_clusterer', 'predict_token_labels'],
+    '_token_classifier': ['TokenClassifier'],
     'TokenClusterizer': ['TokenClusterizer'],
     '_adaptive_sampling': ['adaptive_sample_wsi', 'adaptive_refine_step']
     }
