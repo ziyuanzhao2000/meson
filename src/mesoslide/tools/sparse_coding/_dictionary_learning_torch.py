@@ -82,6 +82,161 @@ def fista_lasso(X: torch.Tensor, D: torch.Tensor, alpha: float, *,
     return c
 
 
+def _row_lipschitz(GW: torch.Tensor) -> torch.Tensor:
+    """Upper bound on each row's largest eigenvalue of GW (n, m, m): min of the
+    Frobenius norm and the largest absolute row sum (Gershgorin). Shape (n, 1)."""
+    frob = torch.linalg.matrix_norm(GW)
+    gersh = GW.abs().sum(-1).amax(-1)
+    return torch.minimum(frob, gersh).clamp_min(torch.finfo(GW.dtype).tiny).unsqueeze(-1)
+
+
+def _grad_map(c, g, L, alpha, positive):
+    """Gradient mapping L * (c - prox(c - g / L)); zero exactly at the optimum."""
+    return L * (c - _prox(c - g / L, alpha / L, positive))
+
+
+def _fista_restricted(XDtW, GW, c, alpha, *, positive, max_iter, stop, check_every):
+    """FISTA with per-row step 1/L_r on rows' restricted problems (gradient yW GW - XDtW).
+    Starts from c. Returns (codes, iterations run)."""
+    L = _row_lipschitz(GW)
+    step, thr = 1.0 / L, alpha / L
+    y = c
+    t = torch.ones(c.shape[0], 1, device=c.device, dtype=c.dtype)
+    it = 0
+    for it in range(1, max_iter + 1):
+        g = torch.bmm(y.unsqueeze(1), GW).squeeze(1) - XDtW
+        c_new = _prox(y - step * g, thr, positive)
+        restart = ((y - c_new) * (c_new - c)).sum(dim=1, keepdim=True) > 0
+        t = torch.where(restart, torch.ones_like(t), t)
+        t_new = (1.0 + torch.sqrt(1.0 + 4.0 * t * t)) / 2.0
+        y = c_new + ((t - 1.0) / t_new) * (c_new - c)
+        c, t = c_new, t_new
+        if it % check_every == 0:
+            gc = torch.bmm(c.unsqueeze(1), GW).squeeze(1) - XDtW
+            if _grad_map(c, gc, L, alpha, positive).abs().max() <= stop:
+                break
+    return c, it
+
+
+def lasso_working_set(X: torch.Tensor, D: torch.Tensor, alpha: float, *,
+                      positive: bool,
+                      max_iter: int = 1000,
+                      tol: float = 1e-4,
+                      check_every: int = 10,
+                      working_set_size: int = 128,
+                      max_outer: int = 20,
+                      row_chunk: int = 8192,
+                      G: "torch.Tensor | None" = None) -> torch.Tensor:
+    """
+    Same problem and stopping rule as `fista_lasso`, solved per row on a small
+    working set of atoms.
+
+    Each row starts with the `working_set_size` atoms most correlated with it
+    (largest x d_k, or |x d_k| if not positive) and runs FISTA on that subset,
+    whose Gram matrix and Lipschitz constant are much smaller than the full
+    dictionary's. The optimality condition is then checked over all atoms
+    (gradient from two thin products, 2 n k d); atoms outside the set that
+    violate it replace zero-coded atoms in the set, the working set grows if a
+    row has no zero-coded slot left, and FISTA continues from the current codes.
+    The result is the full-problem optimum to the same tolerance as
+    `fista_lasso`: the outer loop only stops when no atom violates
+    |gradient mapping| <= tol * alpha.
+
+    Parameters
+    ----------
+    X, D, alpha, positive, max_iter, tol, check_every
+        As in `fista_lasso`; `max_iter` is the FISTA iteration budget per outer pass.
+    working_set_size : int
+        Initial number of atoms per row (capped at the number of atoms).
+    max_outer : int
+        Maximum number of check-and-update passes.
+    row_chunk : int
+        Rows solved together, bounding memory for the (rows, m, m) Gram blocks.
+    G : tensor, optional
+        Precomputed D D^T.
+
+    Returns
+    -------
+    (n, k) tensor of codes.
+    """
+    if G is None:
+        G = D @ D.T
+    k = D.shape[0]
+    stop = tol * max(float(alpha), torch.finfo(X.dtype).eps)
+    out = torch.zeros(X.shape[0], k, device=X.device, dtype=X.dtype)
+    for s in range(0, X.shape[0], row_chunk):
+        x = X[s:s + row_chunk]
+        XDt = x @ D.T
+        m = min(working_set_size, k)
+        # Rows still being solved: their chunk positions, working sets and codes.
+        rows = torch.arange(x.shape[0], device=X.device)
+        idx = torch.topk(XDt if positive else XDt.abs(), m, dim=1).indices      # (r, m)
+        cW = torch.zeros(len(rows), m, device=X.device, dtype=X.dtype)
+        for _ in range(max_outer):
+            GW = G[idx.unsqueeze(-1), idx.unsqueeze(-2)]                       # (r, m, m)
+            cW, _ = _fista_restricted(XDt[rows].gather(1, idx), GW, cW, alpha, positive=positive,
+                                      max_iter=max_iter, stop=stop, check_every=check_every)
+            # Full gradient of the smooth part, (c D - x) D^T, from two thin products.
+            c_full = torch.zeros(len(rows), k, device=X.device, dtype=X.dtype).scatter_(1, idx, cW)
+            g = (c_full @ D) @ D.T - XDt[rows]
+            # Atoms outside the set have c = 0; their gradient mapping is the prox step.
+            viol = _prox(-g, alpha, positive).abs()
+            viol.scatter_(1, idx, -1.0)          # atoms in the set are never picked to enter it
+            need = (viol > stop).sum(1)
+            done = need == 0
+            if done.any():
+                out[s + rows[done]] = c_full[done]
+            if done.all():
+                break
+            keep = ~done
+            rows, idx, cW, viol, need = rows[keep], idx[keep], cW[keep], viol[keep], need[keep]
+            free = cW == 0
+            n_free = free.sum(1)
+            full_rows = (n_free == 0)
+            if full_rows.any() and m < k:
+                # Some rows have no zero-coded slot: grow every remaining row's set.
+                grow = min(max(int(need[full_rows].max()), 16), k - m)
+                add = torch.topk(viol, grow, dim=1).indices
+                idx = torch.cat([idx, add], 1)
+                cW = torch.cat([cW, torch.zeros(len(rows), grow, device=X.device, dtype=X.dtype)], 1)
+                m += grow
+            else:
+                # Per row, swap the strongest violators into its zero-coded slots.
+                n_swap = torch.minimum(need, n_free)
+                S = int(n_swap.max())
+                add = torch.topk(viol, S, dim=1).indices                       # strongest first
+                slot = torch.topk(free.to(X.dtype), S, dim=1).indices          # zero-coded slots
+                take = torch.arange(S, device=X.device).unsqueeze(0) < n_swap.unsqueeze(1)
+                idx = idx.scatter(1, slot, torch.where(take, add, idx.gather(1, slot)))
+        else:
+            # Outer budget exhausted: keep the current codes of unfinished rows.
+            out[s + rows] = torch.zeros(len(rows), k, device=X.device, dtype=X.dtype).scatter_(1, idx, cW)
+    return out
+
+
+def solve_lasso(X: torch.Tensor, D: torch.Tensor, alpha: float, *,
+                positive: bool,
+                method: str = "auto",
+                max_iter: int = 1000,
+                tol: float = 1e-4,
+                G: "torch.Tensor | None" = None,
+                L: "torch.Tensor | None" = None,
+                working_set_size: int = 128) -> torch.Tensor:
+    """
+    Per-row lasso codes with `fista_lasso` ("full") or `lasso_working_set`
+    ("working_set"); both reach the same optimum to tolerance `tol`. "auto"
+    uses the working set when the dictionary has more than 2 * working_set_size atoms.
+    """
+    if method == "auto":
+        method = "working_set" if D.shape[0] > 2 * working_set_size else "full"
+    if method == "full":
+        return fista_lasso(X, D, alpha, positive=positive, max_iter=max_iter, tol=tol, G=G, L=L)
+    if method == "working_set":
+        return lasso_working_set(X, D, alpha, positive=positive, max_iter=max_iter, tol=tol, G=G,
+                                 working_set_size=working_set_size)
+    raise ValueError(f"method must be 'auto', 'full' or 'working_set', got {method!r}")
+
+
 def _update_dict_torch(dictionary: torch.Tensor, Y: torch.Tensor,
                        A: torch.Tensor, B: torch.Tensor, *,
                        positive: bool, generator: torch.Generator) -> int:
@@ -145,6 +300,8 @@ def fit_dictionary_torch(X: np.ndarray, *,
                          positive_dict: bool = False,
                          fista_max_iter: int = 1000,
                          fista_tol: float = 1e-4,
+                         lasso_method: str = "auto",
+                         working_set_size: int = 128,
                          device: str = "cuda",
                          seed: int = 0,
                          mean: "np.ndarray | None" = None,
@@ -154,7 +311,8 @@ def fit_dictionary_torch(X: np.ndarray, *,
                          init_sample_size: int = 100_000,
                          verbose: "int | bool" = False) -> "tuple[np.ndarray, dict]":
     """
-    Port of sklearn's MiniBatchDictionaryLearning.fit with FISTA sparse coding.
+    Port of sklearn's MiniBatchDictionaryLearning.fit with FISTA sparse coding
+    (`solve_lasso`; `lasso_method` and `working_set_size` select the solver).
 
     X stays in host memory; each minibatch is copied to `device`, then scaled
     by `scale` and centered with `mean` there, so the full matrix is never
@@ -200,8 +358,8 @@ def fit_dictionary_torch(X: np.ndarray, *,
         bsz = Xb.shape[0]
 
         # sklearn _minibatch_step
-        code = fista_lasso(Xb, dictionary, alpha, positive=positive_code,
-                           max_iter=fista_max_iter, tol=fista_tol)
+        code = solve_lasso(Xb, dictionary, alpha, positive=positive_code, method=lasso_method,
+                           max_iter=fista_max_iter, tol=fista_tol, working_set_size=working_set_size)
         batch_cost = (0.5 * ((Xb - code @ dictionary) ** 2).sum()
                       + alpha * code.abs().sum()) / bsz
 

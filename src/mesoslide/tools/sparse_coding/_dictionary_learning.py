@@ -7,7 +7,7 @@ import scipy.sparse as sp
 import torch
 from tqdm.auto import tqdm
 
-from ._dictionary_learning_torch import fista_lasso, fit_dictionary_torch, lipschitz_constant
+from ._dictionary_learning_torch import fit_dictionary_torch, lipschitz_constant, solve_lasso
 
 _BACKENDS = ("auto", "sklearn", "torch")
 
@@ -74,6 +74,13 @@ class MiniBatchDictionaryCoding(TransformerMixin, BaseEstimator):
     fista_max_iter : int, default=1000
     fista_tol : float, default=1e-4
         FISTA stops when the KKT residual is <= fista_tol * alpha.
+    lasso_method : {"auto", "full", "working_set"}, default="auto"
+        Torch sparse coder: FISTA over all atoms ("full"), or FISTA on a per-row
+        working set of atoms checked against all atoms ("working_set"; same
+        optimum, much faster for large dictionaries). "auto" uses the working set
+        when n_components > 2 * working_set_size.
+    working_set_size : int, default=128
+        Initial atoms per row for the working-set coder; grows if needed.
     dict_kwargs : dict, optional
         Extra keyword arguments for MiniBatchDictionaryLearning (e.g. `tol`,
         `max_no_improvement`, `transform_max_iter`). The torch backend reads
@@ -100,6 +107,8 @@ class MiniBatchDictionaryCoding(TransformerMixin, BaseEstimator):
                  backend: str = "auto",
                  fista_max_iter: int = 1000,
                  fista_tol: float = 1e-4,
+                 lasso_method: str = "auto",
+                 working_set_size: int = 128,
                  dict_kwargs: "dict | None" = None,
                  random_state=None):
         self.n_components = n_components
@@ -120,6 +129,8 @@ class MiniBatchDictionaryCoding(TransformerMixin, BaseEstimator):
         self.backend = backend
         self.fista_max_iter = fista_max_iter
         self.fista_tol = fista_tol
+        self.lasso_method = lasso_method
+        self.working_set_size = working_set_size
         self.dict_kwargs = dict_kwargs
         self.random_state = random_state
 
@@ -206,6 +217,8 @@ class MiniBatchDictionaryCoding(TransformerMixin, BaseEstimator):
                 positive_dict=self.positive_dict,
                 fista_max_iter=self.fista_max_iter,
                 fista_tol=self.fista_tol,
+                lasso_method=self.lasso_method,
+                working_set_size=self.working_set_size,
                 device=device,
                 seed=seed,
                 mean=self.mean_,
@@ -281,8 +294,10 @@ class MiniBatchDictionaryCoding(TransformerMixin, BaseEstimator):
             for start in tqdm(starts, disable=not progress_bar):
                 block = torch.as_tensor(X[start:start + self.transform_batch_size],
                                         dtype=dtype).to(device) * self.scale_factor_ - mean
-                code = fista_lasso(block, D, alpha, positive=self.positive_code,
-                                   max_iter=self.fista_max_iter, tol=self.fista_tol, G=G, L=L)
+                code = solve_lasso(block, D, alpha, positive=self.positive_code,
+                                   method=self.lasso_method, max_iter=self.fista_max_iter,
+                                   tol=self.fista_tol, G=G, L=L,
+                                   working_set_size=self.working_set_size)
                 if column_keep_indices is not None:
                     code = code[:, column_keep_indices]
                 arr = code.to(torch.float32).to_sparse().cpu()

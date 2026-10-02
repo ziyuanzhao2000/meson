@@ -178,3 +178,62 @@ def test_backend_resolution():
         MiniBatchDictionaryCoding(backend="jax")._resolve_backend("cpu")
     with pytest.raises(ValueError, match="lasso"):
         MiniBatchDictionaryCoding(backend="torch", transform_algorithm="omp")._resolve_backend("cpu")
+
+
+# ── working-set coder ────────────────────────────────────────────────────────
+
+def _ws(X, D, alpha, positive, **kwargs):
+    from mesoslide.tools.sparse_coding._dictionary_learning_torch import lasso_working_set
+    code = lasso_working_set(torch.tensor(X, device=DEVICE), torch.tensor(D, device=DEVICE),
+                             alpha, positive=positive, **kwargs)
+    return code.cpu().double().numpy()
+
+
+@pytest.mark.parametrize("positive", [True, False])
+@pytest.mark.parametrize("m", [2, 8, 32])   # 2 forces growth, 8 forces swaps, 32 mostly fits
+def test_working_set_reaches_optimum(positive, m):
+    """Objective vs sklearn lasso_cd; codes vs tightly converged full FISTA (lasso_cd may stop early)."""
+    alpha = 0.5
+    X, D = _lasso_problem(60, 32, 96, seed=3)            # 3x overcomplete
+    ref = sparse_encode(X, D, algorithm="lasso_cd", alpha=alpha, positive=positive, max_iter=5000)
+    full = _fista(X, D, alpha, positive, tol=1e-8, max_iter=50000)
+    C = _ws(X, D, alpha, positive, working_set_size=m, tol=1e-8, max_iter=50000, row_chunk=32)
+    assert np.all(_objective(X, C, D, alpha) <= _objective(X, ref, D, alpha) * (1 + 1e-6))
+    np.testing.assert_allclose(_objective(X, C, D, alpha), _objective(X, full, D, alpha), rtol=1e-7)
+    np.testing.assert_allclose(C, full, atol=1e-4)
+    if positive:
+        assert C.min() >= 0
+
+
+def test_working_set_matches_full_fista_default_tol():
+    alpha = 0.5
+    X, D = _lasso_problem(300, 64, 256, seed=4)
+    full = _fista(X, D, alpha, True)
+    ws = _ws(X, D, alpha, True, working_set_size=32)
+    np.testing.assert_allclose(_objective(X, ws, D, alpha), _objective(X, full, D, alpha), rtol=1e-6)
+
+
+def test_solve_lasso_dispatch():
+    from mesoslide.tools.sparse_coding._dictionary_learning_torch import solve_lasso
+    X, D = _lasso_problem(50, 16, 64, seed=5)
+    Xt, Dt = torch.tensor(X, device=DEVICE), torch.tensor(D, device=DEVICE)
+    a = solve_lasso(Xt, Dt, 0.3, positive=True, method="auto", working_set_size=16, tol=1e-6, max_iter=5000)
+    b = solve_lasso(Xt, Dt, 0.3, positive=True, method="full", tol=1e-6, max_iter=5000)
+    np.testing.assert_allclose(_objective(X, a.cpu().numpy(), D, 0.3), _objective(X, b.cpu().numpy(), D, 0.3),
+                               rtol=1e-6)
+    with pytest.raises(ValueError, match="method"):
+        solve_lasso(Xt, Dt, 0.3, positive=True, method="lars")
+
+
+def test_fit_working_set_matches_full():
+    """Same init and batches: training with either coder gives the same dictionary."""
+    rng = np.random.default_rng(0)
+    X = rng.standard_normal((4 * 50, 24))
+    dict_init = rng.standard_normal((48, 24))
+    dict_init /= np.linalg.norm(dict_init, axis=1, keepdims=True)
+    params = dict(n_components=48, alpha=0.1, batch_size=50, max_iter=1, tol=0.0, max_no_improvement=None,
+                  positive_code=True, dict_init=dict_init, shuffle=False, device=DEVICE,
+                  fista_tol=1e-8, fista_max_iter=20000)
+    D_full, _ = fit_dictionary_torch(X, lasso_method="full", **params)
+    D_ws, _ = fit_dictionary_torch(X, lasso_method="working_set", working_set_size=8, **params)
+    np.testing.assert_allclose(D_ws, D_full, atol=1e-5)
