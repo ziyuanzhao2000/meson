@@ -309,7 +309,7 @@ class FeatureClusterer:
         self._is_clustered = True
         return self
 
-    def plot_heatmap(self, center: Optional[float] = None, **kwargs):
+    def plot_heatmap(self, center: Optional[float] = None, display_matrix = 'soft', **kwargs):
         """
         Plot the clustered heatmap.
 
@@ -323,7 +323,7 @@ class FeatureClusterer:
         self._check_clustered()
         g, *_ = plot_clustered_heatmap(
             matrix=1 - self.iou_strict_,
-            display_matrix=1 - self.iou_soft_,
+            display_matrix=1 - self.iou_soft_ if display_matrix == 'soft' else 1 - self.iou_strict_,
             is_distance_matrix=True,
             linkage_method='average',
             threshold=self._cluster_threshold,    
@@ -410,11 +410,11 @@ class FeatureClusterer:
         patch_size: float = 1.0,
         border_extend: float = 0.05,
         border_alpha: float = 1.0,
-        cmap="tab20",
+        cmap=None,
         fontsize: float = 10,
         output_path: Optional[str] = None,
         dpi: int = 300,
-        return_fig: bool = False,
+        return_fig: bool = True,
         return_buffer: bool = False,
         progress_bar: bool = True,
     ):
@@ -449,6 +449,16 @@ class FeatureClusterer:
         """
         from mesoslide.preprocessing._extract_patches import extract_patch_images
 
+        if cmap is None:
+            num_unique_groups = len(np.unique(self.reordered_clusters_)) if self._is_clustered else 0
+            if num_unique_groups <= 20:
+                cmap = 'tab20'
+            else:
+                import distinctipy
+                from matplotlib.colors import ListedColormap
+                cmap = ListedColormap(distinctipy.get_colors(num_unique_groups, rng=43))
+
+                
         if self.exemplar_patches_ is None:
             raise RuntimeError("Call select_exemplars() before plot_feature_gallery().")
         exemplars = self.exemplar_patches_
