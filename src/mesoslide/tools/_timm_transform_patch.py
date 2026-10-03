@@ -1,14 +1,16 @@
-"""Monkeypatch for lazyslide_models' hardcoded TimmModel.get_transform.
+"""The paper's preprocessing for UNI/UNI2, kept identical across lazyslide-models versions.
 
-lazyslide_models.base.TimmModel.get_transform() unconditionally returns a
-hardcoded bicubic+CenterCrop transform for every timm-backed model it wraps
-(UNI, UNI2, GigaPath, Virchow, Virchow2, the Lunit variants), regardless of
-what that checkpoint's own timm `pretrained_cfg` declares (e.g. UNI's
-pretrained_cfg says bilinear interpolation, crop_pct=1 -- no crop at all).
-This builds a corrected, config-driven replacement and applies it per-model-
-instance to models resolved by mesoslide.tools.feature_extraction, without mutating
-lazyslide_models' global state or touching models that already override
-get_transform themselves (HOptimus, H0Mini, PathOrchestra).
+The SAE, MP-SAE and token clusterers were fit on UNI embeddings computed
+with the checkpoint's own timm `pretrained_cfg` recipe: bilinear resize to
+224 px on uint8 pixels, then cast, no center crop (identical to the original
+`UNIEmbedder`: `Resize(224)` on uint8). lazyslide-models >= 0.1.0 also uses
+bilinear for UNI/UNI2, but casts to float before resizing, which shifts
+embeddings slightly (cosine down to ~0.995 on some tiles). To keep embeddings
+comparable with those models, UNI and UNI2 get the recipe below, installed
+per instance without touching lazyslide_models' global state.
+
+Every other encoder uses lazyslide-models' own `get_transform`, which since
+0.1.0 follows each model's upstream recipe (`TimmModel.transform_kws`).
 """
 
 from __future__ import annotations
@@ -17,9 +19,12 @@ import types
 
 import torch
 
+#: Class names of the encoders whose embeddings back mesoslide's fitted models.
+PAPER_RECIPE_MODELS = frozenset({"UNI", "UNI2"})
 
-def corrected_transform(model):
-    """Build a v2 Compose transform driven by `model.model.pretrained_cfg`.
+
+def legacy_uni_transform(model):
+    """Build the v2 Compose transform from `model.model.pretrained_cfg`, resizing on uint8.
 
     `model` is a `lazyslide_models.base.TimmModel` (or subclass) instance;
     `model.model` is the underlying raw timm nn.Module, which carries
@@ -43,9 +48,7 @@ def corrected_transform(model):
     )
     crop_pct = cfg.get("crop_pct") or 1.0
 
-    # Resize on raw uint8 pixels, then cast -- matches the legacy shim and
-    # standard PIL/ToTensor practice, rather than lazyslide_models' current
-    # cast-before-resize order.
+    # Resize on raw uint8 pixels, then cast, as the original UNIEmbedder did.
     steps = [ToImage(), Resize((h, w), interpolation=interpolation, antialias=True)]
     if crop_pct < 1.0:
         steps.append(CenterCrop((h, w)))
@@ -53,22 +56,22 @@ def corrected_transform(model):
     return Compose(steps)
 
 
-def patch_transform_if_needed(model):
-    """Install a per-instance corrected `get_transform` if `model` would
-    otherwise fall through to lazyslide_models' buggy TimmModel default.
-
-    No-op for models that override `get_transform` themselves and for
-    non-TimmModel models (e.g. CONCH) -- checked via identity against the
-    exact base-class method object, not a class-hierarchy isinstance check,
-    so it stays self-limiting to exactly the currently-broken models and
-    automatically safe if lazyslide_models adds correctly-implemented
-    TimmModel subclasses later.
-    """
+def uses_paper_recipe(model) -> bool:
+    """True if `model` gets `legacy_uni_transform` from `patch_transform_if_needed`."""
     from lazyslide_models.base import TimmModel
 
-    if not isinstance(model, TimmModel):
-        return
-    if type(model).get_transform is not TimmModel.get_transform:
-        return  # subclass already overrides it; leave alone
+    return (
+        isinstance(model, TimmModel)
+        and type(model).__name__ in PAPER_RECIPE_MODELS
+        and type(model).get_transform is TimmModel.get_transform
+    )
 
-    model.get_transform = types.MethodType(lambda self: corrected_transform(self), model)
+
+def patch_transform_if_needed(model):
+    """Install `legacy_uni_transform` as `model.get_transform` for UNI/UNI2; no-op otherwise.
+
+    Skipped if the class overrides `get_transform` itself, so a future
+    lazyslide-models UNI with its own transform is left alone.
+    """
+    if uses_paper_recipe(model):
+        model.get_transform = types.MethodType(lambda self: legacy_uni_transform(self), model)

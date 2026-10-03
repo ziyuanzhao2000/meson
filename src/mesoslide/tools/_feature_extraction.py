@@ -48,6 +48,7 @@ from scipy.sparse import csr_matrix, hstack, issparse, vstack
 from spatialdata.models import TableModel
 from tqdm.auto import tqdm
 
+from mesoslide._utils import overwrite_element
 from ._model_stage import (
     CallableStage,
     ImageModelStage,
@@ -97,20 +98,24 @@ def _write_sparse_features(table: AnnData, prefix: str, matrix) -> AnnData:
     must change together -- AnnData validates each against the other's
     current shape, so assigning them one at a time is rejected.
     """
-    matrix = matrix if issparse(matrix) else csr_matrix(matrix)
+    matrix = matrix.tocsr() if issparse(matrix) else csr_matrix(matrix)
     new_vars = [f"{prefix}_{i}" for i in range(matrix.shape[1])]
 
     existing_vars = list(table.var_names)
     keep_cols = [i for i, v in enumerate(existing_vars) if not v.startswith(f"{prefix}_")]
     diff_vars = [existing_vars[i] for i in keep_cols]
 
-    base = table.X
-    base = csr_matrix((table.n_obs, 0)) if base is None else csr_matrix(base)
-    if len(diff_vars) < len(existing_vars):
-        base = base[:, keep_cols]
+    if diff_vars:
+        base = csr_matrix(table.X)
+        if len(diff_vars) < len(existing_vars):
+            base = base[:, keep_cols]
+        X = hstack([base, matrix], format="csr")
+    else:
+        # Nothing to keep: use the matrix as is rather than copying it via hstack.
+        X = matrix
 
     return AnnData(
-        X=hstack([base, matrix]).tocsr(),
+        X=X,
         obs=table.obs,
         var=pd.DataFrame(index=pd.Index(diff_vars + new_vars)),
         obsm=dict(table.obsm),
@@ -489,8 +494,12 @@ def run_model_stages(
         if not stage.cache:
             continue
         if stage.output_kind == "sparse":
-            result = vstack(accum[j]).tocsr()
+            # Stack straight to CSR and drop the per-batch parts first: a slide's
+            # matrix can be several GB, so every extra live copy counts.
+            result = vstack(accum[j], format="csr")
+            accum[j] = None
             table = _write_sparse_features(table, stage.name, result)
+            del result
         else:
             result = np.concatenate(accum[j], axis=0)
             table.obsm[stage.name] = result
@@ -501,7 +510,7 @@ def run_model_stages(
 
     slide_or_patches.tables[table_key] = table
     if save:
-        slide_or_patches.write_element(table_key, overwrite=True)
+        overwrite_element(slide_or_patches, table_key)
     return slide_or_patches
 
 

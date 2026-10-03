@@ -841,21 +841,6 @@ wheels = [
 ]
 
 [[package]]
-name = "cyclopts"
-version = "4.25.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "attrs" },
-    { name = "docstring-parser" },
-    { name = "rich" },
-    { name = "rich-rst" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/97/62/92422b2ed96d82492dc3e22c0d481f14eba3846a099fd5204575a0a4ffa2/cyclopts-4.25.0.tar.gz", hash = "sha256:251e6120d1baf4504ef0e74c0fa96837793898393870784dcaa77957adcde41d", size = 201456, upload-time = "2026-09-06T15:21:38.151Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/54/6f/41baab9dbb4825d2b5fde85fb6f8e46453a969912cf13368f60dc6b26278/cyclopts-4.25.0-py3-none-any.whl", hash = "sha256:fc718173321964a34a37e3a1eef09080b2f30cd59a8cc0f860d5dc9123efdb15", size = 241363, upload-time = "2026-09-06T15:21:36.555Z" },
-]
-
-[[package]]
 name = "dask"
 version = "2026.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -988,15 +973,6 @@ wheels = [
 ]
 
 [[package]]
-name = "docstring-parser"
-version = "0.18.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e0/4d/f332313098c1de1b2d2ff91cf2674415cc7cddab2ca1b01ae29774bd5fdf/docstring_parser-0.18.0.tar.gz", hash = "sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015", size = 29341, upload-time = "2026-04-14T04:09:19.867Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a7/5f/ed01f9a3cdffbd5a008556fc7b2a08ddb1cc6ace7effa7340604b1d16699/docstring_parser-0.18.0-py3-none-any.whl", hash = "sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b", size = 22484, upload-time = "2026-04-14T04:09:18.638Z" },
-]
-
-[[package]]
 name = "donfig"
 version = "0.8.1.post1"
 source = { registry = "https://pypi.org/simple" }
@@ -1043,7 +1019,7 @@ requires-dist = [
     { name = "tensorstore", specifier = ">=0.1.85" },
     { name = "tifffile", specifier = ">=2026.5.2" },
     { name = "torch", marker = "extra == 'torch'" },
-    { name = "wsidata", specifier = ">=0.11.0" },
+    { name = "wsidata", specifier = ">=0.12,<0.13" },
     { name = "zarr", specifier = ">=3.0" },
 ]
 provides-extras = ["torch"]
@@ -1786,31 +1762,33 @@ wheels = [
 
 [[package]]
 name = "lazyslide"
-version = "0.12.0"
+version = "0.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "cyclopts" },
+    { name = "huggingface-hub" },
     { name = "lazyslide-models" },
     { name = "legendkit" },
     { name = "matplotlib" },
     { name = "matplotlib-scalebar" },
+    { name = "numba" },
     { name = "psutil" },
     { name = "rich" },
     { name = "scikit-image" },
     { name = "scikit-learn" },
+    { name = "scipy" },
     { name = "seaborn" },
-    { name = "timm" },
     { name = "torch" },
+    { name = "torchvision" },
     { name = "wsidata" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/9a/09/1d8d18e6cd056c585d9534a94d067390f6edfb8a725315d11f8fb5eb360c/lazyslide-0.12.0.tar.gz", hash = "sha256:e990fb8b35dbec7f936010fbc2f3c0fb489a7cf6d48721a5c42313937ad1b845", size = 104001, upload-time = "2026-06-22T11:46:32.5Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/ab/7e/5843a69fc48ac268926b223ba91e624180a2e95a1f5a3bcdcdd36ccc8939/lazyslide-0.13.0.tar.gz", hash = "sha256:3f6e1693412d0b18910525b9056eb650f4c16ff7a03c293d00527d1dd137e609", size = 112664, upload-time = "2026-10-02T15:21:39.963Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9b/fa/4245bcb55c950a3f3b986473b3aecd243244c93ebb770cad7761d9d498ab/lazyslide-0.12.0-py3-none-any.whl", hash = "sha256:74e2467fa4aaa42f11f008eafd75473612bd3bf8e88b598bb7fe23322bc11ede", size = 131892, upload-time = "2026-06-22T11:46:31.335Z" },
+    { url = "https://files.pythonhosted.org/packages/0b/db/19d9fbdf3d7d49f69d37b898530a6075a6edee7036ac3f81eb85745f1ad1/lazyslide-0.13.0-py3-none-any.whl", hash = "sha256:eaeead6f2db81dddc17c81b96c99d99518e59c9950c659ffecf040e578fb196a", size = 142378, upload-time = "2026-10-02T15:21:38.465Z" },
 ]
 
 [[package]]
 name = "lazyslide-models"
-version = "0.0.4"
+version = "0.1.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "numpy" },
@@ -1823,9 +1801,9 @@ dependencies = [
     { name = "torch" },
     { name = "transformers" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/90/78/5470c95347ebc7dec8c4f433da86dfb5d2302c6b6470e95391c15e2f24a2/lazyslide_models-0.0.4.tar.gz", hash = "sha256:b5e98cc90969e3e247a2c40b5eb0c7425707b8310775f9f9da1f40f70194cf20", size = 247831, upload-time = "2026-06-19T11:57:39.272Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f4/c9/da376f4a6d00a0c7c42b2453b1374a53d572581b264aaf06724249067656/lazyslide_models-0.1.0.tar.gz", hash = "sha256:9858fb596cad11d58461f052c5c18edefafd777177cf4093569872319d2e3447", size = 394358, upload-time = "2026-10-01T15:13:47.707Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/2b/87/63dece1bb281945fb965f4dec106972dd3be4fced40b3d28bd9936ed6473/lazyslide_models-0.0.4-py3-none-any.whl", hash = "sha256:d16e94e882c791772626bb7489ff44ce06d6edc20b40b814b0701bfa378cfae9", size = 85712, upload-time = "2026-06-19T11:57:38.243Z" },
+    { url = "https://files.pythonhosted.org/packages/3c/4d/171898e503d48920f3074dc209abae79d8fea0f0fb8da478e090a2378ff1/lazyslide_models-0.1.0-py3-none-any.whl", hash = "sha256:4a4f88c04c6502b7336171822263d617c235bffa49b0b67432ef3da603f0fc2d", size = 132937, upload-time = "2026-10-01T15:13:46.73Z" },
 ]
 
 [[package]]
@@ -2148,7 +2126,7 @@ wheels = [
 
 [[package]]
 name = "mesoslide"
-version = "0.15.0"
+version = "0.16.0"
 source = { editable = "." }
 dependencies = [
     { name = "ezslide" },
@@ -2159,6 +2137,8 @@ dependencies = [
     { name = "spatialdata" },
     { name = "spatialdata-plot" },
     { name = "tifffile" },
+    { name = "timm" },
+    { name = "wsidata" },
     { name = "zarr" },
 ]
 
@@ -2182,8 +2162,8 @@ dev = [
 requires-dist = [
     { name = "cuml-cu13", marker = "extra == 'gpu-kmeans'", specifier = ">=26.8" },
     { name = "ezslide", editable = "/n/scratch/users/z/ziz531/ezslide" },
-    { name = "lazyslide", specifier = ">=0.12.0" },
-    { name = "lazyslide-models", specifier = ">=0.0.4" },
+    { name = "lazyslide", specifier = ">=0.13.0,<0.14" },
+    { name = "lazyslide-models", specifier = ">=0.1.0,<0.2" },
     { name = "numba", marker = "extra == 'gpu-kmeans'", specifier = "==0.64.0" },
     { name = "numpy", marker = "extra == 'gpu-kmeans'", specifier = "<2.5" },
     { name = "reportlab", specifier = ">=5.0.1" },
@@ -2191,6 +2171,8 @@ requires-dist = [
     { name = "spatialdata", specifier = ">=0.8" },
     { name = "spatialdata-plot" },
     { name = "tifffile", specifier = ">=2025.5.21" },
+    { name = "timm" },
+    { name = "wsidata", specifier = ">=0.12,<0.13" },
     { name = "zarr", specifier = ">=3.0" },
 ]
 provides-extras = ["gpu-kmeans"]
@@ -4037,19 +4019,6 @@ wheels = [
 ]
 
 [[package]]
-name = "rich-rst"
-version = "2.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pygments" },
-    { name = "rich" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/e2/d6/d0b9fafc73b65767200da027acab1db1bdb1048f4fea5ebf659df01c700e/rich_rst-2.1.0.tar.gz", hash = "sha256:f4d117b49697f338769759fa5cacf5197da4888b347b9fda2e50aef5cd8d93bd", size = 302732, upload-time = "2026-07-05T02:59:44.308Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/2a/68/1fc93dd759605b5d00fc98b50200739e41ed32bd22d6ba35ca6c3932371b/rich_rst-2.1.0-py3-none-any.whl", hash = "sha256:7ecd1343ee12c879d0e7ae74c3eb6d263b023d2929c6d114212eb1fd91057255", size = 272987, upload-time = "2026-07-05T02:59:42.792Z" },
-]
-
-[[package]]
 name = "rmm-cu13"
 version = "26.8.0"
 source = { registry = "https://pypi.org/simple" }
@@ -5061,7 +5030,7 @@ wheels = [
 
 [[package]]
 name = "wsidata"
-version = "0.11.0"
+version = "0.12.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "opencv-python-headless" },
@@ -5071,9 +5040,9 @@ dependencies = [
     { name = "spatialdata" },
     { name = "torch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fa/cc/5e9547c6f6b91d1c6007e9a5ca325d1549647e8c879414e58341c62a5eca/wsidata-0.11.0.tar.gz", hash = "sha256:1e0ee87650f0fddb71101fdbe7d5995a0421113e524296b888b0753b8aacd922", size = 62001, upload-time = "2026-07-28T09:10:37.602Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/f8/c4/649244ba369b335e7006dfdbe18a380fd2f8e87cb17399ecb1fca8590763/wsidata-0.12.0.tar.gz", hash = "sha256:d92375c8f727d6e687042a11fee3066cc05176d6456bd59c40b13226026658d2", size = 63366, upload-time = "2026-10-01T11:24:49.272Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/82/3a/99cf3b34c482983740de5075e9bf980226432444e8a937959c3e682c68c7/wsidata-0.11.0-py3-none-any.whl", hash = "sha256:0ae3c8fc56a4e27dcfe1c2215a018fb9489530ecdc6c232f0a3b61a9e4924f85", size = 83308, upload-time = "2026-07-28T09:10:36.546Z" },
+    { url = "https://files.pythonhosted.org/packages/e7/ea/0558a7af2a841dc724c491e5b4ded61a0fd2676c8ed903842be6e210bc0b/wsidata-0.12.0-py3-none-any.whl", hash = "sha256:d7705c8742b722860b616b2a4a25569a86b51146f07ffebac6873f56857f8d13", size = 84217, upload-time = "2026-10-01T11:24:48.215Z" },
 ]
 
 [[package]]

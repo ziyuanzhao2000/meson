@@ -134,6 +134,20 @@ _IMAGE_MODELS: dict = {
     "uni2": ("UNI2", True),
     "virchow": ("Virchow", True),
     "virchow2": ("Virchow2", True),
+    # Added in lazyslide-models 0.1.0.
+    "conceptclip": ("ConceptCLIP", False),
+    "conch-madeleine": ("CONCHMadeleine", False),
+    "keep": ("KEEP", False),
+    "crisp": ("CRISP", True),
+    "crown": ("CROWN", True),
+    "gigapath-flash": ("GigaPathFlash", True),
+    "lunit-dino-s8-moozy": ("LunitDINOPatch8Moozy", True),
+    "mstar": ("MSTAR", True),
+    "mascaret": ("Mascaret", False),
+    "phaet": ("Phaet", False),
+    "rudolfv2": ("RudolfV2", False),
+    "rudolfv2-b": ("RudolfV2B", False),
+    "rudolfv2-s": ("RudolfV2S", False),
 }
 
 
@@ -268,13 +282,21 @@ class ImageModelStage:
         return self
 
     def provenance(self) -> dict:
-        return {
+        from ._timm_transform_patch import PAPER_RECIPE_MODELS
+
+        record = {
             "stage": type(self).__name__,
             "model_name": self.model_name,
             "dense": self.dense,
             "input_kind": self.input_kind,
             "output_kind": self.output_kind,
         }
+        # Encoders other than UNI/UNI2 switched to lazyslide-models' upstream
+        # preprocessing in mesoslide 0.16, so caches written before then differ.
+        # UNI/UNI2 keep the paper recipe and their unchanged record.
+        if self.model_name not in PAPER_RECIPE_MODELS:
+            record["transform"] = "lazyslide-models"
+        return record
 
     def _prepare(self, image_batch: torch.Tensor) -> torch.Tensor:
         """Move the model to `device` once, then apply the model's own transform."""

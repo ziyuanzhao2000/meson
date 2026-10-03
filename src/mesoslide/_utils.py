@@ -165,26 +165,69 @@ def get_scaling_factor(image: "DataTree | DataArray", level=-1):
         return np.array(base_shape[1:]) / np.array(level_shape[1:])
 
 
+def _rmtree_with_retry(path: Path, attempts: int = 5, delay: float = 1.0) -> bool:
+    """Delete `path`; retry, since network filesystems can briefly report a directory as not empty."""
+    import time
+
+    for i in range(attempts):
+        try:
+            shutil.rmtree(path)
+            return True
+        except FileNotFoundError:
+            return True
+        except OSError:
+            if i == attempts - 1:
+                return False
+            time.sleep(delay)
+    return False
+
+
 def overwrite_element(sdata, name) -> None:
-    """Rewrite an element in place: stage a copy, drop the original, move it back."""
+    """Rewrite an element of a backed SpatialData without ever leaving it missing on disk.
+
+    `sdata.write_element(name, overwrite=True)` deletes the element's directory
+    before writing the new one, so a failed delete or write (e.g. a network
+    filesystem reporting "Directory not empty") leaves no element at all. Here
+    the new element is first written completely under a temporary name, then
+    swapped in by two directory renames, and the old copy is deleted last.
+    """
+    import os
+    import warnings
+
     if sdata.path is None:
         raise ValueError("sdata.path must be set (e.g., via sdata.write(path)) before overwriting.")
+    element = sdata[name]
+    final = Path(sdata.path) / sdata.locate_element(element)[0]
     tmp_name = f"{name}__tmp_overwrite"
-    new_element = sdata[name]
-    sdata[tmp_name] = new_element
-    sdata.write_element(tmp_name)
-    group_path = Path(sdata.path) / sdata.locate_element(sdata[name])[0]
-    del sdata[name]
+    tmp = final.with_name(tmp_name)
+    old = final.with_name(f"{name}__old_overwrite")
+    if not final.exists() and old.exists():
+        os.replace(old, final)  # an earlier overwrite stopped between its two renames
+    if not final.exists():
+        sdata.write_element(name)
+        return
+    for leftover in (tmp, old):  # from an earlier interrupted overwrite; `final` is intact
+        if leftover.exists() and not _rmtree_with_retry(leftover):
+            raise OSError(f"Cannot remove leftover {leftover} from an earlier overwrite.")
 
-    if group_path.exists():
-        shutil.rmtree(group_path)
-    else:
-        raise FileNotFoundError(f"Expected Zarr group for element '{name}' not found at {group_path}")
+    sdata[tmp_name] = element
+    try:
+        sdata.write_element(tmp_name)
+    finally:
+        del sdata[tmp_name]
 
-    tmp_path = Path(sdata.path) / sdata.locate_element(sdata[tmp_name])[0]
-    shutil.move(str(tmp_path), str(group_path))
-    sdata[name] = new_element
-    del sdata[tmp_name]
+    os.replace(final, old)
+    try:
+        os.replace(tmp, final)
+    except OSError:
+        os.replace(old, final)
+        raise
+    if not _rmtree_with_retry(old):
+        warnings.warn(f"Wrote {final}, but could not delete the previous copy at {old}; delete it manually.",
+                      stacklevel=2)
+    if sdata.has_consolidated_metadata():
+        sdata.write_consolidated_metadata()
+
 
 ### Code written by Soheil (Soheil_RastgouTalemi@hms.harvard.edu)
 def xml2csv(xml_file_path):
