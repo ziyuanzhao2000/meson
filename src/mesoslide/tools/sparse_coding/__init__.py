@@ -1,7 +1,8 @@
 """Sparse coding of patch embeddings.
 
 Sparse-coding models (`SparseAutoencoder`, `MatchingPursuitSAE`,
-`LocalityConstrainedCoding`, `MiniBatchDictionaryCoding`) share
+`LocalityConstrainedCoding`, `MiniBatchDictionaryCoding`), and the soft-clustering
+baseline `FuzzyCMeans` (dense memberships), share
 one fitted interface, which `feature_scorer`, `feature_extraction(sparse=True)`
 and `fit_token_clusterer(scorer=model)` rely on:
 
@@ -20,6 +21,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
         '_mpsae': ['MatchingPursuitDictionary', 'train_mp_sae', 'MatchingPursuitSAE'],
         '_llc': ['LLCModel', 'fit_codebook', 'LocalityConstrainedCoding'],
         '_dictionary_learning': ['MiniBatchDictionaryCoding'],
+        '_fuzzy_cmeans': ['FuzzyCMeans'],
         '_kmeans_backends': ['TorchMiniBatchKMeans', 'fit_kmeans_backend'],
         '_feature_aggregator': ['FeatureGroupAggregator', 'aggregate_feature_groups'],
         '_feature_scorer': ['feature_scorer', 'feature_column_index'],

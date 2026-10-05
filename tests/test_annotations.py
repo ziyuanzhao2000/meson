@@ -109,3 +109,17 @@ class TestLabelTiles:
         reordered_ids = one_slide.tables["tiles_table"].obs["tile_id"].to_numpy()
         assert labels.sum() == 1
         assert reordered_ids[labels][0] == expected_id
+
+
+def test_geojson_crs_is_dropped_so_plots_keep_their_aspect(tmp_path):
+    """GeoJSON declares EPSG:4326; pixel coordinates read as latitude would distort plots."""
+    import matplotlib.pyplot as plt
+
+    path = tmp_path / "ann.geojson"
+    gpd.GeoDataFrame({"name": ["GC1"]}, geometry=[box(30000, 33000, 30100, 33100)], crs="EPSG:4326").to_file(path, driver="GeoJSON")
+    gdf = ms.read_annotations(path)
+    assert gdf.crs is None
+    fig, ax = plt.subplots()
+    gdf.boundary.plot(ax=ax)
+    assert ax.get_aspect() in ("equal", 1.0)
+    plt.close(fig)

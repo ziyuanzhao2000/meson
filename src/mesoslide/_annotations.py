@@ -139,5 +139,8 @@ def read_annotations(
             geom = transform(lambda x, y, z=None: (y, x), geom)
         geom = _polygonal(geom)
         geoms.append(_largest_part(geom) if largest_component else geom)
-    gdf = gdf.set_geometry(gpd.GeoSeries(geoms, index=gdf.index))
+    # Coordinates are slide pixels. Drop any CRS the file declares (GeoJSON defaults to
+    # EPSG:4326): geopandas would treat y as latitude and distort the aspect when plotting.
+    gdf = gdf.set_geometry(gpd.GeoSeries(geoms, index=gdf.index, crs=None), crs=None)
+    gdf = gdf.set_crs(None, allow_override=True)
     return gdf[gdf.geometry.notna()].reset_index(drop=True)
