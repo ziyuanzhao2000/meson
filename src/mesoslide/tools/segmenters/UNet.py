@@ -5,7 +5,9 @@ from torch.optim import lr_scheduler
 import torch
 import cv2 
 import os
+import numpy as np
 import zarr
+from skimage.morphology import remove_small_holes, remove_small_objects
 from tqdm.auto import tqdm
 
 def preprocess_datasets(images, labels=None, positive_class_idx=[0], target_size=448, smooth_size=31, cleanup=0):
@@ -52,45 +54,25 @@ def save_segmentation_data_to_zarr(images_array, masks_array, output_dir):
     assert images_array.shape[2:] == masks_array.shape[2:], "Image and mask spatial dimensions must match"
     
     # Create the zarr store
-    os.makedirs(os.path.dirname(output_dir), exist_ok=True)
-    store = zarr.DirectoryStore(output_dir)
-    root = zarr.group(store=store)
-    
-    # Extract dimensions
+    os.makedirs(os.path.dirname(output_dir) or ".", exist_ok=True)
+    root = zarr.open_group(output_dir, mode="w")
+
     N, C, H, W = images_array.shape
-    
-    # Create datasets with appropriate chunking
-    images = root.create_dataset(
-        'images',
-        shape=images_array.shape,
-        chunks=(1, C, H, W),  # One full image per chunk
-        dtype=images_array.dtype,
-        # compressor=zarr.Blosc(cname='zstd')
-    )
-    
-    masks = root.create_dataset(
-        'masks',
-        shape=masks_array.shape,
-        chunks=(1, 1, H, W),  # One full mask per chunk
-        dtype=masks_array.dtype,
-        # compressor=zarr.Blosc(cname='zstd')
-    )
-    
-    # Store metadata
-    root.attrs['shape'] = {
-        'images': images_array.shape,
-        'masks': masks_array.shape,
-        'channels': C,
-        'height': H,
-        'width': W,
-        'samples': N
+    images = root.create_array("images", shape=images_array.shape, chunks=(1, C, H, W),
+                               dtype=images_array.dtype)
+    masks = root.create_array("masks", shape=masks_array.shape, chunks=(1, 1, H, W),
+                              dtype=masks_array.dtype)
+    root.attrs["shape"] = {
+        "images": list(images_array.shape),
+        "masks": list(masks_array.shape),
+        "channels": C,
+        "height": H,
+        "width": W,
+        "samples": N,
     }
-    
-    # Write data
-    for i in tqdm(range(len(images_array))):
-        images[i] = images_array[i]
-        masks[i] = masks_array[i]
-    
+    images[:] = images_array
+    masks[:] = masks_array
+
     print(f"Successfully saved {N} image-mask pairs to {output_dir}")
     return root
 
@@ -140,8 +122,27 @@ class ZarrSegmentationDataset(Dataset):
         
         return torch.as_tensor(image), torch.as_tensor(mask)
 class GenericSegmenter(pl.LightningModule):
-    def __init__(self, arch, encoder_name, in_channels, out_classes, **kwargs):
+    """smp segmentation model (e.g. UNet) for binary masks, trained with Adam and a per-step cosine schedule.
+
+    Parameters
+    ----------
+    arch, encoder_name, in_channels, out_classes
+        Passed to `smp.create_model`, with any other keyword arguments (e.g. encoder_weights).
+    loss : {"dice", "symmetric_dice"}, default "dice"
+        "dice": Dice loss on logits. "symmetric_dice": 0.5 * (Dice(p, y) + Dice(1 - p, 1 - y)) on sigmoid
+        probabilities p, which also scores the background, so batches without positive pixels still contribute.
+    t_max : int, default 100
+        Steps of the cosine learning-rate schedule (epochs x steps per epoch). `T_max` is accepted as an alias.
+    mean, std : sequence, optional
+        Input standardization; defaults to the encoder's ImageNet statistics.
+    """
+
+    def __init__(self, arch, encoder_name, in_channels, out_classes, *, loss="dice", t_max=None,
+                 mean=None, std=None, **kwargs):
         super().__init__()
+        if loss not in ("dice", "symmetric_dice"):
+            raise ValueError(f"loss must be 'dice' or 'symmetric_dice', got {loss!r}")
+        t_max = kwargs.pop("T_max", 100) if t_max is None else t_max
         self.model = smp.create_model(
             arch,
             encoder_name=encoder_name,
@@ -149,39 +150,30 @@ class GenericSegmenter(pl.LightningModule):
             classes=out_classes,
             **kwargs,
         )
-        # preprocessing parameteres for image
         params = smp.encoders.get_preprocessing_params(encoder_name)
-        
-        # Check if user provided custom stats in kwargs, otherwise adapt ImageNet stats
-        dataset_mean = kwargs.pop("mean", None)
-        dataset_std = kwargs.pop("std", None)
-
-        if dataset_mean is not None and dataset_std is not None:
-            mean = dataset_mean
-            std = dataset_std
+        if mean is not None and std is not None:
+            pass
         elif in_channels == 3:
             mean = params["mean"]
             std = params["std"]
         else:
-            # Fallback: Average the 3 ImageNet channels and repeat for 'in_channels'
-            avg_mean = sum(params["mean"]) / len(params["mean"])
-            avg_std = sum(params["std"]) / len(params["std"])
-            mean = [avg_mean] * in_channels
-            std = [avg_std] * in_channels
+            # Average the 3 ImageNet channels and repeat for 'in_channels'
+            mean = [sum(params["mean"]) / len(params["mean"])] * in_channels
+            std = [sum(params["std"]) / len(params["std"])] * in_channels
 
-        print(len(mean), len(std))
         # Dynamically set the view to match in_channels instead of hardcoding 3
         self.register_buffer("std", torch.tensor(std).view(1, in_channels, 1, 1).float())
         self.register_buffer("mean", torch.tensor(mean).view(1, in_channels, 1, 1).float())
         
-        # for image segmentation dice loss could be the best first choice
-        self.loss_fn = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=True)
+        self.loss = loss
+        self.loss_fn = smp.losses.DiceLoss(smp.losses.BINARY_MODE, from_logits=(loss == "dice"))
 
         # initialize step metics
         self.training_step_outputs = []
         self.validation_step_outputs = []
         self.test_step_outputs = []
-        self.T_max = kwargs.get('T_max', 100)
+        self.T_max = t_max
+
     def forward(self, image):
         # normalize image here
         image = (image - self.mean) / self.std
@@ -211,15 +203,13 @@ class GenericSegmenter(pl.LightningModule):
         # Check that mask values in between 0 and 1, NOT 0 and 255 for binary segmentation
         assert mask.max() <= 1.0 and mask.min() >= 0
 
-        logits_mask = self.forward(image)
-
-        # Predicted mask contains logits, and loss_fn param `from_logits` is set to True
-        loss = self.loss_fn(logits_mask, mask)
-
-        # Lets compute metrics for some threshold
-        # first convert mask values to probabilities, then
-        # apply thresholding
+        logits_mask = self.forward(image.float())
         prob_mask = logits_mask.sigmoid()
+        if self.loss == "symmetric_dice":
+            loss = 0.5 * (self.loss_fn(prob_mask, mask) + self.loss_fn(1 - prob_mask, 1 - mask))
+        else:
+            loss = self.loss_fn(logits_mask, mask)
+
         pred_mask = (prob_mask > 0.5).float()
 
         # We will compute IoU metric by two ways

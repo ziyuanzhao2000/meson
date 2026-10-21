@@ -1,6 +1,6 @@
 [project]
 name = "mesoslide"
-version = "0.17.0"
+version = "0.19.0"
 description = "A package for mesoscale tissue analysis using multiomics data"
 authors = [{ name = "Ziyuan Zhao", email = "ziyuanzhao@fas.harvard.edu" }]
 readme = "README.md"
@@ -35,6 +35,8 @@ dependencies = [
 #     numpy 2.0; a later stable numba release restored compatibility). Pinning the
 #     latest *stable* release inside cuml's allowed window avoids both problems.
 gpu-kmeans = ["cuml-cu13>=26.8", "numpy<2.5", "numba==0.64.0"]
+# U-Net training and inference (mesoslide.tools.segmenters.UNet).
+segmentation = ["pytorch-lightning>=2.5", "segmentation-models-pytorch>=0.4"]
 
 [project.scripts]
 tissue-seg = "mesoslide.cli.tissue_seg:main"
