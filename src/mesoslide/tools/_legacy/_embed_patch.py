@@ -36,7 +36,7 @@ def _get_embedder(sdata, embedder_name: str, token=None):
         from mesoslide.tools.embedders._legacy import UNI2Embedder
         return UNI2Embedder(token=token), "Vision"
     elif embedder_name in ["kmeans", "KMeans", "FrequencyRankedKMeans"]:
-        from mesoslide.tools.embedders._legacy import FrequencyRankedKMeans
+        from mesoslide.tools.sparse_coding import FrequencyRankedKMeans
         for model_info in sdata.attrs['models_metadata']:
             model_name = model_info['name']
             if embedder_name == model_name:

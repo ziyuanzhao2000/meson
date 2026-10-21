@@ -5,7 +5,8 @@ Model instantiation is now delegated to `lazyslide_models.MODEL_REGISTRY`
 maintained here.
 The classes previously defined in this package (`UNIEmbedder`,
 `UNI2Embedder`, `Virchow2Embedder`, `TestEmbedder`, `SparseAutoencoder`,
-`FrequencyRankedKMeans`) have moved to `mesoslide.tools.embedders._legacy`.
+`FrequencyRankedKMeans`) have moved to `mesoslide.tools.embedders._legacy`
+(`FrequencyRankedKMeans` is now `mesoslide.tools.sparse_coding.FrequencyRankedKMeans`).
 The current sparse-coding models (`SparseAutoencoder`, `LocalityConstrainedCoding`,
 `MiniBatchDictionaryCoding`) live in `mesoslide.tools.sparse_coding`.
 """

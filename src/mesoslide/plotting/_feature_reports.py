@@ -168,6 +168,7 @@ def create_feature_report(
     image_dpi: int = 300,
     margin_dots: int = 150,
     progress_bar: bool = True,
+    patches=None,
 ) -> Optional[io.BytesIO]:
     """
     Create a one-page PDF report for one feature: a patch gallery (top) and
@@ -233,6 +234,12 @@ def create_feature_report(
     margin_dots : int, default=150
         Margin size in dots/pixels.
     progress_bar : bool, default=True
+    patches : PatchData, optional
+        Patches for the top panel, e.g. from
+        :func:`mesoslide.select_patches_for_binary_feature` for a cluster
+        indicator. If None, they are selected with
+        :func:`mesoslide.select_top_patches` (``top_fraction``,
+        ``gallery_nrows * patches_per_row``).
 
     Returns
     -------
@@ -276,10 +283,11 @@ def create_feature_report(
     available_width = page_width_dots - 2 * margin_dots
     available_height = page_height_dots - 2 * margin_dots 
     middle_gap = 0
-    patches = select_top_patches(
-        slides, feature_name,
-        n=gallery_nrows * patches_per_row, top_fraction=top_fraction, tile_key=tile_key,
-    )
+    if patches is None:
+        patches = select_top_patches(
+            slides, feature_name,
+            n=gallery_nrows * patches_per_row, top_fraction=top_fraction, tile_key=tile_key,
+        )
     n_patches = len(patches.obs)
     top_buf = plot_patch_gallery(
         patches, slides=slides,

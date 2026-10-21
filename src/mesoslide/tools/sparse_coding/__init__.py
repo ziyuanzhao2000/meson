@@ -23,6 +23,7 @@ __getattr__, __dir__, __all__ = lazy.attach(
         '_dictionary_learning': ['MiniBatchDictionaryCoding'],
         '_fuzzy_cmeans': ['FuzzyCMeans'],
         '_kmeans_backends': ['TorchMiniBatchKMeans', 'fit_kmeans_backend'],
+        '_frequency_ranked_kmeans': ['FrequencyRankedKMeans'],
         '_feature_aggregator': ['FeatureGroupAggregator', 'aggregate_feature_groups'],
         '_feature_scorer': ['feature_scorer', 'feature_column_index'],
     }

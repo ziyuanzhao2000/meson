@@ -302,6 +302,22 @@ class TestCreateFeaturePdf:
         assert buf.getvalue()[:4] == b"%PDF"
         assert not any(tmp_path.iterdir())  # nothing written anywhere
 
+    def test_explicit_patches_skip_top_selection(self, manifest, open_cohort, tmp_path, monkeypatch):
+        from mesoslide.plotting import _feature_reports as mod
+
+        def fail(*args, **kwargs):
+            raise AssertionError("select_top_patches should not be called when patches= is given")
+
+        monkeypatch.setattr(mod, "select_top_patches", fail)
+        patches = ms.select_random_patches(open_cohort, n=3, random_state=0)
+        out = tmp_path / "report.pdf"
+        ms.plotting.create_feature_report(
+            open_cohort, "score", output_path=str(out), patches=patches,
+            patches_per_row=3, ncols=2, figsize_per_image=(3, 2), image_dpi=40,
+            margin_dots=10, progress_bar=False,
+        )
+        assert out.read_bytes()[:4] == b"%PDF"
+
 
 class TestFeatureClustererGallery:
     """FeatureClusterer.select_exemplars + plot_feature_gallery."""

@@ -10,3 +10,5 @@ build/
 notebooks/
 **/_legacy
 scripts/
+.venv/
+.venv.bak*/
